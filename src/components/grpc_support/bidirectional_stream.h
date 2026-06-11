@@ -62,6 +62,11 @@ class BidirectionalStream : public net::BidirectionalStream::Delegate {
     virtual void OnFailed(int error) = 0;
 
     virtual void OnCanceled() = 0;
+
+    // cronet-reality: HTTP/3 datagram received (RFC 9298 context-id=0
+    // payloads are surfaced; other context-ids are dropped in the QUIC
+    // impl). Caller does NOT own |data|; copy if needed.
+    virtual void OnDatagramReceived(const char* data, int size) {}
   };
 
   BidirectionalStream(net::URLRequestContextGetter* request_context_getter,
@@ -94,6 +99,24 @@ class BidirectionalStream : public net::BidirectionalStream::Delegate {
             const char* method,
             const net::HttpRequestHeaders& headers,
             bool end_of_stream);
+
+  // cronet-reality: like Start but uses HTTP extended-CONNECT
+  // (RFC 8441 / 9298). Passes |ext_protocol| as the :protocol pseudo-
+  // header. method MUST be "CONNECT". end_of_stream is forced false
+  // (extended-CONNECT keeps the stream open for the tunneled protocol).
+  int StartExtendedConnect(const char* url,
+                           int priority,
+                           const char* ext_protocol,
+                           const net::HttpRequestHeaders& headers);
+
+  // cronet-reality: send an HTTP/3 datagram on this stream. Valid only
+  // after OnStreamReady AND only on QUIC (h3) streams. Returns 0 on
+  // success, negative net error code on failure. After a successful
+  // StartExtendedConnect with "connect-udp" you should also call
+  // RegisterDatagramVisitor() to start receiving datagrams.
+  int SendDatagram(const char* data, int size);
+  void RegisterDatagramVisitor();
+  void UnregisterDatagramVisitor();
 
   // Reads more data into |buffer| up to |capacity| bytes.
   bool ReadData(char* buffer, int capacity);
@@ -188,6 +211,7 @@ class BidirectionalStream : public net::BidirectionalStream::Delegate {
   void OnDataSent() override;
   void OnTrailersReceived(const quiche::HttpHeaderBlock& trailers) override;
   void OnFailed(int error) override;
+  void OnHttp3DatagramReceived(base::span<const uint8_t> payload) override;
   // Helper method to derive OnSucceeded.
   void MaybeOnSucceded();
 

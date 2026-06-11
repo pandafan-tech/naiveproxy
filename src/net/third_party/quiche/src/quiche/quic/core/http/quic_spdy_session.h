@@ -402,6 +402,13 @@ class QUICHE_EXPORT QuicSpdySession
     return http_datagram_support_;
   }
 
+  // cronet-reality: Chromium's proxy CONNECT-UDP stream can observe the peer
+  // H3_DATAGRAM SETTINGS as unavailable even after the server accepted the
+  // extended CONNECT. For that path, enable the locally supported H3 datagram
+  // mode so SendHttp3Datagram and OnDatagramReceived use the normal RFC 9297
+  // encoder/decoder instead of silently dropping datagrams.
+  void EnableH3DatagramForConnectUdp();
+
   // This must not be used except by QuicSpdyStream::SendHttp3Datagram.
   DatagramStatus SendHttp3Datagram(QuicStreamId stream_id,
                                    absl::string_view payload);

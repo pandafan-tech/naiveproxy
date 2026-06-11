@@ -119,6 +119,15 @@ typedef struct bidirectional_stream_callback {
    * methods will be invoked.
    */
   void (*on_canceled)(bidirectional_stream* stream);
+
+  /* cronet-reality: invoked when an HTTP/3 datagram is received on this
+   * stream (RFC 9297 / RFC 9298). |data| is the raw payload AFTER the
+   * RFC 9298 context-id has been stripped (the QUIC layer only surfaces
+   * context-id=0 datagrams; others are dropped). Optional: leave NULL if
+   * datagrams aren't needed. Valid only on h3/connect-udp streams. */
+  void (*on_datagram_received)(bidirectional_stream* stream,
+                               const char* data,
+                               int size);
 } bidirectional_stream_callback;
 
 /* Creates a new stream object that uses |engine| and |callback|. All stream
@@ -180,6 +189,43 @@ int bidirectional_stream_start(bidirectional_stream* stream,
                                const char* method,
                                const bidirectional_stream_header_array* headers,
                                bool end_of_stream);
+
+/* cronet-reality: starts the stream as an HTTP extended CONNECT request
+ * (RFC 8441 for HTTP/2, RFC 9298 for HTTP/3). |ext_protocol| is the
+ * :protocol pseudo-header value. Common: "websocket" (h2 or h3),
+ * "connect-udp" (h3 only). method is forced to "CONNECT" internally;
+ * end_of_stream is forced false. Returns 0 on success.
+ */
+GRPC_SUPPORT_EXPORT
+int bidirectional_stream_start_connect(
+    bidirectional_stream* stream,
+    const char* url,
+    int priority,
+    const char* ext_protocol,
+    const bidirectional_stream_header_array* headers);
+
+/* cronet-reality: send one HTTP/3 datagram (RFC 9297). For CONNECT-UDP
+ * |data| is the raw UDP packet body (context-id=0 prefix added by the
+ * QUIC layer). Returns 0 on success, negative net error code on
+ * failure. Valid only after on_response_headers_received fires on an h3
+ * extended-CONNECT stream + bidirectional_stream_register_datagram_visitor()
+ * was called.
+ */
+GRPC_SUPPORT_EXPORT
+int bidirectional_stream_send_datagram(bidirectional_stream* stream,
+                                       const char* data,
+                                       int size);
+
+/* cronet-reality: enable / disable receiving HTTP/3 datagrams on this
+ * stream. After register, on_datagram_received fires for each incoming
+ * datagram. No-op on non-h3 streams.
+ */
+GRPC_SUPPORT_EXPORT
+void bidirectional_stream_register_datagram_visitor(
+    bidirectional_stream* stream);
+GRPC_SUPPORT_EXPORT
+void bidirectional_stream_unregister_datagram_visitor(
+    bidirectional_stream* stream);
 
 /* Reads response data into |buffer| of |capacity| length. Must only be called
  * at most once in response to each invocation of the

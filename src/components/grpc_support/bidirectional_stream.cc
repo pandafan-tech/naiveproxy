@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
+#include "base/synchronization/waitable_event.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "net/base/http_user_agent_settings.h"
@@ -162,6 +164,88 @@ void BidirectionalStream::Cancel() {
       base::BindOnce(&BidirectionalStream::CancelOnNetworkThread, weak_this_));
 }
 
+// cronet-reality: extended-CONNECT + datagram methods.
+int BidirectionalStream::StartExtendedConnect(
+    const char* url,
+    int priority,
+    const char* ext_protocol,
+    const net::HttpRequestHeaders& headers) {
+  std::unique_ptr<net::BidirectionalStreamRequestInfo> request_info(
+      new net::BidirectionalStreamRequestInfo());
+  request_info->url = GURL(url);
+  request_info->priority = static_cast<net::RequestPriority>(priority);
+  request_info->method = "CONNECT";
+  request_info->extra_headers = headers;
+  request_info->end_stream_on_headers = false;
+  request_info->extended_connect_protocol = ext_protocol ? ext_protocol : "";
+  write_end_of_stream_ = false;
+  PostToNetworkThread(FROM_HERE,
+                      base::BindOnce(&BidirectionalStream::StartOnNetworkThread,
+                                     weak_this_, std::move(request_info)));
+  return 0;
+}
+
+int BidirectionalStream::SendDatagram(const char* data, int size) {
+  if (size < 0) {
+    return net::ERR_INVALID_ARGUMENT;
+  }
+  if (size > 0 && data == nullptr) {
+    return net::ERR_INVALID_ARGUMENT;
+  }
+  // bidi_stream_ lives on the network thread. The cronet-reality
+  // patches let callers send H3 datagrams from any thread (cronet-go's
+  // application thread, typically), so we must marshal the call onto
+  // the network thread the same way Start() and WriteData() do.
+  //
+  // Keep the C API synchronous: callers may close the PacketConn immediately
+  // after WriteTo returns, so a pure post-and-return can cancel the stream
+  // before the datagram is queued.
+  std::vector<uint8_t> payload;
+  if (size > 0) {
+    std::string_view payload_view(data, static_cast<size_t>(size));
+    payload.assign(payload_view.begin(), payload_view.end());
+  }
+  if (IsOnNetworkThread()) {
+    if (!bidi_stream_) {
+      return net::ERR_FAILED;
+    }
+    return bidi_stream_->SendHttp3Datagram(base::span(payload));
+  }
+  base::WaitableEvent done;
+  int result = net::ERR_FAILED;
+  PostToNetworkThread(
+      FROM_HERE,
+      base::BindOnce(
+          [](base::WeakPtr<BidirectionalStream> self,
+             std::vector<uint8_t> payload,
+             int* result,
+             base::WaitableEvent* done) {
+            if (!self || !self->bidi_stream_) {
+              *result = net::ERR_FAILED;
+              done->Signal();
+              return;
+            }
+            *result = self->bidi_stream_->SendHttp3Datagram(
+                base::span(payload));
+            done->Signal();
+          },
+          weak_this_, std::move(payload), &result, &done));
+  done.Wait();
+  return result;
+}
+
+void BidirectionalStream::RegisterDatagramVisitor() {
+  if (bidi_stream_) {
+    bidi_stream_->RegisterHttp3DatagramVisitor();
+  }
+}
+
+void BidirectionalStream::UnregisterDatagramVisitor() {
+  if (bidi_stream_) {
+    bidi_stream_->UnregisterHttp3DatagramVisitor();
+  }
+}
+
 void BidirectionalStream::OnStreamReady(bool request_headers_sent) {
   DCHECK(IsOnNetworkThread());
   DCHECK_EQ(STARTED, write_state_);
@@ -261,6 +345,17 @@ void BidirectionalStream::OnTrailersReceived(
   if (!bidi_stream_)
     return;
   delegate_->OnTrailersReceived(response_trailers);
+}
+
+void BidirectionalStream::OnHttp3DatagramReceived(
+    base::span<const uint8_t> payload) {
+  DCHECK(IsOnNetworkThread());
+  if (!delegate_) {
+    return;
+  }
+  delegate_->OnDatagramReceived(
+      reinterpret_cast<const char*>(payload.data()),
+      static_cast<int>(payload.size()));
 }
 
 void BidirectionalStream::OnFailed(int error) {
