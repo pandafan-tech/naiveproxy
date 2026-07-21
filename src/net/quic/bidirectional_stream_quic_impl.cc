@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -42,10 +43,84 @@ BidirectionalStreamQuicImpl::BidirectionalStreamQuicImpl(
     : session_(std::move(session)) {}
 
 BidirectionalStreamQuicImpl::~BidirectionalStreamQuicImpl() {
+  // cronet-reality: detach the datagram visitor before tearing down the
+  // stream so the QUIC layer doesn't dispatch into a freed object.
+  if (stream_ && datagram_visitor_registered_) {
+    stream_->UnregisterHttp3DatagramVisitor();
+    datagram_visitor_registered_ = false;
+  }
   if (stream_) {
     delegate_ = nullptr;
     stream_->Reset(quic::QUIC_STREAM_CANCELLED);
   }
+}
+
+// cronet-reality: HTTP/3 datagrams. The QUIC layer already speaks RFC 9297
+// (Quarter Stream ID). We pass the application payload (which for CONNECT-
+// UDP includes the RFC 9298 context-id varint at the head) down to
+// QuicChromiumClientStream which uses SendHttp3Datagram. Note: cronet's
+// WriteConnectUdpPayload helper prepends \0 (context-id=0) automatically;
+// since the cronet C API caller may want to use other context-ids in the
+// future, we use SendHttp3Datagram directly via a small helper.
+int BidirectionalStreamQuicImpl::SendHttp3Datagram(
+    base::span<const uint8_t> payload) {
+  if (!stream_) {
+    return ERR_FAILED;
+  }
+  // QuicChromiumClientStream::Handle exposes WriteConnectUdpPayload which
+  // assumes the caller wants context-id=0. To support arbitrary context-
+  // ids (and to keep the C API minimal), we hand the payload to
+  // WriteConnectUdpPayload but the API contract is: caller must NOT include
+  // the context-id varint in payload (we tell them context-id=0 is the
+  // only one supported for now). Practical effect for connect-udp: caller
+  // passes raw UDP packet, we send it as context-id=0.
+  return stream_->WriteConnectUdpPayload(
+      std::string_view(reinterpret_cast<const char*>(payload.data()),
+                       payload.size()));
+}
+
+void BidirectionalStreamQuicImpl::RegisterHttp3DatagramVisitor() {
+  if (!stream_ || datagram_visitor_registered_) {
+    return;
+  }
+  stream_->RegisterHttp3DatagramVisitor(this);
+  datagram_visitor_registered_ = true;
+}
+
+void BidirectionalStreamQuicImpl::UnregisterHttp3DatagramVisitor() {
+  if (!stream_ || !datagram_visitor_registered_) {
+    return;
+  }
+  stream_->UnregisterHttp3DatagramVisitor();
+  datagram_visitor_registered_ = false;
+}
+
+void BidirectionalStreamQuicImpl::OnHttp3Datagram(
+    quic::QuicStreamId /*stream_id*/,
+    absl::string_view payload) {
+  if (!delegate_) {
+    return;
+  }
+  // RFC 9298 §5: the payload starts with a context-id varint. For
+  // connect-udp the only context-id specified is 0 (raw UDP). We strip it
+  // here so the cronet-go layer + mihomo see only the UDP payload bytes.
+  // If varint > 1 byte (high bits set), drop the datagram per RFC 9298
+  // (unknown context-id MAY be dropped).
+  if (payload.empty()) {
+    return;
+  }
+  // Single-byte varint = context-id 0..63. Multi-byte form has high bits set.
+  uint8_t first = static_cast<uint8_t>(payload[0]);
+  if ((first & 0xc0) != 0) {
+    // Multi-byte varint or unsupported; drop.
+    return;
+  }
+  if (first != 0) {
+    // Unknown context-id (non-zero); RFC 9298 §5 says drop.
+    return;
+  }
+  auto body = base::as_byte_span(payload.substr(1));
+  delegate_->OnHttp3DatagramReceived(body);
 }
 
 void BidirectionalStreamQuicImpl::Start(
@@ -115,8 +190,22 @@ int BidirectionalStreamQuicImpl::WriteHeaders() {
   http_request_info.method = request_info_->method;
   http_request_info.extra_headers = request_info_->extra_headers;
 
-  CreateSpdyHeadersFromHttpRequest(http_request_info, std::nullopt,
-                                   http_request_info.extra_headers, &headers);
+  // cronet-reality: extended CONNECT (RFC 8441 / 9298) path when the
+  // caller set extended_connect_protocol. Routes the request through the
+  // helper that adds :protocol, :scheme, :path correctly. The default-port
+  // authority semantics differ from plain CONNECT (RFC 7230 stripping).
+  if (!request_info_->extended_connect_protocol.empty()) {
+    CHECK_EQ(http_request_info.method, "CONNECT")
+        << "extended_connect_protocol set but method is not CONNECT";
+    CreateSpdyHeadersFromHttpRequestForExtendedConnect(
+        http_request_info, std::nullopt,
+        request_info_->extended_connect_protocol,
+        http_request_info.extra_headers, &headers);
+  } else {
+    CreateSpdyHeadersFromHttpRequest(http_request_info, std::nullopt,
+                                     http_request_info.extra_headers,
+                                     &headers);
+  }
   int rv = stream_->WriteHeaders(std::move(headers),
                                  request_info_->end_stream_on_headers, nullptr);
   if (rv >= 0) {
