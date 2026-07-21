@@ -675,6 +675,10 @@ int SSLClientSocketImpl::Init() {
       !SSL_set_tlsext_host_name(ssl_.get(), host_and_port_.host().c_str())) {
     return ERR_UNEXPECTED;
   }
+  if (!SSL_apply_reality_global_config_for_authority(
+          ssl_.get(), host_and_port_.host().c_str(), host_and_port_.port())) {
+    return ERR_UNEXPECTED;
+  }
 
   const std::vector<uint16_t> supported_groups =
       context_->config().GetSupportedGroups();

@@ -5617,6 +5617,24 @@ OPENSSL_EXPORT int SSL_set_reality_global_config_for_server_name(
     size_t short_id_len,
     const uint8_t client_version[4]);
 
+// SSL_set_reality_global_config_for_authority installs REALITY config for one
+// request authority. Unlike the server-name registry, the port participates in
+// the key so multiple proxy routes using the same cover SNI remain isolated.
+// Passing |public_key|=NULL removes that authority entry.
+OPENSSL_EXPORT int SSL_set_reality_global_config_for_authority(
+    const char *server_name,
+    uint16_t port,
+    const uint8_t public_key[32],
+    const uint8_t *short_id,
+    size_t short_id_len,
+    const uint8_t client_version[4]);
+
+// SSL_apply_reality_global_config_for_authority snapshots an authority entry
+// onto |ssl|. It is called after SSL_new and before the client handshake. A
+// missing entry is a successful no-op so plain TLS routes stay plain.
+OPENSSL_EXPORT int SSL_apply_reality_global_config_for_authority(
+    SSL *ssl, const char *server_name, uint16_t port);
+
 // SSL_reality_is_enabled returns 1 if the given SSL has REALITY configured
 // (either per-SSL via SSL_set_reality_config or via the global config) AND
 // the AuthKey has been derived (i.e., the ClientHello write hook ran).

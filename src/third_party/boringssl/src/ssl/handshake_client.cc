@@ -243,6 +243,17 @@ static CRYPTO_MUTEX g_reality_global_lock = CRYPTO_MUTEX_INIT;
 static RealityGlobalConfig g_reality_global;
 static std::map<std::string, RealityGlobalConfig>
     *g_reality_global_by_server_name = nullptr;
+static std::map<std::string, RealityGlobalConfig>
+    *g_reality_global_by_authority = nullptr;
+
+static std::string reality_authority_key(const char *server_name,
+                                         uint16_t port) {
+  std::string key(server_name);
+  key.push_back('\0');
+  key.push_back(static_cast<char>(port >> 8));
+  key.push_back(static_cast<char>(port));
+  return key;
+}
 
 static void reality_fill_global_config(RealityGlobalConfig *out,
                                        const uint8_t public_key[32],
@@ -303,6 +314,60 @@ extern "C" int SSL_set_reality_global_config_for_server_name(
   }
   CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
   return 1;
+}
+
+extern "C" int SSL_set_reality_global_config_for_authority(
+    const char *server_name,
+    uint16_t port,
+    const uint8_t public_key[32],
+    const uint8_t *short_id,
+    size_t short_id_len,
+    const uint8_t client_version[4]) {
+  if (server_name == nullptr || server_name[0] == '\0' || port == 0 ||
+      short_id_len > 8) {
+    return 0;
+  }
+  CRYPTO_MUTEX_lock_write(&g_reality_global_lock);
+  if (g_reality_global_by_authority == nullptr) {
+    g_reality_global_by_authority =
+        new std::map<std::string, RealityGlobalConfig>();
+  }
+  std::string key = reality_authority_key(server_name, port);
+  if (public_key == nullptr) {
+    g_reality_global_by_authority->erase(key);
+  } else {
+    RealityGlobalConfig cfg;
+    reality_fill_global_config(&cfg, public_key, short_id, short_id_len,
+                               client_version);
+    (*g_reality_global_by_authority)[key] = cfg;
+  }
+  CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
+  return 1;
+}
+
+extern "C" int SSL_apply_reality_global_config_for_authority(
+    SSL *ssl, const char *server_name, uint16_t port) {
+  if (ssl == nullptr || server_name == nullptr || server_name[0] == '\0' ||
+      port == 0) {
+    return 0;
+  }
+  RealityGlobalConfig snap;
+  bool found = false;
+  CRYPTO_MUTEX_lock_read(&g_reality_global_lock);
+  if (g_reality_global_by_authority != nullptr) {
+    auto it = g_reality_global_by_authority->find(
+        reality_authority_key(server_name, port));
+    if (it != g_reality_global_by_authority->end()) {
+      snap = it->second;
+      found = true;
+    }
+  }
+  CRYPTO_MUTEX_unlock_read(&g_reality_global_lock);
+  if (!found) {
+    return 1;
+  }
+  return SSL_set_reality_config(ssl, snap.server_pubkey, snap.short_id,
+                                sizeof(snap.short_id), snap.client_version);
 }
 
 // Snapshot the global config under the read lock so callers don't hold the
@@ -472,52 +537,46 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
       OPENSSL_memcpy(hs->reality_server_pubkey, snap.server_pubkey, 32);
       OPENSSL_memcpy(hs->reality_short_id, snap.short_id, 8);
       OPENSSL_memcpy(hs->reality_client_version, snap.client_version, 4);
-      // NOTE: do NOT install SSL_set_custom_verify here. The Cronet net stack
-      // registers its own custom_verify on the SSL_CTX (see
-      // ssl_client_socket_impl.cc::SSLContext()), which gates additional
-      // bookkeeping in SSLClientSocketImpl::DoHandshakeComplete (server_cert_
-      // population, SSLInfo). Overriding the callback skips that bookkeeping
-      // and CHECK(GetSSLInfo()) fires later. Instead, the net stack patch
-      // calls SSL_reality_is_enabled / SSL_reality_verify_peer_cert from
-      // inside its VerifyCert() function so both paths converge.
-      static const uint16_t kRealityVerifySigalgs[] = {
-          SSL_SIGN_ED25519,
-          SSL_SIGN_ECDSA_SECP256R1_SHA256,
-          SSL_SIGN_ECDSA_SECP384R1_SHA384,
-          SSL_SIGN_RSA_PSS_RSAE_SHA256,
-          SSL_SIGN_RSA_PSS_RSAE_SHA384,
-          SSL_SIGN_RSA_PSS_RSAE_SHA512,
-          SSL_SIGN_RSA_PKCS1_SHA256,
-          SSL_SIGN_RSA_PKCS1_SHA384,
-          SSL_SIGN_RSA_PKCS1_SHA512,
-      };
-      SSL_set_verify_algorithm_prefs(
-          ssl, kRealityVerifySigalgs,
-          sizeof(kRealityVerifySigalgs) / sizeof(kRealityVerifySigalgs[0]));
+    }
+  }
 
-      // REALITY ALPN injection: cronet's HttpProxyConnectJob uses
-      // AlpnMode::kDisabled for proxy CONNECT TLS handshakes (see
-      // net/socket/connect_job_factory.cc), which clears alpn_protos. But
-      // naive proxy SERVER expects h2 (it serves via H2 CONNECT inside
-      // TLS) — without ALPN negotiation, server falls back to no h2,
-      // h2c.NewHandler doesn't activate the H2 stream, naive's request
-      // logger never fires, client connection stalls. Inject "h2,http/1.1"
-      // here so the ClientHello carries ALPN extension; server's REALITY
-      // ALPN patch (utls reality.go) then picks h2 from the overlap with
-      // its configured NextProtos.
-      //
-      // QUIC guard: ssl_add_client_hello is also reached from QUIC's TLS
-      // 1.3 handshake. QUIC needs "h3" ALPN; overriding it here would
-      // break HTTP/3. Skip injection for QUIC — the QUIC stack sets its
-      // own ALPN via QuicConfig before the handshake starts.
-      if (!SSL_is_quic(ssl)) {
-        static const uint8_t kRealityAlpnProtos[] = {
-            0x02, 'h', '2',
-            0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
-        };
-        SSL_set_alpn_protos(ssl, kRealityAlpnProtos,
-                            sizeof(kRealityAlpnProtos));
-      }
+  if (hs->reality_enabled) {
+    // NOTE: do NOT install SSL_set_custom_verify here. The Cronet net stack
+    // registers its own custom_verify on the SSL_CTX (see
+    // ssl_client_socket_impl.cc::SSLContext()), which gates additional
+    // bookkeeping in SSLClientSocketImpl::DoHandshakeComplete (server_cert_
+    // population, SSLInfo). Overriding the callback skips that bookkeeping
+    // and CHECK(GetSSLInfo()) fires later. Instead, the net stack patch
+    // calls SSL_reality_is_enabled / SSL_reality_verify_peer_cert from
+    // inside its VerifyCert() function so both paths converge.
+    static const uint16_t kRealityVerifySigalgs[] = {
+        SSL_SIGN_ED25519,
+        SSL_SIGN_ECDSA_SECP256R1_SHA256,
+        SSL_SIGN_ECDSA_SECP384R1_SHA384,
+        SSL_SIGN_RSA_PSS_RSAE_SHA256,
+        SSL_SIGN_RSA_PSS_RSAE_SHA384,
+        SSL_SIGN_RSA_PSS_RSAE_SHA512,
+        SSL_SIGN_RSA_PKCS1_SHA256,
+        SSL_SIGN_RSA_PKCS1_SHA384,
+        SSL_SIGN_RSA_PKCS1_SHA512,
+    };
+    SSL_set_verify_algorithm_prefs(
+        ssl, kRealityVerifySigalgs,
+        sizeof(kRealityVerifySigalgs) / sizeof(kRealityVerifySigalgs[0]));
+
+    // REALITY ALPN injection: cronet's HttpProxyConnectJob uses
+    // AlpnMode::kDisabled for proxy CONNECT TLS handshakes (see
+    // net/socket/connect_job_factory.cc), which clears alpn_protos. But
+    // naive proxy SERVER expects h2 (it serves via H2 CONNECT inside TLS).
+    // Apply this to both global and explicit per-SSL REALITY configuration.
+    // QUIC sets its own h3 ALPN and must not be overridden here.
+    if (!SSL_is_quic(ssl)) {
+      static const uint8_t kRealityAlpnProtos[] = {
+          0x02, 'h', '2',
+          0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
+      };
+      SSL_set_alpn_protos(ssl, kRealityAlpnProtos,
+                          sizeof(kRealityAlpnProtos));
     }
   }
 

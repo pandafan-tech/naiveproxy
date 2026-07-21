@@ -164,6 +164,8 @@ if (false) {
       if (is_win) {
         ldflags = [
           "/EXPORT:SSL_set_reality_global_config",
+          "/EXPORT:SSL_apply_reality_global_config_for_authority",
+          "/EXPORT:SSL_set_reality_global_config_for_authority",
           "/EXPORT:SSL_set_reality_global_config_for_server_name",
         ]
       }
