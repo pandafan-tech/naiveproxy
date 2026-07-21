@@ -307,16 +307,15 @@ int QuicChromiumClientStream::Handle::WriteConnectUdpPayload(
     return net_error_;
   }
 
-  const bool supports_h3_datagram = stream_->SupportsH3Datagram();
   base::UmaHistogramBoolean(kHttp3DatagramDroppedHistogram,
-                            !supports_h3_datagram);
-  if (!supports_h3_datagram) {
+                            !stream_->SupportsH3Datagram());
+  if (!stream_->SupportsH3Datagram()) {
     DLOG(WARNING)
-        << "HTTP/3 datagram peer SETTINGS state is not available; enabling "
-           "CONNECT-UDP datagrams on the active QUIC session.";
+        << "Dropping datagram because the session has either not received "
+           "settings frame with H3_DATAGRAM yet or received settings that "
+           "indicate datagrams are not supported (i.e., H3_DATAGRAM=0).";
+    return OK;
   }
-  stream_->spdy_session()->EnableH3DatagramForConnectUdp();
-
   // Set Context ID to zero as per RFC 9298
   // (https://datatracker.ietf.org/doc/html/rfc9298#name-http-datagram-payload-forma)
   // and copy packet data.

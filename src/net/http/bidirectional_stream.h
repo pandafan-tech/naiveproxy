@@ -103,12 +103,6 @@ class NET_EXPORT BidirectionalStream : public BidirectionalStreamImpl::Delegate,
     // point. No other delegate functions will be called after this.
     virtual void OnFailed(int error) = 0;
 
-    // cronet-reality: called when an HTTP/3 datagram is received on this
-    // stream. |payload| has the RFC 9298 context-id stripped by the
-    // BidirectionalStreamQuicImpl layer (only context-id 0 / raw UDP
-    // payloads reach here). Default impl drops the datagram.
-    virtual void OnHttp3DatagramReceived(base::span<const uint8_t> payload) {}
-
    protected:
     virtual ~Delegate();
   };
@@ -172,15 +166,6 @@ class NET_EXPORT BidirectionalStream : public BidirectionalStreamImpl::Delegate,
                  const std::vector<int>& lengths,
                  bool end_stream);
 
-  // cronet-reality: HTTP/3 datagram send / visitor management. For
-  // CONNECT-UDP (RFC 9298) we send raw UDP payload (context-id=0 prefix
-  // is added by the QUIC layer transparently). RegisterHttp3DatagramVisitor
-  // must be called after OnStreamReady to start receiving datagrams; the
-  // Delegate's OnHttp3DatagramReceived gets invoked for each.
-  int SendHttp3Datagram(base::span<const uint8_t> payload);
-  void RegisterHttp3DatagramVisitor();
-  void UnregisterHttp3DatagramVisitor();
-
   // Returns the protocol used by this stream. If stream has not been
   // established, return kProtoUnknown.
   NextProto GetProtocol() const;
@@ -215,7 +200,6 @@ class NET_EXPORT BidirectionalStream : public BidirectionalStreamImpl::Delegate,
   void OnDataSent() override;
   void OnTrailersReceived(const quiche::HttpHeaderBlock& trailers) override;
   void OnFailed(int error) override;
-  void OnHttp3DatagramReceived(base::span<const uint8_t> payload) override;
 
   // HttpStreamRequest::Delegate implementation:
   void OnStreamReady(const ProxyInfo& used_proxy_info,

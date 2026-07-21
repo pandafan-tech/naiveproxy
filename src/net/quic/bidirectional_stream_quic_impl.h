@@ -18,7 +18,6 @@
 #include "net/quic/quic_chromium_client_session.h"
 #include "net/quic/quic_chromium_client_stream.h"
 #include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
-#include "net/third_party/quiche/src/quiche/quic/core/http/quic_spdy_stream.h"
 
 namespace base {
 class OneShotTimer;
@@ -30,8 +29,7 @@ struct BidirectionalStreamRequestInfo;
 class IOBuffer;
 
 class NET_EXPORT_PRIVATE BidirectionalStreamQuicImpl
-    : public BidirectionalStreamImpl,
-      public quic::QuicSpdyStream::Http3DatagramVisitor {
+    : public BidirectionalStreamImpl {
  public:
   explicit BidirectionalStreamQuicImpl(
       std::unique_ptr<QuicChromiumClientSession::Handle> session);
@@ -59,23 +57,6 @@ class NET_EXPORT_PRIVATE BidirectionalStreamQuicImpl
   int64_t GetTotalSentBytes() const override;
   bool GetLoadTimingInfo(LoadTimingInfo* load_timing_info) const override;
   void PopulateNetErrorDetails(NetErrorDetails* details) override;
-
-  // cronet-reality: HTTP/3 datagram send/recv. SendHttp3Datagram dispatches
-  // to QuicChromiumClientStream::Handle::WriteConnectUdpPayload (which adds
-  // its own RFC 9298 context-id=0 prefix). For non-CONNECT-UDP context-ids,
-  // callers should pack the varint into payload themselves and we add the
-  // \0 prefix only for the connect-udp path. Caller is responsible for the
-  // context-id varint in |payload|; we add the Quarter Stream ID via the
-  // QUIC layer transparently.
-  int SendHttp3Datagram(base::span<const uint8_t> payload) override;
-  void RegisterHttp3DatagramVisitor() override;
-  void UnregisterHttp3DatagramVisitor() override;
-
-  // quic::QuicSpdyStream::Http3DatagramVisitor:
-  void OnHttp3Datagram(quic::QuicStreamId stream_id,
-                       absl::string_view payload) override;
-  void OnUnknownCapsule(quic::QuicStreamId stream_id,
-                        const quiche::UnknownCapsule& capsule) override {}
 
  private:
   int WriteHeaders();
@@ -135,10 +116,6 @@ class NET_EXPORT_PRIVATE BidirectionalStreamQuicImpl
   // After |stream_| has been closed, this keeps track of the total number of
   // bytes sent over the network for |stream_| while it was open.
   int64_t closed_stream_sent_bytes_ = 0;
-  // cronet-reality: tracks whether RegisterHttp3DatagramVisitor was called
-  // on the underlying QUIC stream so we can balance Unregister on teardown.
-  bool datagram_visitor_registered_ = false;
-
   // True if the stream is the first stream negotiated on the session. Set when
   // the stream was closed. If |stream_| is failed to be created, this takes on
   // the default value of false.

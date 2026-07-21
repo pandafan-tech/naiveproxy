@@ -26,7 +26,6 @@
 #include "quiche/quic/core/http/quic_headers_stream.h"
 #include "quiche/quic/core/http/quic_spdy_stream.h"
 #include "quiche/quic/core/http/web_transport_http3.h"
-#include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_session.h"
 #include "quiche/quic/core/quic_types.h"
@@ -1837,8 +1836,7 @@ void QuicSpdySession::SetMaxDatagramTimeInQueueForStreamId(
 
 void QuicSpdySession::OnDatagramReceived(absl::string_view datagram) {
   QuicSession::OnDatagramReceived(datagram);
-  if (!SupportsH3Datagram() &&
-      LocalHttpDatagramSupport() == HttpDatagramSupport::kNone) {
+  if (!SupportsH3Datagram()) {
     QUIC_DLOG(INFO) << "Ignoring unexpected received HTTP/3 datagram";
     return;
   }
@@ -1886,27 +1884,6 @@ QuicSpdySession::SupportedWebTransportVersion() {
 
 bool QuicSpdySession::SupportsH3Datagram() const {
   return http_datagram_support_ != HttpDatagramSupport::kNone;
-}
-
-void QuicSpdySession::EnableH3DatagramForConnectUdp() {
-  if (!version().IsIetfQuic()) {
-    return;
-  }
-  connection()->SetMaxPacketLength(kMaxOutgoingPacketSize);
-  if (http_datagram_support_ != HttpDatagramSupport::kNone) {
-    return;
-  }
-  switch (LocalHttpDatagramSupport()) {
-    case HttpDatagramSupport::kNone:
-      return;
-    case HttpDatagramSupport::kDraft04:
-      http_datagram_support_ = HttpDatagramSupport::kDraft04;
-      return;
-    case HttpDatagramSupport::kRfc:
-    case HttpDatagramSupport::kRfcAndDraft04:
-      http_datagram_support_ = HttpDatagramSupport::kRfc;
-      return;
-  }
 }
 
 WebTransportHttp3* QuicSpdySession::GetWebTransportSession(

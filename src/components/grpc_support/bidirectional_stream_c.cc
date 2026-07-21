@@ -111,10 +111,6 @@ class BidirectionalStreamAdapter final
 
   void OnCanceled() override;
 
-  // cronet-reality: HTTP/3 datagram received — relay to optional C
-  // callback if the caller registered one.
-  void OnDatagramReceived(const char* data, int size) override;
-
   bidirectional_stream* c_stream() const { return c_stream_.get(); }
 
   static grpc_support::BidirectionalStream* GetStream(
@@ -196,16 +192,6 @@ void BidirectionalStreamAdapter::OnFailed(int error) {
 void BidirectionalStreamAdapter::OnCanceled() {
   DCHECK(c_callback_->on_canceled);
   c_callback_->on_canceled(c_stream());
-}
-
-// cronet-reality: relay incoming HTTP/3 datagram to the C callback if
-// the embedder registered one. on_datagram_received is optional so old
-// callers (no datagram interest) keep working.
-void BidirectionalStreamAdapter::OnDatagramReceived(const char* data,
-                                                    int size) {
-  if (c_callback_->on_datagram_received) {
-    c_callback_->on_datagram_received(c_stream(), data, size);
-  }
 }
 
 grpc_support::BidirectionalStream* BidirectionalStreamAdapter::GetStream(
@@ -308,54 +294,6 @@ int bidirectional_stream_write(bidirectional_stream* stream,
 
 void bidirectional_stream_flush(bidirectional_stream* stream) {
   return BidirectionalStreamAdapter::GetStream(stream)->Flush();
-}
-
-// cronet-reality: HTTP extended-CONNECT entry point. Calls
-// grpc_support::BidirectionalStream::StartExtendedConnect which sets the
-// :protocol pseudo-header so the request goes out as RFC 8441 / 9298
-// extended CONNECT instead of plain CONNECT.
-int bidirectional_stream_start_connect(
-    bidirectional_stream* stream,
-    const char* url,
-    int priority,
-    const char* ext_protocol,
-    const bidirectional_stream_header_array* headers) {
-  grpc_support::BidirectionalStream* internal_stream =
-      BidirectionalStreamAdapter::GetStream(stream);
-  net::HttpRequestHeaders request_headers;
-  if (headers) {
-    for (size_t i = 0; i < headers->count; ++i) {
-      std::string name(UNSAFE_TODO(headers->headers[i]).key);
-      std::string value(UNSAFE_TODO(headers->headers[i]).value);
-      if (!net::HttpUtil::IsValidHeaderName(name) ||
-          !net::HttpUtil::IsValidHeaderValue(value)) {
-        DLOG(ERROR) << "Invalid Header " << name << "=" << value;
-        return i + 1;
-      }
-      request_headers.SetHeader(name, value);
-    }
-  }
-  return internal_stream->StartExtendedConnect(url, priority, ext_protocol,
-                                               request_headers);
-}
-
-// cronet-reality: send one HTTP/3 datagram. Valid only after
-// on_response_headers_received fired on a connect-udp stream.
-int bidirectional_stream_send_datagram(bidirectional_stream* stream,
-                                       const char* data,
-                                       int size) {
-  return BidirectionalStreamAdapter::GetStream(stream)->SendDatagram(data,
-                                                                     size);
-}
-
-void bidirectional_stream_register_datagram_visitor(
-    bidirectional_stream* stream) {
-  BidirectionalStreamAdapter::GetStream(stream)->RegisterDatagramVisitor();
-}
-
-void bidirectional_stream_unregister_datagram_visitor(
-    bidirectional_stream* stream) {
-  BidirectionalStreamAdapter::GetStream(stream)->UnregisterDatagramVisitor();
 }
 
 void bidirectional_stream_cancel(bidirectional_stream* stream) {
