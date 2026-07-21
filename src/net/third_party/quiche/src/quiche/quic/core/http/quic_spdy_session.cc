@@ -1889,7 +1889,7 @@ bool QuicSpdySession::SupportsH3Datagram() const {
 }
 
 void QuicSpdySession::EnableH3DatagramForConnectUdp() {
-  if (!version().UsesHttp3()) {
+  if (!version().IsIetfQuic()) {
     return;
   }
   connection()->SetMaxPacketLength(kMaxOutgoingPacketSize);
