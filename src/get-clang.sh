@@ -21,22 +21,23 @@ esac
 if [ "$host_os" = mac -a "$host_cpu" = arm64 ]; then
   WITH_CLANG=Mac_arm64
 fi
-mkdir -p third_party/llvm-build/Release+Asserts
+CLANG_DIR=third_party/llvm-build/Release+Asserts
+mkdir -p "$CLANG_DIR"
 cd tools/clang/scripts
 CLANG_REVISION=$($PYTHON -c 'import update; print(update.PACKAGE_VERSION)')
 cd -
-CLANG_STAMP=third_party/llvm-build/Release+Asserts/cr_build_revision
+CLANG_STAMP="$CLANG_DIR/panda_build_revision"
 if [ ! -f "$CLANG_STAMP" ] || [ "$(cat "$CLANG_STAMP")" != "$CLANG_REVISION" ]; then
-  rm -rf third_party/llvm-build/Release+Asserts
-  mkdir -p third_party/llvm-build/Release+Asserts
+  rm -rf "$CLANG_DIR"
+  mkdir -p "$CLANG_DIR"
 fi
-echo $CLANG_REVISION >"$CLANG_STAMP"
-if [ ! -d third_party/llvm-build/Release+Asserts/bin ]; then
-  mkdir -p third_party/llvm-build/Release+Asserts
+if [ ! -d "$CLANG_DIR/bin" ]; then
   clang_path="clang-$CLANG_REVISION.tar.xz"
   clang_url="https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path"
-  curl "$clang_url" | tar xJf - -C third_party/llvm-build/Release+Asserts
+  curl "$clang_url" | tar xJf - -C "$CLANG_DIR"
 fi
+echo "$CLANG_REVISION" >"$CLANG_DIR/cr_build_revision"
+echo "$CLANG_REVISION" >"$CLANG_STAMP"
 
 # sccache
 if [ "$host_os" = win -a ! -f ~/.cargo/bin/sccache.exe ]; then
