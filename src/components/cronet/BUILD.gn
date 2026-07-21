@@ -156,6 +156,19 @@ if (false) {
         ldflags =
             [ "-Wl,--version-script=" + rebase_path("cronet_exports.lst") ]
       }
+
+      # SSL_set_reality_* are boringssl symbols (OPENSSL_EXPORT, which is
+      # empty in a static-boringssl build), so they are not covered by
+      # GRPC_SUPPORT_EXPORT / the Cronet_*|bidirectional_stream_* export set.
+      # purego looks them up at runtime, so force-export them from the shared lib.
+      if (is_win) {
+        ldflags = [
+          "/EXPORT:SSL_set_reality_global_config",
+          "/EXPORT:SSL_apply_reality_global_config_for_authority",
+          "/EXPORT:SSL_set_reality_global_config_for_authority",
+          "/EXPORT:SSL_set_reality_global_config_for_server_name",
+        ]
+      }
     }
   }
 }
