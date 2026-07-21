@@ -1046,7 +1046,7 @@ void URLRequestContextConfig::ConfigureURLRequestContextBuilder(
 
     if (dialer) {
       auto dialer_copy = dialer;
-      auto context_copy = dialer_context;
+      void* context_copy = dialer_context;
       tcp_dialer_callback = base::BindRepeating(
           [](int (*dialer)(void*, const char*, uint16_t), void* context,
              const std::string& address, uint16_t port) -> int {
@@ -1057,7 +1057,7 @@ void URLRequestContextConfig::ConfigureURLRequestContextBuilder(
 
     if (udp_dialer) {
       auto udp_dialer_copy = udp_dialer;
-      auto udp_context_copy = udp_dialer_context;
+      void* udp_context_copy = udp_dialer_context;
       udp_dialer_callback = base::BindRepeating(
           [](int (*dialer)(void*, const char*, uint16_t, char*, uint16_t*),
              void* context, const std::string& address, uint16_t port,
