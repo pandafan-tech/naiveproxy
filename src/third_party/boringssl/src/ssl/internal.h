@@ -2128,6 +2128,17 @@ struct SSL_HANDSHAKE {
   // pake_share_bytes are the bytes of the PAKEShare to send, if any.
   Array<uint8_t> pake_share_bytes;
 
+  // REALITY anti-censorship extension (added by cronet-reality patch series).
+  // When |reality_enabled| is true, the client packs an authenticated payload
+  // into ClientHello.session_id and verifies the server via HMAC-SHA512 of
+  // the leaf cert's signature field. See ssl/handshake_client.cc for details.
+  bool reality_enabled = false;
+  uint8_t reality_server_pubkey[32] = {0};   // server's X25519 public key
+  uint8_t reality_short_id[8] = {0};         // client identifier
+  uint8_t reality_client_version[4] = {0};   // REALITY protocol version
+  uint8_t reality_auth_key[32] = {0};        // HKDF-derived; populated during CH write
+  bool reality_auth_key_ready = false;       // set true once auth_key is computed
+
   // pake_prover is the PAKE context for a client.
   UniquePtr<spake2plus::Prover> pake_prover;
 

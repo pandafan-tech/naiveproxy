@@ -5845,6 +5845,120 @@ OPENSSL_EXPORT int SSL_CTX_set1_sigalgs_list(SSL_CTX *ctx, const char *str);
 // more convenient to codesearch for specific algorithm values.
 OPENSSL_EXPORT int SSL_set1_sigalgs_list(SSL *ssl, const char *str);
 
+// REALITY anti-censorship handshake (cronet-reality patch series).
+//
+// When configured, the client packs an authenticated payload into the
+// 32-byte legacy_session_id field of ClientHello (X25519 ECDH against the
+// server's public key, HKDF-SHA256, AES-256-GCM with AAD = ClientHello bytes
+// with session_id zeroed). The server's reply is verified by comparing
+// HMAC-SHA512(auth_key, ed25519_peer_pub) against the leaf certificate's
+// Signature field — on success the borrowed cert is accepted without
+// chain verification; on failure the client falls through to standard
+// certificate verification and the connection is rejected.
+//
+// |public_key| is 32 bytes (X25519). |short_id| is up to 8 bytes
+// (right-padded with zeros). |client_version| is 4 bytes (REALITY protocol
+// version; pass {0,0,0,0} for compatibility with current xray-core / sing-box
+// servers). The fields are copied; the caller retains ownership of the
+// pointers passed in.
+//
+// Returns 1 on success and 0 on error (e.g., already configured, or
+// invalid field lengths).
+OPENSSL_EXPORT int SSL_set_reality_config(SSL *ssl,
+                                          const uint8_t public_key[32],
+                                          const uint8_t *short_id,
+                                          size_t short_id_len,
+                                          const uint8_t client_version[4]);
+
+// SSL_set_reality_global_config installs a fallback REALITY config that will
+// be applied automatically to every new client SSL that doesn't already have
+// a per-SSL or server-name REALITY config. This is kept for simple embedders;
+// Cronet integrations with multiple proxy instances should prefer
+// SSL_set_reality_global_config_for_server_name so plain TLS proxies do not
+// inherit another proxy's REALITY settings.
+//
+// Pass |public_key|=NULL to disable the global config and revert to plain
+// TLS for new connections.
+//
+// Thread-safe; the config is read on every ClientHello write.
+OPENSSL_EXPORT int SSL_set_reality_global_config(const uint8_t public_key[32],
+                                                 const uint8_t *short_id,
+                                                 size_t short_id_len,
+                                                 const uint8_t client_version[4]);
+
+// SSL_set_reality_global_config_for_server_name installs REALITY config for
+// new client SSL handshakes whose SNI / configured server name exactly matches
+// |server_name|. Passing |public_key|=NULL removes that server-name entry.
+//
+// This gives embedders such as Cronet a practical per-proxy isolation point:
+// each Cronet engine can register the REALITY config for its proxy SNI, while
+// other proxy engines in the same process continue using plain TLS.
+OPENSSL_EXPORT int SSL_set_reality_global_config_for_server_name(
+    const char *server_name,
+    const uint8_t public_key[32],
+    const uint8_t *short_id,
+    size_t short_id_len,
+    const uint8_t client_version[4]);
+
+// SSL_set_reality_global_config_for_authority installs REALITY config for one
+// request authority. Unlike the server-name registry, the port participates in
+// the key so multiple proxy routes using the same cover SNI remain isolated.
+// Passing |public_key|=NULL removes that authority entry.
+OPENSSL_EXPORT int SSL_set_reality_global_config_for_authority(
+    const char *server_name,
+    uint16_t port,
+    const uint8_t public_key[32],
+    const uint8_t *short_id,
+    size_t short_id_len,
+    const uint8_t client_version[4]);
+
+// SSL_apply_reality_global_config_for_authority snapshots an authority entry
+// onto |ssl|. It is called after SSL_new and before the client handshake. A
+// missing entry is a successful no-op so plain TLS routes stay plain.
+OPENSSL_EXPORT int SSL_apply_reality_global_config_for_authority(
+    SSL *ssl, const char *server_name, uint16_t port);
+
+// SSL_reality_is_enabled returns 1 if the given SSL has REALITY configured
+// (either per-SSL via SSL_set_reality_config or via the global config) AND
+// the AuthKey has been derived (i.e., the ClientHello write hook ran).
+// Returns 0 otherwise. Used by integrators like Cronet's
+// SSLClientSocketImpl to know whether to skip the standard cert-chain
+// verification step in favor of the REALITY HMAC verify.
+OPENSSL_EXPORT int SSL_reality_is_enabled(const SSL *ssl);
+
+// SSL_reality_verify_peer_cert runs the REALITY cert HMAC verify (see
+// docs/reality-wire-format.md): extracts the leaf cert from the peer
+// chain, requires Ed25519 SubjectPublicKeyInfo, computes
+// HMAC-SHA512(auth_key, ed25519_pub) and constant-time compares
+// against the last 64 bytes of the leaf's signature value.
+// Returns 1 on REALITY auth success, 0 on failure. Caller can treat
+// 0 as "fall through to standard verify" or as a hard reject.
+OPENSSL_EXPORT int SSL_reality_verify_peer_cert(SSL *ssl);
+
+// SSL_reality_register_pending_verify stashes |ssl| in a thread-local
+// slot used to bridge the QUIC cert-verify call path: QUICHE's
+// TlsClientHandshaker has the SSL handle but invokes a Chromium
+// ProofVerifier that does not, so the handshaker stores the SSL here
+// just before calling proof_verifier_->VerifyCertChain and the
+// verifier picks it up via SSL_reality_pending_verify_ssl.
+//
+// Must be cleared via SSL_reality_clear_pending_verify when the
+// verifier returns. Safe to call repeatedly; the last write wins.
+// QUIC sessions are single-threaded so no synchronisation is needed.
+OPENSSL_EXPORT void SSL_reality_register_pending_verify(SSL *ssl);
+
+// SSL_reality_clear_pending_verify drops the thread-local SSL set by
+// SSL_reality_register_pending_verify. Always called after the verify
+// returns to avoid stale handles outliving the handshake.
+OPENSSL_EXPORT void SSL_reality_clear_pending_verify(void);
+
+// SSL_reality_pending_verify_ssl returns the SSL handle most recently
+// registered via SSL_reality_register_pending_verify on the current
+// thread, or NULL when no verify is in flight. Used by
+// ProofVerifierChromium to perform the REALITY HMAC short-circuit
+// instead of running the standard cert chain pipeline.
+OPENSSL_EXPORT SSL *SSL_reality_pending_verify_ssl(void);
+
 #define SSL_set_app_data(s, arg) (SSL_set_ex_data(s, 0, (char *)(arg)))
 #define SSL_get_app_data(s) (SSL_get_ex_data(s, 0))
 #define SSL_SESSION_set_app_data(s, a) \
