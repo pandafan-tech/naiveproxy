@@ -337,10 +337,10 @@ Cronet_RESULT Cronet_EngineImpl::StartWithParams(
     if (public_key_pins.pins_sha256.empty())
       return CheckResult(Cronet_RESULT_NULL_POINTER_SHA256_PINS);
     for (const auto& pin_sha256 : public_key_pins.pins_sha256) {
-      net::HashValue pin_hash;
-      if (!pin_hash.FromString(pin_sha256))
+      auto pin_hash = net::HashValue::FromString(pin_sha256);
+      if (!pin_hash)
         return CheckResult(Cronet_RESULT_ILLEGAL_ARGUMENT_INVALID_PIN);
-      pkp->pin_hashes.push_back(pin_hash);
+      pkp->pin_hashes.push_back(std::move(*pin_hash));
     }
     config->pkp_list.push_back(std::move(pkp));
   }

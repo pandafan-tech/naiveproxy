@@ -304,7 +304,7 @@ void CronetBidirectionalStreamAdapter::OnHeadersReceived(
   cronet::Java_CronetBidirectionalStream_onResponseHeadersReceived(
       env, owner_, http_status_code, ConvertUTF8ToJavaString(env, protocol),
       GetHeadersArray(env, response_headers),
-      bidi_stream_->GetTotalReceivedBytes(),
+      bidi_stream_->GetTotalReceivedBytes().InBytes(),
       metrics_util::GetProxy(proxy_chain),
       metrics_util::IsProxied(proxy_chain));
 }
@@ -315,7 +315,7 @@ void CronetBidirectionalStreamAdapter::OnDataRead(int bytes_read) {
   cronet::Java_CronetBidirectionalStream_onReadCompleted(
       env, owner_, read_buffer_->byte_buffer(), bytes_read,
       read_buffer_->initial_position(), read_buffer_->initial_limit(),
-      bidi_stream_->GetTotalReceivedBytes());
+      bidi_stream_->GetTotalReceivedBytes().InBytes());
   // Free the read buffer. This lets the Java ByteBuffer be freed, if the
   // embedder releases it, too.
   read_buffer_ = nullptr;
@@ -356,7 +356,7 @@ void CronetBidirectionalStreamAdapter::OnFailed(int error) {
       net_error_details.quic_connection_error,
       (int)NetSourceToJavaSource(net_error_details.source),
       ConvertUTF8ToJavaString(env, net::ErrorToString(error)),
-      bidi_stream_->GetTotalReceivedBytes());
+      bidi_stream_->GetTotalReceivedBytes().InBytes());
 }
 
 void CronetBidirectionalStreamAdapter::StartOnNetworkThread(
@@ -526,8 +526,9 @@ std::optional<CronetMetrics> CronetBidirectionalStreamAdapter::GetMetrics() {
                                 start_ticks, start_time),
       metrics_util::ConvertTime(base::TimeTicks::Now(), start_ticks,
                                 start_time),
-      load_timing_info.socket_reused, bidi_stream_->GetTotalSentBytes(),
-      bidi_stream_->GetTotalReceivedBytes()),
+      load_timing_info.socket_reused,
+      bidi_stream_->GetTotalSentBytes().InBytes(),
+      bidi_stream_->GetTotalReceivedBytes().InBytes()),
 
   metrics.quic_connection_migration_attempted =
       net_error_details.quic_connection_migration_attempted;
