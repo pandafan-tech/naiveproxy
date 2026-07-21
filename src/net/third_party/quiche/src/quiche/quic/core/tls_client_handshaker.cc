@@ -572,10 +572,18 @@ QuicAsyncStatus TlsClientHandshaker::VerifyCertChain(
   std::string sct_list(reinterpret_cast<const char*>(sct_list_raw),
                        sct_list_len);
 
-  return proof_verifier_->VerifyCertChain(
+  // cronet-reality: stash the SSL handle for the Chromium ProofVerifier
+  // so it can detect REALITY-enabled sessions and short-circuit cert
+  // chain validation in favor of the HMAC tag carried in the leaf's
+  // signature field. See SSL_reality_register_pending_verify in
+  // BoringSSL's handshake_client.cc for the rationale.
+  SSL_reality_register_pending_verify(ssl());
+  QuicAsyncStatus status = proof_verifier_->VerifyCertChain(
       server_id_.host(), server_id_.port(), certs, ocsp_response, sct_list,
       verify_context_.get(), error_details, details, out_alert,
       std::move(callback));
+  SSL_reality_clear_pending_verify();
+  return status;
 }
 
 void TlsClientHandshaker::OnProofVerifyDetailsAvailable(
