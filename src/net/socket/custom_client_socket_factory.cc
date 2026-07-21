@@ -45,6 +45,34 @@ namespace {
 // INET6_ADDRSTRLEN is 46 which is enough for any IPv4 or IPv6 address string.
 constexpr size_t kLocalAddressBufferSize = 46;
 
+bool SupportsTcpSocketOptions(SocketDescriptor socket_fd) {
+#if BUILDFLAG(IS_WIN)
+  WSAPROTOCOL_INFOW protocol_info;
+  int info_size = sizeof(protocol_info);
+  if (getsockopt(socket_fd, SOL_SOCKET, SO_PROTOCOL_INFO,
+                 reinterpret_cast<char*>(&protocol_info), &info_size) != 0) {
+    return false;
+  }
+  return protocol_info.iSocketType == SOCK_STREAM &&
+         (protocol_info.iAddressFamily == AF_INET ||
+          protocol_info.iAddressFamily == AF_INET6);
+#else
+  struct sockaddr_storage ss;
+  socklen_t ss_len = sizeof(ss);
+  if (getsockname(socket_fd, reinterpret_cast<struct sockaddr*>(&ss),
+                  &ss_len) != 0) {
+    return false;
+  }
+  int sock_type = 0;
+  socklen_t type_len = sizeof(sock_type);
+  if (getsockopt(socket_fd, SOL_SOCKET, SO_TYPE, &sock_type, &type_len) != 0) {
+    return false;
+  }
+  return sock_type == SOCK_STREAM &&
+         (ss.ss_family == AF_INET || ss.ss_family == AF_INET6);
+#endif
+}
+
 // A DatagramClientSocket that wraps a socket fd returned by a custom dialer.
 // This socket can be:
 // - AF_INET/AF_INET6 SOCK_DGRAM: Standard UDP socket (may be connected)
@@ -582,18 +610,24 @@ class ConnectedTransportClientSocket : public TransportClientSocket {
   ConnectedTransportClientSocket(std::unique_ptr<TCPSocket> socket,
                                  const IPEndPoint& peer_address,
                                  class NetLog* net_log,
-                                 const NetLogSource& source)
+                                 const NetLogSource& source,
+                                 bool supports_tcp_socket_options)
       : socket_(std::move(socket)),
         peer_address_(peer_address),
-        net_log_(NetLogWithSource::Make(net_log, NetLogSourceType::SOCKET)) {}
+        net_log_(NetLogWithSource::Make(net_log, NetLogSourceType::SOCKET)),
+        supports_tcp_socket_options_(supports_tcp_socket_options) {}
 
   ~ConnectedTransportClientSocket() override { Disconnect(); }
 
   int Bind(const IPEndPoint& local_addr) override { return ERR_SOCKET_IS_CONNECTED; }
   bool SetNoDelay(bool no_delay) override {
+    if (!supports_tcp_socket_options_)
+      return true;
     return socket_ && socket_->SetNoDelay(no_delay);
   }
   bool SetKeepAlive(bool enable, int delay_secs) override {
+    if (!supports_tcp_socket_options_)
+      return true;
     return socket_ && socket_->SetKeepAlive(enable, delay_secs);
   }
   int Connect(CompletionOnceCallback callback) override { return OK; }
@@ -653,6 +687,7 @@ class ConnectedTransportClientSocket : public TransportClientSocket {
   std::unique_ptr<TCPSocket> socket_;
   IPEndPoint peer_address_;
   NetLogWithSource net_log_;
+  bool supports_tcp_socket_options_;
   bool was_ever_used_ = false;
   int64_t total_received_bytes_ = 0;
 };
@@ -700,6 +735,7 @@ CustomClientSocketFactory::CreateTransportClientSocket(
     int result = tcp_dialer_.Run(address_string, port);
     if (result >= 0) {
       SocketDescriptor socket_fd = static_cast<SocketDescriptor>(result);
+      bool supports_tcp_socket_options = SupportsTcpSocketOptions(socket_fd);
       auto tcp_socket = TCPSocket::Create(std::move(socket_performance_watcher),
                                           net_log, source);
       int adopt_result = tcp_socket->AdoptConnectedSocket(socket_fd, endpoint);
@@ -712,9 +748,12 @@ CustomClientSocketFactory::CreateTransportClientSocket(
         return std::make_unique<FailingTransportClientSocket>(
             adopt_result, addresses, net_log, source);
       }
-      tcp_socket->SetDefaultOptionsForClient();
+      if (supports_tcp_socket_options) {
+        tcp_socket->SetDefaultOptionsForClient();
+      }
       return std::make_unique<ConnectedTransportClientSocket>(
-          std::move(tcp_socket), endpoint, net_log, source);
+          std::move(tcp_socket), endpoint, net_log, source,
+          supports_tcp_socket_options);
     }
     last_error = result;
   }
