@@ -24,6 +24,10 @@ namespace perfetto::shlib {
 namespace {
 
 using perfetto::internal::TrackEventInternal;
+// All interned string messages for track events must have this field number
+// structure.
+static constexpr uint32_t kInternedStringIidFieldNumber = 1;
+static constexpr uint32_t kInternedStringNameFieldNumber = 2;
 
 protos::pbzero::TrackEvent::Type EventType(int32_t type) {
   using Type = protos::pbzero::TrackEvent::Type;
@@ -42,13 +46,34 @@ protos::pbzero::TrackEvent::Type EventType(int32_t type) {
 }
 
 // Appends the fields described by `fields` to `msg`.
-void AppendHlProtoFields(protozero::Message* msg,
+void AppendHlProtoFields(TrackEventIncrementalState* incr,
+                         protozero::Message* msg,
                          PerfettoTeHlProtoField* const* fields) {
   for (PerfettoTeHlProtoField* const* p = fields; *p != nullptr; p++) {
     switch ((*p)->type) {
       case PERFETTO_TE_HL_PROTO_TYPE_CSTR: {
         auto field = reinterpret_cast<PerfettoTeHlProtoFieldCstr*>(*p);
         msg->AppendString(field->header.id, field->str);
+        break;
+      }
+      case PERFETTO_TE_HL_PROTO_TYPE_CSTR_INTERNED: {
+        auto field = reinterpret_cast<PerfettoTeHlProtoFieldCstrInterned*>(*p);
+        PERFETTO_DCHECK(field->interned_type_id != 0);
+        if (field->interned_type_id) {
+          const char* str = field->str;
+          size_t len = strlen(field->str);
+          auto res = incr->iids.FindOrAssign(
+              static_cast<int32_t>(field->interned_type_id), str, len);
+          if (res.newly_assigned) {
+            auto* ser = incr->serialized_interned_data
+                            ->BeginNestedMessage<protozero::Message>(
+                                field->interned_type_id);
+            ser->AppendVarInt(kInternedStringIidFieldNumber, res.iid);
+            ser->AppendString(kInternedStringNameFieldNumber, field->str);
+          }
+          msg->AppendVarInt(field->header.id, res.iid);
+        }
+        // If interned_type_id is zero, this is a user error, we drop the packet
         break;
       }
       case PERFETTO_TE_HL_PROTO_TYPE_BYTES: {
@@ -60,7 +85,7 @@ void AppendHlProtoFields(protozero::Message* msg,
         auto field = reinterpret_cast<PerfettoTeHlProtoFieldNested*>(*p);
         auto* nested =
             msg->BeginNestedMessage<protozero::Message>(field->header.id);
-        AppendHlProtoFields(nested, field->fields);
+        AppendHlProtoFields(incr, nested, field->fields);
         break;
       }
       case PERFETTO_TE_HL_PROTO_TYPE_VARINT: {
@@ -248,7 +273,7 @@ void WriteTrackEvent(TrackEventIncrementalState* incr,
       const auto* fields =
           reinterpret_cast<const struct PerfettoTeHlExtraProtoFields&>(extra)
               .fields;
-      AppendHlProtoFields(event, fields);
+      AppendHlProtoFields(incr, event, fields);
     }
   }
 }
@@ -256,6 +281,7 @@ void WriteTrackEvent(TrackEventIncrementalState* incr,
 uint64_t EmitNamedTrack(uint64_t parent_uuid,
                         const char* name,
                         uint64_t id,
+                        bool is_name_static,
                         perfetto::shlib::TrackEventIncrementalState* incr_state,
                         perfetto::TraceWriterBase* trace_writer) {
   uint64_t uuid = parent_uuid;
@@ -268,7 +294,11 @@ uint64_t EmitNamedTrack(uint64_t parent_uuid,
     if (parent_uuid) {
       track_descriptor->set_parent_uuid(parent_uuid);
     }
-    track_descriptor->set_name(name);
+    if (is_name_static) {
+      track_descriptor->set_static_name(name);
+    } else {
+      track_descriptor->set_name(name);
+    }
   }
   return uuid;
 }
@@ -294,7 +324,7 @@ uint64_t EmitProtoTrack(uint64_t uuid,
     auto packet = trace_writer->NewTracePacket();
     auto* track_descriptor = packet->set_track_descriptor();
     track_descriptor->set_uuid(uuid);
-    AppendHlProtoFields(track_descriptor, fields);
+    AppendHlProtoFields(incr_state, track_descriptor, fields);
   }
   return uuid;
 }
@@ -310,7 +340,7 @@ uint64_t EmitProtoTrackWithParentUuid(
     auto* track_descriptor = packet->set_track_descriptor();
     track_descriptor->set_uuid(uuid);
     track_descriptor->set_parent_uuid(parent_uuid);
-    AppendHlProtoFields(track_descriptor, fields);
+    AppendHlProtoFields(incr_state, track_descriptor, fields);
   }
   return uuid;
 }
@@ -392,7 +422,7 @@ void InstanceOp(internal::DataSourceType* ds,
               .value;
     } else if (extra.type == PERFETTO_TE_HL_EXTRA_TYPE_COUNTER_DOUBLE) {
       double_counter =
-          reinterpret_cast<const struct PerfettoTeHlExtraCounterInt64&>(extra)
+          reinterpret_cast<const struct PerfettoTeHlExtraCounterDouble&>(extra)
               .value;
     } else if (extra.type == PERFETTO_TE_HL_EXTRA_TYPE_NO_INTERN) {
       use_interning = false;
@@ -435,7 +465,8 @@ void InstanceOp(internal::DataSourceType* ds,
                  track)) {
     auto* named_track = std::get<const PerfettoTeHlExtraNamedTrack*>(track);
     track_uuid = EmitNamedTrack(named_track->parent_uuid, named_track->name,
-                                named_track->id, incr_state, trace_writer);
+                                named_track->id, named_track->is_name_static,
+                                incr_state, trace_writer);
   } else if (std::holds_alternative<const PerfettoTeHlExtraProtoTrack*>(
                  track)) {
     auto* proto_track = std::get<const PerfettoTeHlExtraProtoTrack*>(track);
@@ -456,8 +487,10 @@ void InstanceOp(internal::DataSourceType* ds,
         case PERFETTO_TE_HL_NESTED_TRACK_TYPE_NAMED: {
           auto* named_track =
               reinterpret_cast<PerfettoTeHlNestedTrackNamed*>(*tp);
+          // Currently static names for nested tracks is not supported.
           uuid = EmitNamedTrack(uuid, named_track->name, named_track->id,
-                                incr_state, trace_writer);
+                                /*is_name_static_=*/false, incr_state,
+                                trace_writer);
         } break;
         case PERFETTO_TE_HL_NESTED_TRACK_TYPE_PROCESS: {
           uuid = perfetto_te_process_track_uuid;

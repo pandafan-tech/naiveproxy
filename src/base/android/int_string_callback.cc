@@ -13,7 +13,7 @@
 #include "base/android/jni_string.h"
 
 // Must come after all headers that specialize FromJniType() / ToJniType().
-#include "base/base_minimal_jni/IntStringCallback_jni.h"
+#include "base/jni_callback_jni/IntStringCallback_jni.h"
 
 namespace base {
 namespace android {
@@ -28,4 +28,4 @@ void RunIntStringCallbackAndroid(const JavaRef<jobject>& callback,
 }  // namespace android
 }  // namespace base
 
-DEFINE_JNI_FOR_IntStringCallback()
+DEFINE_JNI(IntStringCallback)

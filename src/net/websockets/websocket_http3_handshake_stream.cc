@@ -11,16 +11,21 @@
 #include "base/check_op.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/logging.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/notreached.h"
 #include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
 #include "net/base/ip_endpoint.h"
+#include "net/base/load_timing_info.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_request_info.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_response_info.h"
 #include "net/http/http_status_code.h"
+#include "net/quic/quic_http_stream.h"
+#include "net/quic/quic_http_utils.h"
 #include "net/spdy/spdy_http_utils.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "net/websockets/websocket_basic_stream.h"
@@ -36,6 +41,10 @@ namespace {
 
 bool ValidateStatus(const HttpResponseHeaders* headers) {
   return headers->GetStatusLine() == "HTTP/1.1 200";
+}
+
+void LogMissingSessionAccess(std::string_view method_name) {
+  LOG(DFATAL) << method_name << "() called without a QUIC session handle";
 }
 
 }  // namespace
@@ -162,12 +171,13 @@ int WebSocketHttp3HandshakeStream::ReadResponseHeaders(
   return ERR_IO_PENDING;
 }
 
-// TODO(momoka): Implement this.
 int WebSocketHttp3HandshakeStream::ReadResponseBody(
     IOBuffer* buf,
     int buf_len,
     CompletionOnceCallback callback) {
-  return OK;
+  // Callers should instead call Upgrade() to get a WebSocketStream
+  // and call ReadFrames() on that.
+  NOTREACHED();
 }
 
 void WebSocketHttp3HandshakeStream::Close(bool not_reusable) {
@@ -176,6 +186,7 @@ void WebSocketHttp3HandshakeStream::Close(bool not_reusable) {
     stream_closed_ = true;
     stream_error_ = ERR_CONNECTION_CLOSED;
   }
+  stream_adapter_.reset();
 }
 
 // TODO(momoka): Implement this.
@@ -196,14 +207,15 @@ bool WebSocketHttp3HandshakeStream::CanReuseConnection() const {
   return false;
 }
 
-// TODO(momoka): Implement this.
-int64_t WebSocketHttp3HandshakeStream::GetTotalReceivedBytes() const {
-  return 0;
+base::ByteSize WebSocketHttp3HandshakeStream::GetTotalReceivedBytes() const {
+  return stream_adapter_ ? base::ByteSize(stream_adapter_->stream_bytes_read())
+                         : base::ByteSize(0);
 }
 
-// TODO(momoka): Implement this.
-int64_t WebSocketHttp3HandshakeStream::GetTotalSentBytes() const {
-  return 0;
+base::ByteSize WebSocketHttp3HandshakeStream::GetTotalSentBytes() const {
+  return stream_adapter_
+             ? base::ByteSize(stream_adapter_->stream_bytes_written())
+             : base::ByteSize(0);
 }
 
 // TODO(momoka): Implement this.
@@ -212,29 +224,57 @@ bool WebSocketHttp3HandshakeStream::GetAlternativeService(
   return false;
 }
 
-// TODO(momoka): Implement this.
 bool WebSocketHttp3HandshakeStream::GetLoadTimingInfo(
     LoadTimingInfo* load_timing_info) const {
-  return false;
+  if (!session_) {
+    LogMissingSessionAccess("GetLoadTimingInfo");
+    return false;
+  }
+
+  load_timing_info->socket_reused = false;
+  load_timing_info->socket_log_id = session_->net_log().source().id;
+  load_timing_info->connect_timing = session_->GetConnectTiming();
+  return true;
 }
 
-// TODO(momoka): Implement this.
-void WebSocketHttp3HandshakeStream::GetSSLInfo(SSLInfo* ssl_info) {}
+void WebSocketHttp3HandshakeStream::GetSSLInfo(SSLInfo* ssl_info) {
+  if (!session_) {
+    LogMissingSessionAccess("GetSSLInfo");
+    return;
+  }
+  session_->GetSSLInfo(ssl_info);
+}
 
-// TODO(momoka): Implement this.
 int WebSocketHttp3HandshakeStream::GetRemoteEndpoint(IPEndPoint* endpoint) {
-  return 0;
+  if (!session_) {
+    LogMissingSessionAccess("GetRemoteEndpoint");
+    return ERR_SOCKET_NOT_CONNECTED;
+  }
+  return session_->GetRemoteEndpoint(endpoint);
 }
 
-// TODO(momoka): Implement this.
-void WebSocketHttp3HandshakeStream::Drain(HttpNetworkSession* session) {}
+// Not reachable for WebSocket streams, but delegate to `Close()` for safety.
+void WebSocketHttp3HandshakeStream::Drain(HttpNetworkSession* session) {
+  Close(/*not_reusable=*/true);
+}
 
-// TODO(momoka): Implement this.
-void WebSocketHttp3HandshakeStream::SetPriority(RequestPriority priority) {}
+void WebSocketHttp3HandshakeStream::SetPriority(RequestPriority priority) {
+  priority_ = priority;
+  if (stream_adapter_) {
+    ApplyPriorityToStream();
+  }
+}
 
-// TODO(momoka): Implement this.
 void WebSocketHttp3HandshakeStream::PopulateNetErrorDetails(
-    NetErrorDetails* details) {}
+    NetErrorDetails* details) {
+  if (!session_) {
+    LogMissingSessionAccess("PopulateNetErrorDetails");
+    return;
+  }
+  details->connection_info =
+      QuicHttpStream::ConnectionInfoFromQuicVersion(session_->GetQuicVersion());
+  session_->PopulateNetErrorDetails(details);
+}
 
 // TODO(momoka): Implement this.
 std::unique_ptr<HttpStream>
@@ -304,7 +344,8 @@ void WebSocketHttp3HandshakeStream::OnHeadersReceived(
   http_response_info_->response_time =
       http_response_info_->original_response_time = base::Time::Now();
   http_response_info_->request_time = request_time_;
-  http_response_info_->connection_info = HttpConnectionInfo::kHTTP2;
+  http_response_info_->connection_info =
+      QuicHttpStream::ConnectionInfoFromQuicVersion(session_->GetQuicVersion());
   http_response_info_->alpn_negotiated_protocol =
       HttpConnectionInfoToString(http_response_info_->connection_info);
 
@@ -336,9 +377,17 @@ void WebSocketHttp3HandshakeStream::OnClose(int status) {
   }
 }
 
+void WebSocketHttp3HandshakeStream::ApplyPriorityToStream() {
+  DCHECK(stream_adapter_);
+  uint8_t urgency = ConvertRequestPriorityToQuicPriority(priority_);
+  stream_adapter_->SetPriority(
+      quic::QuicStreamPriority(quic::HttpStreamPriority{urgency}));
+}
+
 void WebSocketHttp3HandshakeStream::ReceiveAdapterAndStartRequest(
     std::unique_ptr<WebSocketQuicStreamAdapter> adapter) {
   stream_adapter_ = std::move(adapter);
+  ApplyPriorityToStream();
   // WriteHeaders returns synchronously.
   stream_adapter_->WriteHeaders(std::move(http3_request_headers_), false);
 }
@@ -399,5 +448,8 @@ void WebSocketHttp3HandshakeStream::OnFailure(
     std::optional<int> response_code) {
   stream_request_->OnFailure(message, net_error, response_code);
 }
+
+void WebSocketHttp3HandshakeStream::PopulateLoadTimingInternalInfo(
+    LoadTimingInternalInfo* load_timing_internal_info) const {}
 
 }  // namespace net

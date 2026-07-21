@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
@@ -363,6 +364,10 @@ class NET_EXPORT_PRIVATE SpdyStream {
   // The remote endpoint may still be active.
   bool IsLocallyClosed() const;
 
+  // Returns whether the remote endpoint has closed its side of the stream
+  // (i.e. a complete response has been received, including END_STREAM).
+  bool IsRemoteClosed() const;
+
   // Returns whether this stream is IDLE: request and response headers
   // have neither been sent nor receieved.
   bool IsIdle() const;
@@ -379,8 +384,8 @@ class NET_EXPORT_PRIVATE SpdyStream {
   void AddRawReceivedBytes(size_t received_bytes);
   void AddRawSentBytes(size_t sent_bytes);
 
-  int64_t raw_received_bytes() const { return raw_received_bytes_; }
-  int64_t raw_sent_bytes() const { return raw_sent_bytes_; }
+  base::ByteSize raw_received_bytes() const { return raw_received_bytes_; }
+  base::ByteSize raw_sent_bytes() const { return raw_sent_bytes_; }
   int recv_bytes() const { return recv_bytes_; }
 
   bool GetLoadTimingInfo(LoadTimingInfo* load_timing_info) const;
@@ -398,7 +403,7 @@ class NET_EXPORT_PRIVATE SpdyStream {
 
   bool detect_broken_connection() const { return detect_broken_connection_; }
 
-  base::Value::Dict GetInfoAsValue() const;
+  base::DictValue GetInfoAsValue() const;
 
  private:
   friend class test::SpdyStreamTest;
@@ -532,10 +537,10 @@ class NET_EXPORT_PRIVATE SpdyStream {
 
   // Number of bytes that have been received on this stream, including frame
   // overhead and headers.
-  int64_t raw_received_bytes_ = 0;
+  base::ByteSize raw_received_bytes_;
   // Number of bytes that have been sent on this stream, including frame
   // overhead and headers.
-  int64_t raw_sent_bytes_ = 0;
+  base::ByteSize raw_sent_bytes_;
 
   // Number of data bytes that have been received on this stream, not including
   // frame overhead. Note that this does not count headers.

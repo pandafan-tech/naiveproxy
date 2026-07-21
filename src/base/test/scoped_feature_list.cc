@@ -4,13 +4,14 @@
 
 #include "base/test/scoped_feature_list.h"
 
+#include <algorithm>
 #include <atomic>
+#include <memory>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/check_op.h"
-#include "base/containers/contains.h"
 #include "base/containers/flat_map.h"
 #include "base/features.h"
 #include "base/memory/ptr_util.h"
@@ -127,7 +128,7 @@ constexpr char kTrialGroup[] = "scoped_feature_list_trial_group";
 //   [0] FeatureWithStudyGroup("Feature1", "Study1", "Group1",
 //         "Param1/Value1/Param2/Value2")
 //   [1] FeatureWithStudyGroup("Feature2", "Study2", "Group2", "")
-bool ParseEnableFeatures(const std::string& enable_features,
+bool ParseEnableFeatures(std::string_view enable_features,
                          std::vector<ScopedFeatureList::FeatureWithStudyGroup>&
                              parsed_enable_features) {
   for (const auto& enable_feature :
@@ -188,10 +189,11 @@ std::string_view GetFeatureName(std::string_view feature) {
 bool ContainsFeature(
     const std::vector<ScopedFeatureList::FeatureWithStudyGroup>& feature_vector,
     std::string_view feature_name) {
-  return Contains(feature_vector, feature_name,
-                  [](const ScopedFeatureList::FeatureWithStudyGroup& a) {
-                    return a.feature_name;
-                  });
+  return std::ranges::contains(
+      feature_vector, feature_name,
+      [](const ScopedFeatureList::FeatureWithStudyGroup& a) {
+        return a.feature_name;
+      });
 }
 
 // Merges previously-specified feature overrides with those passed into one of
@@ -228,7 +230,7 @@ void OverrideFeatures(
 // |merged_features| should contain the enabled and disabled features passed in
 // to the Init() method, plus any overrides merged as a result of previous
 // calls to this function.
-void OverrideFeatures(const std::string& features_list,
+void OverrideFeatures(std::string_view features_list,
                       FeatureList::OverrideState override_state,
                       ScopedFeatureList::Features* merged_features) {
   std::vector<ScopedFeatureList::FeatureWithStudyGroup> parsed_features;
@@ -240,7 +242,7 @@ void OverrideFeatures(const std::string& features_list,
 
 // Hex encode params so that special characters do not break formatting.
 std::string HexEncodeString(const std::string& input) {
-  return HexEncode(input.data(), input.size());
+  return HexEncode(input);
 }
 
 // Inverse of HexEncodeString().
@@ -293,6 +295,13 @@ FeatureRefAndParams::FeatureRefAndParams(const FeatureRefAndParams& other) =
 FeatureRefAndParams::~FeatureRefAndParams() = default;
 
 ScopedFeatureList::ScopedFeatureList() = default;
+
+ScopedFeatureList::ScopedFeatureList(ScopedFeatureList&& other)
+    : init_called_(std::exchange(other.init_called_, false)),
+      original_feature_list_(std::move(other.original_feature_list_)),
+      original_field_trial_list_(other.original_field_trial_list_),
+      original_params_(std::move(other.original_params_)),
+      field_trial_list_(std::move(other.field_trial_list_)) {}
 
 ScopedFeatureList::ScopedFeatureList(const Feature& enable_feature) {
   InitAndEnableFeature(enable_feature);
@@ -394,9 +403,8 @@ void ScopedFeatureList::InitWithFeatureList(
   init_called_ = true;
 }
 
-void ScopedFeatureList::InitFromCommandLine(
-    const std::string& enable_features,
-    const std::string& disable_features) {
+void ScopedFeatureList::InitFromCommandLine(std::string_view enable_features,
+                                            std::string_view disable_features) {
   Features merged_features;
   bool parse_enable_features_result =
       ParseEnableFeatures(enable_features,
@@ -608,7 +616,7 @@ void ScopedFeatureList::InitWithMergedFeatures(
   std::string disabled = CreateCommandLineArgumentFromFeatureList(
       merged_features.disabled_feature_list, /*enable_features=*/false);
 
-  std::unique_ptr<FeatureList> new_feature_list(new FeatureList);
+  auto new_feature_list = std::make_unique<FeatureList>();
   new_feature_list->InitFromCommandLine(enabled, disabled);
   InitWithFeatureList(std::move(new_feature_list));
 }

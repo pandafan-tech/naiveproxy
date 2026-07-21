@@ -134,15 +134,18 @@ struct QUICHE_EXPORT QuicPacketHeader {
   uint8_t type_byte;
   QuicConnectionIdIncluded destination_connection_id_included;
   QuicConnectionIdIncluded source_connection_id_included;
-  // TODO(martinduke): Compress these into bitfields.
-  // This is only used for Google QUIC.
-  bool reset_flag;
   // For Google QUIC, version flag in packets from the server means version
   // negotiation packet. For IETF QUIC, version flag means long header.
   bool version_flag;
+  // --- bitfield-able bools in the first cacheline go here ---
+  // This is only used for Google QUIC.
+  bool reset_flag : 1;
   // Indicates whether |possible_stateless_reset_token| contains a valid value
   // parsed from the packet buffer. IETF QUIC only, always false for GQUIC.
-  bool has_possible_stateless_reset_token;
+  bool has_possible_stateless_reset_token : 1;
+  // Latency spin bit on the short packet header (RFC 9000 Section 17.4)
+  bool spin_bit : 1;
+  // -- end bitfield-able bools in the first cacheline --
 
   // There are 8 bytes still available in the first cacheline.  Start with long
   // header stuff.
@@ -202,17 +205,6 @@ struct QUICHE_EXPORT QuicVersionNegotiationPacket {
 
   QuicConnectionId connection_id;
   ParsedQuicVersionVector versions;
-};
-
-struct QUICHE_EXPORT QuicIetfStatelessResetPacket {
-  QuicIetfStatelessResetPacket();
-  QuicIetfStatelessResetPacket(const QuicPacketHeader& header,
-                               StatelessResetToken token);
-  QuicIetfStatelessResetPacket(const QuicIetfStatelessResetPacket& other);
-  ~QuicIetfStatelessResetPacket();
-
-  QuicPacketHeader header;
-  StatelessResetToken stateless_reset_token;
 };
 
 class QUICHE_EXPORT QuicData {
@@ -383,7 +375,7 @@ class QUICHE_EXPORT QuicReceivedPacket : public QuicEncryptedPacket {
 // WARNING:
 //
 //   If you add a member field to this class, please make sure it is properly
-//   copied in |CopySerializedPacket|.
+//   copied in |CopySerializedPacket| and in the move constructor.
 //
 struct QUICHE_EXPORT SerializedPacket {
   SerializedPacket(QuicPacketNumber packet_number,
@@ -426,6 +418,7 @@ struct QUICHE_EXPORT SerializedPacket {
   bool has_ack_frame_copy;
   bool has_ack_frequency;
   bool has_datagram;
+  bool has_scone_packet = false;
   SerializedPacketFate fate;
   QuicSocketAddress peer_address;
   // Sum of bytes from frames that are not retransmissions. This field is only
@@ -450,11 +443,6 @@ QUICHE_EXPORT char* CopyBuffer(const SerializedPacket& packet);
 // |encrypted_buffer|.
 QUICHE_EXPORT char* CopyBuffer(const char* encrypted_buffer,
                                QuicPacketLength encrypted_length);
-
-// Context for an incoming packet.
-struct QUICHE_EXPORT QuicPerPacketContext {
-  virtual ~QuicPerPacketContext() {}
-};
 
 // ReceivedPacketInfo comprises information obtained by parsing the unencrypted
 // bytes of a received packet.

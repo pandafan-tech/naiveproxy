@@ -17,7 +17,7 @@
 -- Statsd atoms.
 --
 -- A subset of the slice table containing statsd atom instant events.
-CREATE PERFETTO VIEW android_statsd_atoms (
+CREATE PERFETTO VIEW android_statsd_atoms(
   -- Unique identifier for this slice.
   id LONG,
   -- The timestamp at the start of the slice.
@@ -38,17 +38,14 @@ CREATE PERFETTO VIEW android_statsd_atoms (
   name STRING,
   -- The depth of the slice in the current stack of slices.
   depth LONG,
-  -- A unique identifier obtained from the names of all slices in this stack. This is rarely useful and kept around only for legacy reasons.
-  stack_id LONG,
-  -- The stack_id for the parent of this slice. Rarely useful.
-  parent_stack_id LONG,
   -- The id of the parent (i.e. immediate ancestor) slice for this slice.
   parent_id LONG,
   -- The thread timestamp at the start of the slice. This column will only be populated if thread timestamp collection is enabled with track_event.
   thread_ts TIMESTAMP,
   -- The thread time used by this slice. This column will only be populated if thread timestamp collection is enabled with track_event.
   thread_dur LONG
-) AS
+)
+AS
 SELECT
   slice.id AS id,
   slice.ts AS ts,
@@ -60,8 +57,6 @@ SELECT
   slice.category AS category,
   slice.name AS name,
   slice.depth AS depth,
-  slice.stack_id AS stack_id,
-  slice.parent_stack_id AS parent_stack_id,
   slice.parent_id AS parent_id,
   slice.thread_ts AS thread_ts,
   slice.thread_dur AS thread_dur
@@ -76,12 +71,13 @@ WHERE
 --
 -- This requires the `android.statsd` data-source to be enabled and the
 -- `ATOM_PERFETTO_TRIGGER` push atom to be configured.
-CREATE PERFETTO TABLE _android_statsd_perfetto_triggers (
+CREATE PERFETTO TABLE _android_statsd_perfetto_triggers(
   -- Timestamp of the trigger.
   ts TIMESTAMP,
   -- The name of the trigger.
   trigger_name STRING
-) AS
+)
+AS
 SELECT
   ts,
   extract_arg(arg_set_id, 'perfetto_trigger.trigger_name') AS trigger_name

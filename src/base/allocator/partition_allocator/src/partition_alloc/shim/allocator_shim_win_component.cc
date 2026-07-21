@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "partition_alloc/build_config.h"
 #include "partition_alloc/buildflags.h"
 #include "partition_alloc/shim/allocator_dispatch.h"
@@ -42,7 +37,7 @@ void SetCallNewHandlerOnMallocFailure(bool value);
 #include "partition_alloc/shim/allocator_shim_override_ucrt_symbols_win.h"
 
 // Cross-checks.
-#if !defined(COMPONENT_BUILD) || !PA_BUILDFLAG(IS_WIN)
+#if !PA_BUILDFLAG(IS_COMPONENT_BUILD) || !PA_BUILDFLAG(IS_WIN)
 #error This code is only for Windows component build.
 #endif
 

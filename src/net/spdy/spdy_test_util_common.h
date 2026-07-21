@@ -23,6 +23,7 @@
 #include "net/base/test_completion_callback.h"
 #include "net/cert/mock_cert_verifier.h"
 #include "net/dns/mock_host_resolver.h"
+#include "net/dns/public/resolution_details.h"
 #include "net/http/http_auth_handler_factory.h"
 #include "net/http/http_network_session.h"
 #include "net/http/http_response_info.h"
@@ -211,7 +212,6 @@ struct SpdySessionDependencies {
   std::optional<SpdySessionPool::GreasedHttp2Frame> greased_http2_frame;
   bool http2_end_stream_with_data_frame = false;
   raw_ptr<NetLog> net_log = nullptr;
-  bool disable_idle_sockets_close_on_memory_pressure = false;
   bool enable_early_data = false;
   bool key_auth_cache_server_entries_by_network_anonymization_key = false;
   bool enable_priority_update = false;
@@ -234,9 +234,11 @@ bool HasSpdySession(SpdySessionPool* pool, const SpdySessionKey& key);
 // Creates a SPDY session for the given key and puts it in the SPDY
 // session pool in |http_session|. A SPDY session for |key| must not
 // already exist.
-base::WeakPtr<SpdySession> CreateSpdySession(HttpNetworkSession* http_session,
-                                             const SpdySessionKey& key,
-                                             const NetLogWithSource& net_log);
+base::WeakPtr<SpdySession> CreateSpdySession(
+    HttpNetworkSession* http_session,
+    const SpdySessionKey& key,
+    const NetLogWithSource& net_log,
+    std::optional<ResolutionDetails> resolution_details = std::nullopt);
 
 // Like CreateSpdySession(), but does not fail if there is already an IP
 // pooled session for |key|.
@@ -504,7 +506,7 @@ class TestConnectionChangeObserver : public ConnectionChangeNotifier::Observer {
   TestConnectionChangeObserver();
   ~TestConnectionChangeObserver() override;
 
-  void OnSessionClosed() override;
+  void OnSessionClosed(bool was_ever_used_to_create_streams) override;
 
   void OnConnectionFailed() override;
 

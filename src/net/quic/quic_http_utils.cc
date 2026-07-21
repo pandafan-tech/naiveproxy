@@ -6,7 +6,6 @@
 
 #include <utility>
 
-#include "base/metrics/histogram_macros.h"
 #include "base/strings/string_number_conversions.h"
 #include "net/spdy/spdy_log_util.h"
 
@@ -26,12 +25,11 @@ RequestPriority ConvertQuicPriorityToRequestPriority(
                          : static_cast<RequestPriority>(HIGHEST - priority);
 }
 
-base::Value::Dict QuicRequestNetLogParams(
-    quic::QuicStreamId stream_id,
-    const quiche::HttpHeaderBlock* headers,
-    quic::QuicStreamPriority priority,
-    NetLogCaptureMode capture_mode) {
-  base::Value::Dict dict = HttpHeaderBlockNetLogParams(headers, capture_mode);
+base::DictValue QuicRequestNetLogParams(quic::QuicStreamId stream_id,
+                                        const quiche::HttpHeaderBlock* headers,
+                                        quic::QuicStreamPriority priority,
+                                        NetLogCaptureMode capture_mode) {
+  base::DictValue dict = HttpHeaderBlockNetLogParams(headers, capture_mode);
   switch (priority.type()) {
     case quic::QuicPriorityType::kHttp: {
       auto http_priority = priority.http();
@@ -61,12 +59,11 @@ base::Value::Dict QuicRequestNetLogParams(
   return dict;
 }
 
-base::Value::Dict QuicResponseNetLogParams(
-    quic::QuicStreamId stream_id,
-    bool fin_received,
-    const quiche::HttpHeaderBlock* headers,
-    NetLogCaptureMode capture_mode) {
-  base::Value::Dict dict = HttpHeaderBlockNetLogParams(headers, capture_mode);
+base::DictValue QuicResponseNetLogParams(quic::QuicStreamId stream_id,
+                                         bool fin_received,
+                                         const quiche::HttpHeaderBlock* headers,
+                                         NetLogCaptureMode capture_mode) {
+  base::DictValue dict = HttpHeaderBlockNetLogParams(headers, capture_mode);
   dict.Set("quic_stream_id", static_cast<int>(stream_id));
   dict.Set("fin", fin_received);
   return dict;

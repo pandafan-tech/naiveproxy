@@ -21,7 +21,6 @@
 #include "partition_alloc/partition_alloc_base/augmentations/compiler_specific.h"
 #include "partition_alloc/partition_alloc_base/compiler_specific.h"
 #include "partition_alloc/partition_alloc_base/component_export.h"
-#include "partition_alloc/partition_alloc_base/cxx20_is_constant_evaluated.h"
 #include "partition_alloc/partition_alloc_base/types/same_as_any.h"
 #include "partition_alloc/partition_alloc_config.h"
 #include "partition_alloc/partition_alloc_forward.h"
@@ -54,14 +53,14 @@
 #define PA_RAW_PTR_CHECK(condition)
 #endif  // PA_BUILDFLAG(USE_PARTITION_ALLOC)
 
+#include "partition_alloc/pointers/raw_ptr_noop_impl.h"
+
 #if PA_BUILDFLAG(USE_RAW_PTR_BACKUP_REF_IMPL)
 #include "partition_alloc/pointers/raw_ptr_backup_ref_impl.h"
 #elif PA_BUILDFLAG(USE_RAW_PTR_ASAN_UNOWNED_IMPL)
 #include "partition_alloc/pointers/raw_ptr_asan_unowned_impl.h"
 #elif PA_BUILDFLAG(USE_RAW_PTR_HOOKABLE_IMPL)
 #include "partition_alloc/pointers/raw_ptr_hookable_impl.h"
-#else
-#include "partition_alloc/pointers/raw_ptr_noop_impl.h"
 #endif
 
 namespace cc {
@@ -128,15 +127,16 @@ enum class RawPtrTraits : unsigned {
   // Don't use directly, use AllowPtrArithmetic instead.
   kAllowPtrArithmetic = (1 << 3),
 
-  // This pointer has BRP disabled for experimental rewrites of containers.
-  //
-  // Don't use directly.
-  kDisableBRP = (1 << 4),
-
   // Uninitialized pointers are discouraged and disabled by default.
   //
   // Don't use directly, use AllowUninitialized instead.
   kAllowUninitialized = (1 << 5),
+
+  // Forces RawPtrNoOpImpl regardless of the compile-time raw_ptr
+  // implementation.
+  //
+  // Don't use directly, use kUnprotectedInRelease instead.
+  kNoOpImpl = (1 << 6),
 
   // *** ForTest traits below ***
 
@@ -153,8 +153,9 @@ enum class RawPtrTraits : unsigned {
   // Test only.
   kDummyForTest = (1 << 11),
 
-  kAllMask = kMayDangle | kDisableHooks | kAllowPtrArithmetic | kDisableBRP |
-             kAllowUninitialized | kUseCountingImplForTest | kDummyForTest,
+  kAllMask = kMayDangle | kDisableHooks | kAllowPtrArithmetic |
+             kAllowUninitialized | kNoOpImpl | kUseCountingImplForTest |
+             kDummyForTest,
 };
 // Template specialization to use |PA_DEFINE_OPERATORS_FOR_FLAGS| without
 // |kMaxValue| declaration.
@@ -246,10 +247,7 @@ template <RawPtrTraits Traits>
 using UnderlyingImplForTraits = internal::RawPtrBackupRefImpl<
     /*AllowDangling=*/partition_alloc::internal::ContainsFlags(
         Traits,
-        RawPtrTraits::kMayDangle),
-    /*DisableBRP=*/partition_alloc::internal::ContainsFlags(
-        Traits,
-        RawPtrTraits::kDisableBRP)>;
+        RawPtrTraits::kMayDangle)>;
 
 #elif PA_BUILDFLAG(USE_RAW_PTR_ASAN_UNOWNED_IMPL)
 template <RawPtrTraits Traits>
@@ -284,12 +282,15 @@ constexpr bool IsPtrArithmeticAllowed([[maybe_unused]] RawPtrTraits Traits) {
 // may be different from UnderlyingImplForTraits, because it may select a
 // test impl instead.
 template <RawPtrTraits Traits>
-using ImplForTraits =
-    std::conditional_t<partition_alloc::internal::ContainsFlags(
-                           Traits,
-                           RawPtrTraits::kUseCountingImplForTest),
-                       test::RawPtrCountingImplForTest,
-                       UnderlyingImplForTraits<Traits>>;
+using ImplForTraits = std::conditional_t<
+    partition_alloc::internal::ContainsFlags(
+        Traits,
+        RawPtrTraits::kUseCountingImplForTest),
+    test::RawPtrCountingImplForTest,
+    std::conditional_t<partition_alloc::internal::
+                           ContainsFlags(Traits, RawPtrTraits::kNoOpImpl),
+                       internal::RawPtrNoOpImpl,
+                       UnderlyingImplForTraits<Traits>>>;
 
 // `kTypeTraits` is a customization interface to accosiate `T` with some
 // `RawPtrTraits`. Users may create specialization of this variable
@@ -454,7 +455,9 @@ class PA_TRIVIAL_ABI PA_GSL_POINTER raw_ptr {
     }
   }
 #else
-  PA_ALWAYS_INLINE ~raw_ptr() noexcept = default;
+  PA_ALWAYS_INLINE PA_CONSTEXPR_DTOR ~raw_ptr() noexcept {
+    // Not =default because we want MSan use-after-dtor instrumentation.
+  }
   static_assert(!kZeroOnDestruct);
 #endif  // PA_BUILDFLAG(USE_RAW_PTR_BACKUP_REF_IMPL) ||
         // PA_BUILDFLAG(USE_RAW_PTR_ASAN_UNOWNED_IMPL) ||
@@ -1199,6 +1202,15 @@ constexpr inline auto SetExperimental = base::RawPtrTraits::kMayDangle;
 // DanglingUntriaged where necessary.
 constexpr inline auto CtnExperimental = base::RawPtrTraits::kMayDangle;
 
+// Marks the pointer as unprotected-in-release. Behavior depends on the
+// ENABLE_BRP_FOR_UNPROTECTED_IN_RELEASE_RAW_PTR build flag.
+constexpr inline auto kUnprotectedInRelease =
+#if PA_BUILDFLAG(ENABLE_BRP_FOR_UNPROTECTED_IN_RELEASE_RAW_PTR)
+    base::RawPtrTraits::kEmpty;
+#else
+    base::RawPtrTraits::kNoOpImpl;
+#endif
+
 // Public verson used in callbacks arguments when it is known that they might
 // receive dangling pointers. In any other cases, please
 // use one of:
@@ -1233,13 +1245,17 @@ struct less<raw_ptr<T, Traits>> {
   }
 };
 
+// Override so flat_hash_set/flat_hash_map lookups do not create extra raw_ptr.
+// This also allows dangling pointers to be used for lookup.
 template <typename T, base::RawPtrTraits Traits>
 struct hash<raw_ptr<T, Traits>> {
-  typedef raw_ptr<T, Traits> argument_type;
-  typedef std::size_t result_type;
-  result_type operator()(argument_type const& ptr) const {
+  using is_transparent = void;
+
+  size_t operator()(const raw_ptr<T, Traits>& ptr) const {
     return hash<T*>()(ptr.get());
   }
+
+  size_t operator()(T* ptr) const { return hash<T*>()(ptr); }
 };
 
 // Define for cases where raw_ptr<T> holds a pointer to an array of type T.
@@ -1278,7 +1294,6 @@ struct pointer_traits<::raw_ptr<T, Traits>> {
   }
 };
 
-#if PA_BUILDFLAG(ASSERT_CPP_20)
 // Mark `raw_ptr<T>` and `T*` as having a common reference type (the type to
 // which both can be converted or bound) of `T*`. This makes them satisfy
 // `std::equality_comparable`, which allows usage like:
@@ -1304,7 +1319,6 @@ template <typename T,
 struct basic_common_reference<T*, raw_ptr<T, Traits>, TQ, UQ> {
   using type = T*;
 };
-#endif  // PA_BUILDFLAG(ASSERT_CPP_20)
 
 }  // namespace std
 

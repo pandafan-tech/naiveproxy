@@ -126,13 +126,6 @@ bool StringToDouble(std::u16string_view input, double* output) {
       input, reinterpret_cast<const uint16_t*>(input.data()), *output);
 }
 
-std::string HexEncode(const void* bytes, size_t size) {
-  return HexEncode(
-      // TODO(crbug.com/40284755): The pointer-based overload of HexEncode
-      // should be removed.
-      UNSAFE_TODO(span(static_cast<const uint8_t*>(bytes), size)));
-}
-
 std::string HexEncode(span<const uint8_t> bytes) {
   // Each input byte creates two output hex characters.
   std::string ret;
@@ -146,6 +139,21 @@ std::string HexEncode(span<const uint8_t> bytes) {
 
 std::string HexEncode(std::string_view chars) {
   return HexEncode(base::as_byte_span(chars));
+}
+
+std::string HexEncodeLower(base::span<const uint8_t> bytes) {
+  // Each input byte creates two output hex characters.
+  std::string ret;
+  ret.reserve(bytes.size() * 2);
+
+  for (uint8_t byte : bytes) {
+    AppendHexEncodedByte(byte, ret, /*uppercase=*/false);
+  }
+  return ret;
+}
+
+std::string HexEncodeLower(std::string_view chars) {
+  return HexEncodeLower(base::as_byte_span(chars));
 }
 
 bool HexStringToInt(std::string_view input, int* output) {

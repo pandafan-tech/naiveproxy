@@ -33,6 +33,7 @@
 #include "net/cookies/cookie_monster.h"
 #include "net/disk_cache/buildflags.h"
 #include "net/dns/context_host_resolver.h"
+#include "net/dns/dns_platform_attempt_factory.h"
 #include "net/dns/host_resolver.h"
 #include "net/dns/host_resolver_manager.h"
 #include "net/dns/stale_host_resolver.h"
@@ -188,11 +189,6 @@ void URLRequestContextBuilder::set_persistent_reporting_and_nel_store(
   persistent_reporting_and_nel_store_ =
       std::move(persistent_reporting_and_nel_store);
 }
-
-void URLRequestContextBuilder::set_enterprise_reporting_endpoints(
-    const base::flat_map<std::string, GURL>& enterprise_reporting_endpoints) {
-  enterprise_reporting_endpoints_ = enterprise_reporting_endpoints;
-}
 #endif  // BUILDFLAG(ENABLE_REPORTING)
 
 void URLRequestContextBuilder::SetCookieStore(
@@ -268,6 +264,11 @@ void URLRequestContextBuilder::set_device_bound_session_service(
 }
 #endif  // BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
 
+void URLRequestContextBuilder::set_cache_encryption_delegate(
+    std::unique_ptr<net::CacheEncryptionDelegate> cache_encryption_delegate) {
+  cache_encryption_delegate_ = std::move(cache_encryption_delegate);
+}
+
 void URLRequestContextBuilder::BindToNetwork(
     handles::NetworkHandle network,
     std::optional<HostResolver::ManagerOptions> options) {
@@ -342,6 +343,7 @@ std::unique_ptr<URLRequestContext> URLRequestContextBuilder::Build() {
     // QUIC connection migration should not be enabled when binding a context
     // to a network.
     quic_params->migrate_sessions_on_network_change_v2 = false;
+    quic_params->migrate_sessions_early_v2 = false;
 
     // Objects used by network sessions for this context shouldn't listen to
     // network changes.
@@ -484,7 +486,7 @@ std::unique_ptr<URLRequestContext> URLRequestContextBuilder::Build() {
     context->set_reporting_service(
         ReportingService::Create(*reporting_policy_, context.get(),
                                  persistent_reporting_and_nel_store_.get(),
-                                 enterprise_reporting_endpoints_));
+                                 std::move(prepare_upload_request_callback_)));
   }
 
   if (network_error_logging_enabled_) {
@@ -513,13 +515,19 @@ std::unique_ptr<URLRequestContext> URLRequestContextBuilder::Build() {
 
 #if BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
   if (has_device_bound_session_service_) {
+    if (unexportable_key_service_) {
+      context->set_unexportable_key_service(
+          std::move(unexportable_key_service_));
+    }
     if (!device_bound_sessions_file_path_.empty()) {
       context->set_device_bound_session_store(
           device_bound_sessions::SessionStore::Create(
-              device_bound_sessions_file_path_));
+              device_bound_sessions_file_path_,
+              context->unexportable_key_service()));
     }
     context->set_device_bound_session_service(
-        device_bound_sessions::SessionService::Create(context.get()));
+        device_bound_sessions::SessionService::Create(
+            context.get(), device_bound_sessions_restricted_sites_));
   } else {
     if (device_bound_session_service_) {
       context->set_device_bound_session_service(
@@ -535,6 +543,9 @@ std::unique_ptr<URLRequestContext> URLRequestContextBuilder::Build() {
       context.get(), &network_session_context,
       suppress_setting_socket_performance_watcher_factory_for_testing_,
       client_socket_factory_raw_);
+
+  context->set_dns_platform_attempt_factory(
+      std::move(dns_platform_attempt_factory_));
 
   context->set_http_network_session(std::make_unique<HttpNetworkSession>(
       http_network_session_params_, network_session_context));
@@ -590,7 +601,7 @@ std::unique_ptr<URLRequestContext> URLRequestContextBuilder::Build() {
       http_cache_backend = std::make_unique<HttpCache::DefaultBackend>(
           DISK_CACHE, backend_type, http_cache_params_.file_operations_factory,
           http_cache_params_.path, http_cache_params_.max_size,
-          http_cache_params_.reset_cache);
+          http_cache_params_.reset_cache, cache_encryption_delegate_.get());
       if (base::FeatureList::IsEnabled(features::kHttpCacheNoVarySearch) &&
           features::kHttpCacheNoVarySearchPersistenceEnabled.Get() &&
           !http_cache_params_.no_vary_search_path.empty()) {
@@ -612,6 +623,7 @@ std::unique_ptr<URLRequestContext> URLRequestContextBuilder::Build() {
         std::move(file_operations));
   }
   context->set_http_transaction_factory(std::move(http_transaction_factory));
+  context->set_cache_encryption_delegate(std::move(cache_encryption_delegate_));
 
   std::unique_ptr<URLRequestJobFactory> job_factory =
       std::make_unique<URLRequestJobFactory>();
@@ -620,13 +632,7 @@ std::unique_ptr<URLRequestContext> URLRequestContextBuilder::Build() {
                                     std::move(scheme_handler.second));
   }
   protocol_handlers_.clear();
-
   context->set_job_factory(std::move(job_factory));
-
-  if (cookie_deprecation_label_.has_value()) {
-    context->set_cookie_deprecation_label(*cookie_deprecation_label_);
-  }
-
   return context;
 }
 
@@ -638,8 +644,10 @@ URLRequestContextBuilder::CreateProxyResolutionService(
     NetworkDelegate* network_delegate,
     NetLog* net_log,
     bool pac_quick_check_enabled) {
+  DCHECK(host_resolver);
   return ConfiguredProxyResolutionService::CreateUsingSystemProxyResolver(
-      std::move(proxy_config_service), net_log, pac_quick_check_enabled);
+      std::move(proxy_config_service), host_resolver, net_log,
+      pac_quick_check_enabled);
 }
 
 }  // namespace net

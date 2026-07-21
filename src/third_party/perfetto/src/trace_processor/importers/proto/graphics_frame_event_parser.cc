@@ -30,6 +30,7 @@
 #include "src/trace_processor/importers/common/args_tracker.h"
 #include "src/trace_processor/importers/common/event_tracker.h"
 #include "src/trace_processor/importers/common/slice_tracker.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/importers/common/track_tracker.h"
 #include "src/trace_processor/importers/common/tracks.h"
 #include "src/trace_processor/importers/common/tracks_common.h"
@@ -102,7 +103,7 @@ void GraphicsFrameEventParser::ParseGraphicsFrameEvent(int64_t timestamp,
   protos::pbzero::GraphicsFrameEvent::BufferEvent::Decoder event(
       frame_event.buffer_event());
   if (!event.has_buffer_id()) {
-    context_->storage->IncrementStats(
+    context_->stats_tracker->IncrementStats(
         stats::graphics_frame_event_parser_errors);
     return;
   }
@@ -146,7 +147,7 @@ void GraphicsFrameEventParser::CreateBufferEvent(
       it->latch_ts = timestamp;
       break;
     default:
-      context_->storage->IncrementStats(
+      context_->stats_tracker->IncrementStats(
           stats::graphics_frame_event_parser_errors);
       break;
   }
@@ -340,9 +341,7 @@ GraphicsFrameEventParser::InsertPhaseSlice(
     StringId layer_name_id) {
   // If the frame_number is known, set it as the name of the slice.
   // If not known (DEQUEUE), set the name as the timestamp.
-  // Timestamp is chosen here because the stack_id is hashed based on the name
-  // of the slice. To not have any conflicting stack_id with any of the
-  // existing slices, we use timestamp as the temporary name.
+  // Timestamp is chosen here to ensure unique names for slices.
   StringId slice_name;
   if (event.frame_number() != 0) {
     slice_name =
@@ -358,7 +357,7 @@ GraphicsFrameEventParser::InsertPhaseSlice(
         inserter->AddArg(layer_name_key_id_, Variadic::String(layer_name_id));
       });
   if (slice_id) {
-    return context_->storage->slice_table().FindById(*slice_id)->ToRowNumber();
+    return context_->storage->slice_table()[*slice_id].ToRowNumber();
   }
   return std::nullopt;
 }

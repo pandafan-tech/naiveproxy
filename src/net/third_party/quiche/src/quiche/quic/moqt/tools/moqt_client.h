@@ -12,7 +12,10 @@
 #include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/http/quic_spdy_client_session.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
+#include "quiche/quic/core/quic_session.h"
 #include "quiche/quic/moqt/moqt_session.h"
+#include "quiche/quic/moqt/moqt_session_callbacks.h"
+#include "quiche/quic/moqt/moqt_session_interface.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/quic_default_client.h"
 #include "quiche/common/platform/api/quiche_export.h"
@@ -25,18 +28,21 @@ class QUICHE_EXPORT MoqtClient {
   MoqtClient(quic::QuicSocketAddress peer_address,
              const quic::QuicServerId& server_id,
              std::unique_ptr<quic::ProofVerifier> proof_verifier,
-             quic::QuicEventLoop* event_loop);
+             quic::QuicEventLoop* event_loop,
+             MoqtSessionParameters parameters = MoqtSessionParameters());
 
   // Establishes the connection to the specified endpoint. The errors are
   // returned via the session termination callback.
   void Connect(std::string path, MoqtSessionCallbacks callbacks);
 
   MoqtSession* session() { return session_; }
+  quic::QuicSession* quic_session() { return spdy_client_.session(); }
 
  private:
   absl::Status ConnectInner(std::string path, MoqtSessionCallbacks& callbacks);
 
   quic::QuicDefaultClient spdy_client_;
+  MoqtSessionParameters parameters_;
   MoqtSession* session_ = nullptr;
 };
 

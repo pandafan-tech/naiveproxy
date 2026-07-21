@@ -24,7 +24,6 @@
 #include "base/check_op.h"
 #include "base/compiler_specific.h"
 #include "base/containers/circular_deque.h"
-#include "base/containers/contains.h"
 #include "base/containers/flat_set.h"
 #include "base/containers/linked_list.h"
 #include "base/debug/debugger.h"
@@ -41,11 +40,11 @@
 #include "base/metrics/field_trial.h"
 #include "base/metrics/field_trial_params.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/no_destructor.h"
 #include "base/notimplemented.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/observer_list.h"
+#include "base/rand_util.h"
 #include "base/sequence_checker.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
@@ -133,11 +132,14 @@
 #if BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
 #include <net/if.h>
 #include "net/base/sys_addrinfo.h"
-#if BUILDFLAG(IS_ANDROID)
-#else  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include <ifaddrs.h>
-#endif  // BUILDFLAG(IS_ANDROID)
+#endif  // !BUILDFLAG(IS_ANDROID)
 #endif  // BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/android_info.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 
 namespace net {
 
@@ -177,8 +179,8 @@ bool ConfigureAsyncDnsNoFallbackFieldTrial() {
   return kDefault;
 }
 
-base::Value::Dict NetLogIPv6AvailableParams(bool ipv6_available, bool cached) {
-  base::Value::Dict dict;
+base::DictValue NetLogIPv6AvailableParams(bool ipv6_available, bool cached) {
+  base::DictValue dict;
   dict.Set("ipv6_available", ipv6_available);
   dict.Set("cached", cached);
   return dict;
@@ -244,20 +246,20 @@ PrioritizedDispatcher::Limits GetDispatcherLimits(
   return limits;
 }
 
-base::Value::Dict NetLogResults(const HostCache::Entry& results) {
-  base::Value::Dict dict;
+base::DictValue NetLogResults(const HostCache::Entry& results) {
+  base::DictValue dict;
   dict.Set("results", results.NetLogParams());
   return dict;
 }
 
-base::Value::Dict NetLogResults(
+base::DictValue NetLogResults(
     const std::set<std::unique_ptr<HostResolverInternalResult>>& results) {
-  auto list = base::Value::List::with_capacity(results.size());
+  auto list = base::ListValue::with_capacity(results.size());
   for (const std::unique_ptr<HostResolverInternalResult>& result : results) {
     list.Append(result->ToValue());
   }
 
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("results", std::move(list));
   return dict;
 }
@@ -397,9 +399,17 @@ class HostResolverManager::ProbeRequestImpl
   }
 
   void CancelRunner() {
-    runner_.reset();
+    if (runner_) {
+      // Destroy the runner asynchronously to prevent its destructor from
+      // causing reentrant modifications to HostResolverManager::jobs_
+      // during InvalidateCaches().
+      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(
+          FROM_HERE, std::move(runner_));
+    }
 
-    // Cancel any asynchronous StartRunner() calls.
+    // Synchronously invalidate WeakPtrs to ensure that any previously posted
+    // asynchronous StartRunner() tasks (e.g., from the old session) are
+    // cancelled and do not execute unexpectedly in the new session.
     weak_ptr_factory_.InvalidateWeakPtrs();
   }
 
@@ -439,10 +449,12 @@ HostResolverManager::HostResolverManager(
       is_happy_eyeballs_v3_enabled_(
           base::FeatureList::IsEnabled(features::kHappyEyeballsV3)),
       tick_clock_(base::DefaultTickClock::GetInstance()),
-      https_svcb_options_(
-          options.https_svcb_options
-              ? *options.https_svcb_options
-              : HostResolver::HttpsSvcbOptions::FromFeatures()) {
+      https_svcb_options_(options.https_svcb_options
+                              ? *options.https_svcb_options
+                              : HostResolver::HttpsSvcbOptions::FromFeatures()),
+      platform_apis_enabled_(options.insecure_dns_via_platform_apis_enabled) {
+  CHECK(!platform_apis_enabled_ || features::IsDnsPlatformSupported());
+
   PrioritizedDispatcher::Limits job_limits = GetDispatcherLimits(options);
   dispatcher_ = std::make_unique<PrioritizedDispatcher>(job_limits);
   max_queued_jobs_ = job_limits.total_jobs * 100u;
@@ -582,7 +594,7 @@ HostResolverManager::CreateMdnsListener(const HostPortPair& host,
 
 std::unique_ptr<HostResolver::ServiceEndpointRequest>
 HostResolverManager::CreateServiceEndpointRequest(
-    url::SchemeHostPort scheme_host_port,
+    HostResolver::Host host,
     NetworkAnonymizationKey network_anonymization_key,
     NetLogWithSource net_log,
     ResolveHostParameters parameters,
@@ -595,24 +607,43 @@ HostResolverManager::CreateServiceEndpointRequest(
   }
 
   return std::make_unique<ServiceEndpointRequestImpl>(
-      std::move(scheme_host_port), std::move(network_anonymization_key),
-      std::move(net_log), std::move(parameters),
+      std::move(host), std::move(network_anonymization_key), std::move(net_log),
+      std::move(parameters),
       resolve_context ? resolve_context->GetWeakPtr() : nullptr,
       weak_ptr_factory_.GetWeakPtr(), tick_clock_);
 }
 
 void HostResolverManager::SetInsecureDnsClientEnabled(
-    bool enabled,
+    InsecureDnsMode mode,
     bool additional_dns_types_enabled) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  CHECK(mode != InsecureDnsMode::kEnabledPlatform ||
+        features::IsDnsPlatformSupported());
 
   if (!dns_client_)
     return;
 
+  bool insecure_dns_enabled = false;
+  switch (mode) {
+    case InsecureDnsMode::kDisabled:
+      insecure_dns_enabled = false;
+      platform_apis_enabled_ = false;
+      break;
+    case InsecureDnsMode::kEnabledBuiltIn:
+      insecure_dns_enabled = true;
+      platform_apis_enabled_ = false;
+      break;
+    case InsecureDnsMode::kEnabledPlatform:
+      insecure_dns_enabled = true;
+      platform_apis_enabled_ = true;
+      break;
+  }
+
   bool enabled_before = dns_client_->CanUseInsecureDnsTransactions();
   bool additional_types_before =
       enabled_before && dns_client_->CanQueryAdditionalTypesViaInsecureDns();
-  dns_client_->SetInsecureEnabled(enabled, additional_dns_types_enabled);
+  dns_client_->SetInsecureEnabled(insecure_dns_enabled,
+                                  additional_dns_types_enabled);
 
   // Abort current tasks if `CanUseInsecureDnsTransactions()` changes or if
   // insecure transactions are enabled and
@@ -627,10 +658,10 @@ void HostResolverManager::SetInsecureDnsClientEnabled(
   }
 }
 
-base::Value::Dict HostResolverManager::GetDnsConfigAsValue() const {
+base::DictValue HostResolverManager::GetDnsConfigAsValue() const {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   return dns_client_ ? dns_client_->GetDnsConfigAsValueForNetLog()
-                     : base::Value::Dict();
+                     : base::DictValue();
 }
 
 void HostResolverManager::SetDnsConfigOverrides(DnsConfigOverrides overrides) {
@@ -799,7 +830,8 @@ void HostResolverManager::InitializeJobKeyAndIPAddress(
       out_job_key.host.HasScheme()) {
     static constexpr std::string_view kSchemesForHttpsQuery[] = {
         url::kHttpScheme, url::kHttpsScheme, url::kWsScheme, url::kWssScheme};
-    if (base::Contains(kSchemesForHttpsQuery, out_job_key.host.GetScheme())) {
+    if (std::ranges::contains(kSchemesForHttpsQuery,
+                              out_job_key.host.GetScheme())) {
       effective_types.Put(DnsQueryType::HTTPS);
     }
   }
@@ -824,11 +856,11 @@ HostCache::Entry HostResolverManager::ResolveLocally(
   CreateTaskSequence(job_key, cache_usage, secure_dns_policy, out_tasks);
   source_net_log.AddEvent(
       NetLogEventType::HOST_RESOLVER_MANAGER_TASK_SEQUENCE_CREATED, [&] {
-        base::Value::List tasks_list;
+        base::ListValue tasks_list;
         for (TaskType task : *out_tasks) {
           tasks_list.Append(static_cast<int>(task));
         }
-        return base::Value::Dict().Set("tasks", std::move(tasks_list));
+        return base::DictValue().Set("tasks", std::move(tasks_list));
       });
 
   if (!ip_address.IsValid()) {
@@ -1078,6 +1110,11 @@ std::optional<HostCache::Entry> HostResolverManager::MaybeReadFromConfig(
   if (filtered_addresses.empty())
     return std::nullopt;
 
+  if (base::FeatureList::IsEnabled(
+          features::kEnableBootstrapIPRandomizationForDoh)) {
+    base::RandomShuffle(filtered_addresses.begin(), filtered_addresses.end());
+  }
+
   return HostCache::Entry(OK, std::move(filtered_addresses), /*aliases=*/{},
                           HostCache::Entry::SOURCE_CONFIG);
 }
@@ -1289,6 +1326,8 @@ void HostResolverManager::PushDnsTasks(bool system_task_allowed,
   // DnsTasks. It is still necessary to call this method, however, so that the
   // correct cache tasks for the secure dns mode are added.
   const bool dns_tasks_allowed = !ShouldForceSystemResolverDueToTestOverride();
+  const TaskType dns_task_type =
+      platform_apis_enabled_ ? TaskType::DNS_PLATFORM : TaskType::DNS;
   // Upgrade the insecure DnsTask depending on the secure dns mode.
   switch (secure_dns_mode) {
     case SecureDnsMode::kSecure:
@@ -1305,7 +1344,7 @@ void HostResolverManager::PushDnsTasks(bool system_task_allowed,
               resolve_context)) {
         // Don't run a secure DnsTask if there are no available DoH servers.
         if (dns_tasks_allowed && insecure_tasks_allowed)
-          out_tasks->push_back(TaskType::DNS);
+          out_tasks->push_back(dns_task_type);
       } else if (prioritize_local_lookups) {
         // If local lookups are prioritized, the cache should be checked for
         // both secure and insecure results prior to running a secure DnsTask.
@@ -1313,7 +1352,7 @@ void HostResolverManager::PushDnsTasks(bool system_task_allowed,
         if (dns_tasks_allowed) {
           out_tasks->push_back(TaskType::SECURE_DNS);
           if (insecure_tasks_allowed)
-            out_tasks->push_back(TaskType::DNS);
+            out_tasks->push_back(dns_task_type);
         }
       } else {
         if (allow_cache) {
@@ -1327,26 +1366,28 @@ void HostResolverManager::PushDnsTasks(bool system_task_allowed,
         if (allow_cache)
           out_tasks->push_back(TaskType::INSECURE_CACHE_LOOKUP);
         if (dns_tasks_allowed && insecure_tasks_allowed)
-          out_tasks->push_back(TaskType::DNS);
+          out_tasks->push_back(dns_task_type);
       }
       break;
     case SecureDnsMode::kOff:
       DCHECK(!allow_cache || IsLocalTask(out_tasks->front()));
       if (dns_tasks_allowed && insecure_tasks_allowed)
-        out_tasks->push_back(TaskType::DNS);
+        out_tasks->push_back(dns_task_type);
       break;
     default:
       NOTREACHED();
   }
 
-  constexpr TaskType kWantTasks[] = {TaskType::DNS, TaskType::SECURE_DNS};
-  const bool no_dns_or_secure_tasks =
-      std::ranges::find_first_of(*out_tasks, kWantTasks) == out_tasks->end();
+  constexpr TaskType kBuiltinTasks[] = {TaskType::DNS, TaskType::SECURE_DNS,
+                                        TaskType::DNS_PLATFORM};
+  const bool no_builtin_tasks =
+      std::ranges::find_first_of(*out_tasks, kBuiltinTasks) == out_tasks->end();
   // The system resolver can be used as a fallback for a non-existent or
-  // failing DnsTask if allowed by the request parameters.
+  // failing builtin resolver task, if allowed by the request parameters.
   if (system_task_allowed &&
-      (no_dns_or_secure_tasks || allow_fallback_to_systemtask_))
+      (no_builtin_tasks || allow_fallback_to_systemtask_)) {
     out_tasks->push_back(TaskType::SYSTEM);
+  }
 }
 
 void HostResolverManager::CreateTaskSequence(
@@ -1448,6 +1489,8 @@ void HostResolverManager::CreateTaskSequence(
   // `HOST_RESOLVER_CANONNAME` is only supported through system resolution.
   if (job_key.flags & HOST_RESOLVER_CANONNAME) {
     DCHECK(std::ranges::find(*out_tasks, TaskType::DNS) == out_tasks->end());
+    DCHECK(std::ranges::find(*out_tasks, TaskType::DNS_PLATFORM) ==
+           out_tasks->end());
     DCHECK(std::ranges::find(*out_tasks, TaskType::MDNS) == out_tasks->end());
   }
 }

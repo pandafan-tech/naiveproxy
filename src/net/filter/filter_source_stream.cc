@@ -11,9 +11,9 @@
 #include "base/containers/adapters.h"
 #include "base/containers/fixed_flat_map.h"
 #include "base/functional/bind.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/trace_event/trace_event.h"
 #include "net/base/io_buffer.h"
@@ -80,7 +80,7 @@ std::string FilterSourceStream::Description() const {
   std::string next_type_string = upstream_->Description();
   if (next_type_string.empty())
     return GetTypeAsString();
-  return next_type_string + "," + GetTypeAsString();
+  return base::StrCat({next_type_string, ",", GetTypeAsString()});
 }
 
 bool FilterSourceStream::MayHaveMoreBytes() const {

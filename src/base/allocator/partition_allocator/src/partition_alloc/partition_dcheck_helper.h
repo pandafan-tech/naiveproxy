@@ -2,18 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_PARTITION_DCHECK_HELPER_H_
 #define PARTITION_ALLOC_PARTITION_DCHECK_HELPER_H_
 
 #include "partition_alloc/partition_alloc_base/compiler_specific.h"
 #include "partition_alloc/partition_alloc_base/component_export.h"
 #include "partition_alloc/partition_alloc_forward.h"
-#include "partition_alloc/partition_lock.h"
 
 namespace partition_alloc::internal {
 

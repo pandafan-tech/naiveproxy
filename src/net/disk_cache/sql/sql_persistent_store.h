@@ -5,11 +5,15 @@
 #ifndef NET_DISK_CACHE_SQL_SQL_PERSISTENT_STORE_H_
 #define NET_DISK_CACHE_SQL_SQL_PERSISTENT_STORE_H_
 
+#include <atomic>
 #include <optional>
 #include <set>
+#include <variant>
 
 #include "base/containers/flat_set.h"
+#include "base/containers/queue.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
 #include "base/types/expected.h"
@@ -19,6 +23,9 @@
 #include "net/disk_cache/buildflags.h"
 #include "net/disk_cache/disk_cache.h"
 #include "net/disk_cache/sql/cache_entry_key.h"
+#include "net/disk_cache/sql/entry_write_buffer.h"
+#include "net/disk_cache/sql/sql_backend_aliases.h"
+#include "net/disk_cache/sql/sql_persistent_store_in_memory_index.h"
 
 // This backend is experimental and only available when the build flag is set.
 static_assert(BUILDFLAG(ENABLE_DISK_CACHE_SQL_BACKEND));
@@ -35,6 +42,8 @@ class IOBuffer;
 
 namespace disk_cache {
 
+class SqlAsyncTaskManager;
+
 // This class serves as the main entry point for the SQL-based disk cache's
 // persistence layer. It manages multiple database shards to improve
 // concurrency, distributing operations across them based on cache entry keys.
@@ -47,10 +56,10 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
 
   // The primary key for resources managed in the SqlPersistentStore's resources
   // table.
-  using ResId = base::StrongAlias<class ResIdTag, int64_t>;
+  using ResId = SqlPersistentStoreResId;
 
   // A unique identifier for a database shard.
-  using ShardId = base::StrongAlias<class ResIdTag, uint8_t>;
+  using ShardId = SqlPersistentStoreShardId;
 
   // Represents the error of SqlPersistentStore operation.
   // These values are persisted to logs. Entries should not be renumbered and
@@ -80,7 +89,9 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
     kCheckSumError = 19,
     kDatabaseClosed = 20,
     kAbortedDueToBrowserActivity = 21,
-    kMaxValue = kAbortedDueToBrowserActivity
+    kFailedToSetAutoVacuum = 22,
+    kIncrementalVacuumDisabled = 23,
+    kMaxValue = kIncrementalVacuumDisabled
   };
   // LINT.ThenChange(//tools/metrics/histograms/metadata/net/enums.xml:SqlDiskCacheStoreError)
 
@@ -108,6 +119,39 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
     scoped_refptr<net::GrowableIOBuffer> head;
     // True if the entry was opened, false if it was newly created.
     bool opened = false;
+  };
+
+  // Holds approximate metadata about a cache entry.
+  struct NET_EXPORT_PRIVATE EntryMetadata {
+    EntryMetadata(ResId res_id,
+                  base::Time last_used,
+                  std::optional<int64_t> bytes_usage);
+    ~EntryMetadata();
+    EntryMetadata(const EntryMetadata&);
+    EntryMetadata& operator=(const EntryMetadata&);
+    EntryMetadata(EntryMetadata&&);
+    EntryMetadata& operator=(EntryMetadata&&);
+
+    ResId res_id;
+    base::Time last_used;
+    std::optional<int64_t> bytes_usage;
+  };
+
+  // Represents the result of a read operation.
+  struct NET_EXPORT_PRIVATE ReadResult {
+    ReadResult();
+    ~ReadResult();
+    ReadResult(const ReadResult&);
+    ReadResult& operator=(const ReadResult&);
+    ReadResult(ReadResult&&);
+    ReadResult& operator=(ReadResult&&);
+
+    // The number of bytes successfully read.
+    int read_bytes = 0;
+    // Optionally, a buffer containing data read beyond the requested range.
+    scoped_refptr<net::IOBuffer> cache_buffer;
+    // The offset within the entry's body where `cache_buffer` starts.
+    int64_t cache_buffer_offset = 0;
   };
 
   // Holds a resource ID and the ID of the shard it belongs to.
@@ -159,22 +203,72 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
     int64_t total_size = 0;
   };
 
-  // The result of a successful initialization.
-  struct InitResult {
-    InitResult(std::optional<int64_t> max_bytes,
-               const StoreStatus& store_status,
-               int64_t database_size)
-        : max_bytes(max_bytes),
-          store_status(store_status),
-          database_size(database_size) {}
-    ~InitResult() = default;
-    InitResult(InitResult&& other) = default;
-    InitResult& operator=(InitResult&& other) = default;
+  struct HashAndResId {
+    CacheEntryKey::Hash hash;
+    ResId res_id;
+  };
 
-    // max_bytes is set only on the first shard.
-    std::optional<int64_t> max_bytes;
+  using ResIdList = std::vector<ResId>;
+  using HashAndResIdList = std::vector<HashAndResId>;
+
+  // A struct to hold the in-memory index and the list of doomed resource IDs.
+  // This is used to return both from the backend task that loads them.
+  struct InMemoryIndexAndDoomedResIds {
+    InMemoryIndexAndDoomedResIds(SqlPersistentStoreInMemoryIndex&& index,
+                                 ResIdList doomed_entry_res_ids);
+    ~InMemoryIndexAndDoomedResIds();
+    InMemoryIndexAndDoomedResIds(InMemoryIndexAndDoomedResIds&& other);
+    InMemoryIndexAndDoomedResIds& operator=(
+        InMemoryIndexAndDoomedResIds&& other);
+
+    SqlPersistentStoreInMemoryIndex index;
+    ResIdList doomed_entry_res_ids;
+  };
+
+  struct NET_EXPORT_PRIVATE EvictionTarget {
+    EvictionTarget(SqlPersistentStore::ResId res_id,
+                   int64_t entry_size_with_overhead);
+    ~EvictionTarget();
+    EvictionTarget(EvictionTarget&&);
+    EvictionTarget& operator=(EvictionTarget&&);
+    EvictionTarget(const EvictionTarget&);
+    EvictionTarget& operator=(const EvictionTarget&);
+
+    bool operator==(const EvictionTarget& other) const;
+
+    SqlPersistentStore::ResId res_id;
+    int64_t entry_size_with_overhead;
+  };
+
+  using EvictionTargetQueue = base::queue<EvictionTarget>;
+
+  // The result of an eviction operation.
+  struct EvictionResult {
+    EvictionResult(Error error, size_t evicted_entry_count);
+    ~EvictionResult();
+    EvictionResult(EvictionResult&& other);
+    EvictionResult& operator=(EvictionResult&& other);
+
+    Error error;
+    size_t evicted_entry_count;
+  };
+
+  struct EvictionResultWithMetadata {
+    EvictionResultWithMetadata(
+        EvictionResult result,
+        EvictionTargetQueue pending_eviction_targets,
+        std::optional<SqlPersistentStoreInMemoryIndex> index,
+        StoreStatus store_status,
+        bool index_mismatch_detected);
+    ~EvictionResultWithMetadata();
+    EvictionResultWithMetadata(EvictionResultWithMetadata&& other);
+    EvictionResultWithMetadata& operator=(EvictionResultWithMetadata&& other);
+
+    EvictionResult result;
+    EvictionTargetQueue pending_eviction_targets;
+    std::optional<SqlPersistentStoreInMemoryIndex> index;
     StoreStatus store_status;
-    int64_t database_size;
+    bool index_mismatch_detected;
   };
 
   // A helper struct to bundle an operation's result with a flag indicating
@@ -209,23 +303,42 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
       std::optional<EntryInfoWithKeyAndIterator>;
   using OptionalEntryInfoWithKeyAndIteratorCallback =
       base::OnceCallback<void(OptionalEntryInfoWithKeyAndIterator)>;
-  using IntOrError = base::expected<int, Error>;
-  using IntOrErrorCallback = base::OnceCallback<void(IntOrError)>;
+  using ReadResultOrError = base::expected<ReadResult, Error>;
+  using ReadResultOrErrorCallback = base::OnceCallback<void(ReadResultOrError)>;
   using Int64OrError = base::expected<int64_t, Error>;
   using Int64OrErrorCallback = base::OnceCallback<void(Int64OrError)>;
+  using ResIdOrTime = std::variant<ResId, base::Time>;
 
-  using InitResultOrError = base::expected<InitResult, Error>;
-  using InitResultOrErrorCallback = base::OnceCallback<void(InitResultOrError)>;
-  using ResIdList = std::vector<ResId>;
-  using ResIdListOrError = base::expected<ResIdList, Error>;
-  using ResIdListOrErrorCallback = base::OnceCallback<void(ResIdListOrError)>;
+  using EntryMetadataOrError = base::expected<EntryMetadata, Error>;
+  using EntryMetadataOrErrorCallback =
+      base::OnceCallback<void(EntryMetadataOrError)>;
+
+  using HashAndResIdListOrError = base::expected<HashAndResIdList, Error>;
+  using HashAndResIdListOrErrorCallback =
+      base::OnceCallback<void(HashAndResIdListOrError)>;
 
   using ErrorAndStoreStatus = ResultAndStoreStatus<Error>;
   using EntryInfoOrErrorAndStoreStatus = ResultAndStoreStatus<EntryInfoOrError>;
-  using IntOrErrorAndStoreStatus = ResultAndStoreStatus<IntOrError>;
-  using ResIdListOrErrorAndStoreStatus = ResultAndStoreStatus<ResIdListOrError>;
-  using ResIdListOrErrorAndStoreStatusCallback =
-      base::OnceCallback<void(ResIdListOrErrorAndStoreStatus)>;
+  using EntryMetadataOrErrorAndStoreStatus =
+      ResultAndStoreStatus<EntryMetadataOrError>;
+  using ReadResultOrErrorAndStoreStatus =
+      ResultAndStoreStatus<ReadResultOrError>;
+  using ResIdOrError = base::expected<ResId, Error>;
+  using ResIdOrErrorCallback = base::OnceCallback<void(ResIdOrError)>;
+  using ResIdOrErrorAndStoreStatus = ResultAndStoreStatus<ResIdOrError>;
+  using HashAndResIdListOrErrorAndStoreStatus =
+      ResultAndStoreStatus<HashAndResIdListOrError>;
+  using HashOrError = base::expected<CacheEntryKey::Hash, Error>;
+  struct UsageAndHash {
+    int64_t bytes_usage;
+    CacheEntryKey::Hash hash;
+  };
+  using UsageAndHashOrError = base::expected<UsageAndHash, Error>;
+  using EvictionResultCallback = base::OnceCallback<void(EvictionResult)>;
+  using EvictionResultWithMetadataCallback =
+      base::OnceCallback<void(EvictionResultWithMetadata)>;
+  using InMemoryIndexAndDoomedResIdsOrError =
+      base::expected<InMemoryIndexAndDoomedResIds, Error>;
 
   // Creates a new instance of the persistent store. The returned object must be
   // initialized by calling `Initialize()`.
@@ -233,7 +346,8 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
                      int64_t max_bytes,
                      net::CacheType type,
                      std::vector<scoped_refptr<base::SequencedTaskRunner>>
-                         background_task_runners);
+                         background_task_runners,
+                     SqlAsyncTaskManager& async_task_manager);
   ~SqlPersistentStore();
 
   SqlPersistentStore(const SqlPersistentStore&) = delete;
@@ -267,8 +381,12 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
   // immediately removed from the cache's entry count and total size, but its
   // data remains on disk until `DeleteDoomedEntry()` is called. The `res_id`
   // ensures that only the correct instance of an entry is doomed.
+  // `accept_index_mismatch` should be set to true if the entry might have
+  // already been removed from the in-memory index by a concurrent operation
+  // (e.g., a previous Doom call).
   void DoomEntry(const CacheEntryKey& key,
                  ResId res_id,
+                 bool accept_index_mismatch,
                  ErrorCallback callback);
 
   // Physically deletes an entry that has been previously marked as doomed. This
@@ -303,49 +421,63 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
                                 base::Time last_used,
                                 ErrorCallback callback);
 
-  // Updates the `last_used` timestamp for the entry with the specified
-  // `res_id`. `callback` is invoked with `kOk` on success, or `kNotFound` if
-  // the entry does not exist or is already doomed.
-  void UpdateEntryLastUsedByResId(const CacheEntryKey& key,
-                                  ResId res_id,
-                                  base::Time last_used,
-                                  ErrorCallback callback);
-
-  // Updates the header data (stream 0) and the `last_used` timestamp for a
-  // specific cache entry. The `bytes_usage` for the entry is adjusted based
-  // on `header_size_delta`. `callback` is invoked with `kOk` on success,
-  // `kNotFound` if the entry (matching `key` and `res_id`) is not found or is
-  // doomed, or `kInvalidData` if internal data consistency checks fail.
-  // `buffer` must not be null. `header_size_delta` is the change in the size
-  // of the header data.
-  void UpdateEntryHeaderAndLastUsed(const CacheEntryKey& key,
-                                    ResId res_id,
-                                    base::Time last_used,
-                                    scoped_refptr<net::IOBuffer> buffer,
-                                    int64_t header_size_delta,
-                                    ErrorCallback callback);
+  // Writes data and updates metadata (header and last_used) for an entry in a
+  // single operation.
+  // `key` and `res_id` identify the target entry. If `res_id` is std::nullopt,
+  // a new entry is created.
+  // `old_body_end`: If provided, indicates that body data should be updated.
+  //                 It represents the expected current size of the body.
+  // `buffer`: contains the body data and offset to write.
+  // `last_used`: The new last used time. If a new entry is created, this is
+  //              used as the creation time.
+  // `new_hints`: Optional new hints to set.
+  // `head_buffer`: Optional new header data.
+  // `header_size_delta`: The change in header size.
+  // `doomed_new_entry`: If true, the entry is marked as doomed (deleted) upon
+  //                     creation. This parameter is only used when creating a
+  //                     new entry.
+  // `callback`: Invoked with the result of the operation. Returns the resource
+  //             ID on success, or an error code on failure.
+  void WriteEntryDataAndMetadata(
+      const CacheEntryKey& key,
+      std::optional<ResId> res_id,
+      std::optional<int64_t> old_body_end,
+      EntryWriteBuffer buffer,
+      base::Time last_used,
+      const std::optional<MemoryEntryDataHints>& new_hints,
+      scoped_refptr<net::IOBuffer> head_buffer,
+      int64_t header_size_delta,
+      bool doomed_new_entry,
+      ResIdOrErrorCallback callback);
 
   // Writes data to an entry's body. This can be used to write new data,
   // overwrite existing data, or append to the entry.
-  // `key` and `res_id` identify the target entry.
-  // `old_body_end` is the expected current size of the body. It is used to
-  // determine whether to trim or truncate existing data, and for consistency
-  // checks.
-  // `offset` is the position within the entry's body to start writing.
-  // `buffer` contains the data to be written. This can be null for truncation.
-  // `buf_len` is the size of `buffer`.
-  // If `truncate` is true, the entry's body will be truncated to the end of
-  // this write. Otherwise, the body size will grow if the write extends past
-  // the current end.
-  // `callback` is invoked upon completion with an error code.
+  // `key`: Identifies the target entry.
+  // `res_id_or_last_used_time`: Identifies the target entry. If it holds
+  //                             `base::Time`, a new entry is created with that
+  //                             time as the creation time. Otherwise, it holds
+  //                             the `ResId` of the existing entry.
+  // `old_body_end`: The expected current size of the body. It is used to
+  //                 determine whether to trim or truncate existing data, and
+  //                 for consistency checks.
+  // `buffer`: Contains the data and offset to be written.
+  // `truncate`: If true, the entry's body will be truncated to the end of this
+  //             write. Otherwise, the body size will grow if the write extends
+  //             past the current end.
+  // `doomed_new_entry`: If true, the entry is marked as doomed (deleted) upon
+  //                     creation. This parameter is only used when creating a
+  //                     new entry.
+  // `callback`: Invoked with the result of the operation. Returns the resource
+  //             ID on success, or an error code on failure.
   void WriteEntryData(const CacheEntryKey& key,
-                      ResId res_id,
+                      const ResIdOrTime& res_id_or_last_used_time,
                       int64_t old_body_end,
-                      int64_t offset,
-                      scoped_refptr<net::IOBuffer> buffer,
-                      int buf_len,
+                      EntryWriteBuffer buffer,
                       bool truncate,
-                      ErrorCallback callback);
+                      bool doomed_new_entry,
+                      bool sparse_write,
+                      int64_t header_size,
+                      ResIdOrErrorCallback callback);
 
   // Reads data from an entry's body.
   // `res_id` identifies the entry to read from.
@@ -364,7 +496,7 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
                      int buf_len,
                      int64_t body_end,
                      bool sparse_reading,
-                     IntOrErrorCallback callback);
+                     ReadResultOrErrorCallback callback);
 
   // Finds the available contiguous range of data for a given entry.
   // `res_id` identifies the entry.
@@ -399,13 +531,31 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
   // the backend after an operation that increases the cache size.
   EvictionUrgency GetEvictionUrgency();
 
-  // Starts the eviction process to reduce the cache size. This method removes
-  // the least recently used entries until the total cache size is below the
-  // low watermark. Entries with ResId in `excluded_res_ids` (typically active
-  // entries) will not be evicted. `callback` is invoked upon completion.
-  void StartEviction(std::vector<ResIdAndShardId> excluded_list,
-                     bool is_idle_time_eviction,
-                     ErrorCallback callback);
+  // Starts or resumes the eviction process to reduce the cache size. This
+  // method removes the least recently used entries until the total cache size
+  // is below the low watermark. Entries with ResId in `excluded_res_ids`
+  // (typically active entries) will not be evicted. `callback` is invoked upon
+  // completion.
+  //
+  // `excluded_list`: A list of ResIds (typically active entries) to exclude
+  //                  from eviction.
+  // `is_idle_time_eviction`: True if this eviction is triggered by idle time.
+  //                          If true, eviction may be aborted if the browser
+  //                          becomes active.
+  // `eviction_abort_flag`: A shared atomic flag that can be set to true to
+  //                        signal an abort request. Note that even if this flag
+  //                        is set, eviction continues until the cache size
+  //                        drops below the high watermark.
+  // `callback`: Invoked with the result of the eviction.
+  void StartEviction(
+      std::vector<ResIdAndShardId> excluded_list,
+      bool is_idle_time_eviction,
+      scoped_refptr<base::RefCountedData<std::atomic_bool>> eviction_abort_flag,
+      ErrorCallback callback);
+
+  // Returns true if there is a pending eviction that was paused and needs to be
+  // resumed.
+  bool HasPendingEviction() const;
 
   // The maximum size of an individual cache entry's data stream.
   int64_t MaxFileSize() const;
@@ -428,10 +578,11 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
   // database operations.
   int64_t GetSizeOfAllEntries() const;
 
-  // Loads the in-memory index. This is a no-op if the index has already been
-  // loaded or if a load is already in progress. Returns true if a load was
-  // initiated.
-  bool MaybeLoadInMemoryIndex(ErrorCallback callback);
+  // Loads the in-memory index if it hasn't been loaded yet. `callback` is
+  // invoked with the result of the load. If the index is already loaded, the
+  // callback is run immediately with the previous result. Multiple concurrent
+  // calls will all receive the same result when the load completes.
+  void MaybeLoadInMemoryIndex(ErrorCallback callback);
 
   // If there are entries that were doomed in a previous session, this method
   // triggers a task to delete them from the database. The cleanup is performed
@@ -442,6 +593,15 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
   // If the browser is idle and the number of pages recorded in the WAL exceeds
   // kSqlDiskCacheIdleCheckpointThreshold, a checkpoint is executed.
   void MaybeRunCheckpoint(base::OnceCallback<void(bool)> callback);
+
+  // If the browser is idle and the database is configured with incremental
+  // vacuum, this method runs incremental vacuum to reclaim free pages. It
+  // vacuums up to N pages (controlled by feature param) at a time in a loop
+  // while the browser remains idle and `abort_flag` is not set. `callback` is
+  // invoked when the operation is complete on all shards.
+  void MaybeRunIncrementalVacuum(
+      scoped_refptr<base::RefCountedData<std::atomic_bool>> abort_flag,
+      base::OnceCallback<void(bool)> callback);
 
   enum class IndexState {
     // The in-memory index is not available (e.g., not yet loaded or
@@ -456,6 +616,22 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
   // Synchronously checks the state of a key hash against the in-memory index.
   IndexState GetIndexStateForHash(CacheEntryKey::Hash key_hash) const;
 
+  // Updates the in-memory index with the given hints for the specified entry.
+  void SetInMemoryEntryDataHints(CacheEntryKey::Hash key_hash,
+                                 ResId res_id,
+                                 MemoryEntryDataHints hints);
+
+  // Retrieves the hints for the specified entry from the in-memory index, if
+  // available.
+  std::optional<MemoryEntryDataHints> GetInMemoryEntryDataHints(
+      CacheEntryKey::Hash key_hash) const;
+
+  // Attempts to retrieve a single resource ID associated with the given key
+  // hash from the in-memory index. Returns the resource ID if a unique entry
+  // exists for the hash; otherwise, returns std::nullopt.
+  std::optional<ResId> TryGetSingleResIdFromInMemoryIndex(
+      CacheEntryKey::Hash key_hash) const;
+
   // Returns the shard ID for a given cache key hash.
   ShardId GetShardIdForHash(CacheEntryKey::Hash key_hash) const;
 
@@ -465,11 +641,45 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
   // Sets a flag to simulate database operation failures for testing.
   void SetSimulateDbFailureForTesting(bool fail);
 
+  // Sets a flag to simulate database operation failure for a specific shard.
+  void SetSimulateDbShardFailureForTesting(size_t shard_index, bool fail);
+
   // Raze the Database and the poison the database handle for testing. This is
   // useful for testing the behavior after a catastrophic error.
   void RazeAndPoisonForTesting();
 
+  // Sets a hook to be called during eviction, allowing tests to control timing.
+  void SetEvictionHookForTesting(base::RepeatingClosure hook);
+
+  BackendShard& GetShardForTesting(ShardId shard_id) const {
+    return *backend_shards_[shard_id.value()];
+  }
+  BackendShard& GetShardForTesting(CacheEntryKey::Hash hash) const {
+    return GetShard(hash);
+  }
+
  private:
+  // The result of a successful initialization.
+  struct InitResult {
+    InitResult(std::optional<int64_t> max_bytes,
+               const StoreStatus& store_status,
+               int64_t database_size,
+               std::optional<InMemoryIndexAndDoomedResIds> in_memory_data);
+    ~InitResult();
+    InitResult(InitResult&& other);
+    InitResult& operator=(InitResult&& other);
+
+    // max_bytes is set only on the first shard.
+    std::optional<int64_t> max_bytes;
+    StoreStatus store_status;
+    int64_t database_size;
+    // Used only when features::kSqlDiskCacheLoadIndexOnInit is true.
+    std::optional<InMemoryIndexAndDoomedResIds> in_memory_data;
+  };
+
+  using InitResultOrError = base::expected<InitResult, Error>;
+  using InitResultOrErrorCallback = base::OnceCallback<void(InitResultOrError)>;
+
   void SetMaxSize(int64_t max_bytes);
   base::RepeatingCallback<void(Error)> CreateBarrierErrorCallback(
       ErrorCallback callback);
@@ -481,13 +691,51 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
       const base::FilePath& path,
       net::CacheType type,
       std::vector<scoped_refptr<base::SequencedTaskRunner>>
-          background_task_runners);
+          background_task_runners,
+      SqlAsyncTaskManager& async_task_manager);
 
   void OnInitializeFinished(ErrorCallback callback,
                             std::vector<InitResultOrError> results);
+
+  void InitializeNextShard(ErrorCallback callback,
+                           std::vector<InitResultOrError> results);
+  void OnShardInitialized(ErrorCallback callback,
+                          std::vector<InitResultOrError> results,
+                          InitResultOrError result);
+
+  void OnLoadInMemoryIndexFinished(Error result);
+  void StartEvictionInternal(
+      std::vector<ResIdAndShardId> excluded_list,
+      bool is_idle_time_eviction,
+      scoped_refptr<base::RefCountedData<std::atomic_bool>> eviction_abort_flag,
+      ErrorCallback callback,
+      Error index_load_result);
+  void ResumePendingEviction(
+      std::vector<base::flat_set<SqlPersistentStore::ResId>>
+          excluded_res_id_sets,
+      bool is_idle_time_eviction,
+      scoped_refptr<base::RefCountedData<std::atomic_bool>> eviction_abort_flag,
+      ErrorCallback callback);
+  void OnPendingEvictionFinished(
+      std::vector<base::flat_set<SqlPersistentStore::ResId>>
+          excluded_res_id_sets,
+      bool is_idle_time_eviction,
+      scoped_refptr<base::RefCountedData<std::atomic_bool>> eviction_abort_flag,
+      base::TimeTicks start_time,
+      ErrorCallback callback,
+      std::vector<EvictionResult> results);
+  void StartNewEviction(
+      std::vector<base::flat_set<SqlPersistentStore::ResId>>
+          excluded_res_id_sets,
+      bool is_idle_time_eviction,
+      scoped_refptr<base::RefCountedData<std::atomic_bool>> eviction_abort_flag,
+      ErrorCallback callback);
   void OnEvictionFinished(bool is_idle_time_eviction,
                           base::TimeTicks start_time,
-                          std::vector<ResIdListOrError> results);
+                          std::vector<EvictionResult> results);
+
+  void RunNextCheckpoint(base::OnceCallback<void(bool)> callback,
+                         std::vector<bool> results);
 
   const std::vector<scoped_refptr<base::SequencedTaskRunner>>
       background_task_runners_;
@@ -501,11 +749,17 @@ class NET_EXPORT_PRIVATE SqlPersistentStore {
   int64_t low_watermark_ = 0;
   int64_t max_file_size_ = 0;
 
+  // Whether a cache eviction operation is currently in progress.
+  bool eviction_in_progress_ = false;
   // A callback to be called when the eviction is finished.
   ErrorCallback eviction_result_callback_;
 
   // Whether loading of the in-memory index has been triggered.
-  bool in_memory_load_trigered_ = false;
+  bool in_memory_load_triggered_ = false;
+  // The result of the in-memory index load, if it has finished.
+  std::optional<Error> in_memory_load_result_;
+  // Callbacks waiting for the in-memory index load to complete.
+  std::vector<ErrorCallback> pending_in_memory_load_result_callbacks_;
 
   base::WeakPtrFactory<SqlPersistentStore> weak_factory_{this};
 };

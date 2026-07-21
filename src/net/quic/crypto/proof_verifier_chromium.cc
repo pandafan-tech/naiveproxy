@@ -8,7 +8,6 @@
 #include <string_view>
 #include <utility>
 
-#include "base/containers/contains.h"
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
@@ -19,7 +18,6 @@
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
 #include "crypto/signature_verifier.h"
-#include "third_party/boringssl/src/include/openssl/ssl.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/net_errors.h"
 #include "net/base/network_anonymization_key.h"
@@ -270,49 +268,6 @@ quic::QuicAsyncStatus ProofVerifierChromium::Job::VerifyCertChain(
 
   verify_details_ = std::make_unique<ProofVerifyDetailsChromium>();
 
-  // cronet-reality QUIC short-circuit (mirrors the TCP path in
-  // net/socket/ssl_client_socket_impl.cc::VerifyCertCallback). The
-  // QUICHE handshaker stashes its SSL handle in a thread-local right
-  // before calling proof_verifier_->VerifyCertChain - see
-  // SSL_reality_register_pending_verify. If that SSL has REALITY
-  // enabled and the leaf cert's HMAC tag matches the derived auth_key,
-  // bypass standard chain validation: the borrowed Ed25519 cert is
-  // intentionally outside any public PKI, so chain verify would
-  // either fail or (worse) succeed against the borrowed SNI and let
-  // the proxy connection route through the real public site.
-  //
-  // This check must run BEFORE GetX509Certificate(): REALITY's leaf
-  // is a bare self-signed Ed25519 cert with the signature replaced by
-  // an HMAC tag. X509Certificate::CreateFromDERCertChain rejects it
-  // (missing notBefore / notAfter / etc.), so we never even get to
-  // standard cert verify. Doing REALITY first sidesteps that and
-  // lets the HMAC tag authenticate the peer directly.
-  SSL *reality_ssl = SSL_reality_pending_verify_ssl();
-  if (reality_ssl != nullptr && SSL_reality_is_enabled(reality_ssl)) {
-    if (!SSL_reality_verify_peer_cert(reality_ssl)) {
-      *error_details = "QUIC REALITY HMAC verify failed";
-      verify_details_->cert_verify_result.cert_status = CERT_STATUS_INVALID;
-      *verify_details = std::move(verify_details_);
-      return quic::QUIC_FAILURE;
-    }
-    // Try to wrap the leaf in an X509Certificate for downstream
-    // bookkeeping, but tolerate parse failures: the REALITY leaf is
-    // intentionally minimal and may not satisfy Chromium's standard
-    // X509 sanity checks. Any non-null result is good enough for the
-    // logging path; nullptr is also OK because everything past here
-    // gates on cert_verify_result.cert_status, which we set to 0.
-    std::vector<std::string_view> cert_pieces(certs.size());
-    for (unsigned i = 0; i < certs.size(); i++) {
-      cert_pieces[i] = std::string_view(certs[i]);
-    }
-    cert_ = X509Certificate::CreateFromDERCertChain(cert_pieces);
-    verify_details_->cert_verify_result.Reset();
-    verify_details_->cert_verify_result.verified_cert = cert_;
-    verify_details_->cert_verify_result.cert_status = 0;
-    *verify_details = std::move(verify_details_);
-    return quic::QUIC_SUCCESS;
-  }
-
   // Converts |certs| to |cert_|.
   if (!GetX509Certificate(certs, error_details, verify_details))
     return quic::QUIC_FAILURE;
@@ -427,15 +382,15 @@ int ProofVerifierChromium::Job::DoVerifyCert(int result) {
 
 bool ProofVerifierChromium::Job::ShouldAllowUnknownRootForHost(
     const std::string& hostname) {
-  if (base::Contains(proof_verifier_->hostnames_to_allow_unknown_roots_, "")) {
+  if (proof_verifier_->hostnames_to_allow_unknown_roots_.contains("")) {
     return true;
   }
-  return base::Contains(proof_verifier_->hostnames_to_allow_unknown_roots_,
-                        hostname);
+  return proof_verifier_->hostnames_to_allow_unknown_roots_.contains(hostname);
 }
 
 int ProofVerifierChromium::Job::DoVerifyCertComplete(int result) {
   base::UmaHistogramSparse("Net.QuicSession.CertVerificationResult", -result);
+  verify_details_->cert_verify_net_error_for_metrics_only = result;
   cert_verifier_request_.reset();
 
   const CertVerifyResult& cert_verify_result =

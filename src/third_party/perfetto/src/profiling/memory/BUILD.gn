@@ -41,6 +41,14 @@ source_set("heapprofd_main") {
     "heapprofd.cc",
     "heapprofd.h",
   ]
+
+  # Abseil is only used in Perfetto via:
+  # - the gRPC/libprotobuf
+  # - re2
+  if (!enable_perfetto_re2 &&
+      (perfetto_build_standalone || is_perfetto_build_generator)) {
+    assert_no_deps = [ "../../../buildtools:abseil_cpp" ]
+  }
 }
 
 # This library gets loaded into (and executes in) arbitrary android processes.
@@ -114,6 +122,14 @@ shared_library("heapprofd_standalone_client") {
     "-Wl,--version-script",
     rebase_path("heapprofd_client_api.map.txt", root_build_dir),
   ]
+
+  # Abseil is only used in Perfetto via:
+  # - the gRPC/libprotobuf
+  # - re2
+  if (!enable_perfetto_re2 &&
+      (perfetto_build_standalone || is_perfetto_build_generator)) {
+    assert_no_deps = [ "../../../buildtools:abseil_cpp" ]
+  }
 }
 
 shared_library("heapprofd_api_noop") {
@@ -342,33 +358,35 @@ perfetto_unittest_source_set("unittests") {
   }
 }
 
-source_set("end_to_end_tests") {
-  testonly = true
-  deps = [
-    ":client",
-    ":daemon",
-    ":wire_protocol",
-    "../../../gn:default_deps",
-    "../../../gn:gtest_and_gmock",
-    "../../../gn:libunwindstack",
-    "../../../protos/perfetto/config/profiling:cpp",
-    "../../../protos/perfetto/trace/interned_data:cpp",
-    "../../../protos/perfetto/trace/profiling:cpp",
-    "../../../test:integrationtest_initializer",
-    "../../../test:test_helper",
-    "../../base",
-    "../../base:test_support",
-    "../../trace_processor:lib",
-    "../../tracing/test:test_support",
-  ]
-  sources = [
-    "heapprofd_end_to_end_test.cc",
-    "heapprofd_producer_integrationtest.cc",
-  ]
-  if (perfetto_build_with_android) {
-    deps += [ ":heapprofd_client_api" ]
-  } else {
-    deps += [ ":heapprofd_standalone_client" ]
+if (enable_perfetto_integration_tests) {
+  source_set("end_to_end_tests") {
+    testonly = true
+    deps = [
+      ":client",
+      ":daemon",
+      ":wire_protocol",
+      "../../../gn:default_deps",
+      "../../../gn:gtest_and_gmock",
+      "../../../gn:libunwindstack",
+      "../../../protos/perfetto/config/profiling:cpp",
+      "../../../protos/perfetto/trace/interned_data:cpp",
+      "../../../protos/perfetto/trace/profiling:cpp",
+      "../../../test:integrationtest_initializer",
+      "../../../test:test_helper",
+      "../../base",
+      "../../base:test_support",
+      "../../trace_processor:lib",
+      "../../tracing/test:test_support",
+    ]
+    sources = [
+      "heapprofd_end_to_end_test.cc",
+      "heapprofd_producer_integrationtest.cc",
+    ]
+    if (perfetto_build_with_android) {
+      deps += [ ":heapprofd_client_api" ]
+    } else {
+      deps += [ ":heapprofd_standalone_client" ]
+    }
   }
 }
 

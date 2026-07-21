@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/390223051): Remove C-library calls to fix the errors.
-#pragma allow_unsafe_libc_calls
-#endif
-
 #include "base/debug/stack_trace.h"
 
 #include <errno.h>
@@ -32,9 +27,11 @@
 #include <tuple>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/containers/heap_array.h"
 #include "base/containers/span.h"
 #include "base/containers/span_writer.h"
+#include "base/debug/debugging_buildflags.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/cstring_view.h"
 #include "build/build_config.h"
@@ -365,7 +362,7 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
     // replaced this signal handler upon entry, but we want to stay
     // installed. Thus, we reinstall ourselves before returning.
     struct sigaction action;
-    memset(&action, 0, sizeof(action));
+    UNSAFE_TODO(memset(&action, 0, sizeof(action)));
     action.sa_flags = static_cast<int>(SA_RESETHAND | SA_SIGINFO);
     action.sa_sigaction = &StackDumpSignalHandler;
     sigemptyset(&action.sa_mask);
@@ -552,7 +549,7 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
   // Set an alarm to trigger in case the default handler does not terminate
   // the process. See 'AlarmSignalHandler' for more details.
   struct sigaction action;
-  memset(&action, 0, sizeof(action));
+  UNSAFE_TODO(memset(&action, 0, sizeof(action)));
   action.sa_flags = static_cast<int>(SA_RESETHAND);
   action.sa_sigaction = &AlarmSignalHandler;
   sigemptyset(&action.sa_mask);
@@ -703,13 +700,13 @@ class SandboxSymbolizeHelper {
   int GetFileDescriptor(const char* file_path) {
     int fd = -1;
 
-#if !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#if !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
     if (file_path) {
       // The assumption here is that iterating over std::map<std::string,
       // base::ScopedFD> does not allocate dynamic memory, hence it is
       // async-signal-safe.
       for (const auto& filepath_fd : modules_) {
-        if (strcmp(filepath_fd.first.c_str(), file_path) == 0) {
+        if (UNSAFE_TODO(strcmp(filepath_fd.first.c_str(), file_path)) == 0) {
           // POSIX.1-2004 requires an implementation to guarantee that dup()
           // is async-signal-safe.
           fd = HANDLE_EINTR(dup(filepath_fd.second.get()));
@@ -723,22 +720,23 @@ class SandboxSymbolizeHelper {
         fd = -1;
       }
     }
-#endif  // !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#endif  // !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
 
     return fd;
   }
 
-  // Searches for the object file (from /proc/self/maps) that contains
-  // the specified pc.  If found, sets |start_address| to the start address
-  // of where this object file is mapped in memory, sets the module base
-  // address into |base_address|, copies the object file name into
-  // |out_file_name|, and attempts to open the object file.  If the object
+  // Searches for the object file (from /proc/self/maps) that contains the
+  // specified pc.  If found, sets `start_address` and `end_address` to the
+  // start and end address of where this object file is mapped in memory, sets
+  // the module base address into `base_address`, copies the object file name
+  // into `out_file_name`, and attempts to open the object file.  If the object
   // file is opened successfully, returns the file descriptor.  Otherwise,
   // returns -1.
   // IMPORTANT: This function must be async-signal-safe because it can be
   // called from a signal handler (symbolizing stack frames for a crash).
   static int OpenObjectFileContainingPc(uint64_t pc,
                                         uint64_t& start_address,
+                                        uint64_t& end_address,
                                         uint64_t& base_address,
                                         char* file_path_ptr,
                                         size_t file_path_size) {
@@ -770,6 +768,7 @@ class SandboxSymbolizeHelper {
       if (region.start <= pc && pc < region.end) {
         start_address = region.start;
         base_address = region.base;
+        end_address = region.end;
         if (!file_path.empty()) {
           strlcpy(file_path, region.path);
         }
@@ -836,7 +835,7 @@ class SandboxSymbolizeHelper {
       static_assert(SELFMAG <= sizeof(ElfW(Ehdr)), "SELFMAG too large");
       if ((r.permissions & MappedMemoryRegion::READ) &&
           safe_memcpy(&ehdr, r.start, sizeof(ElfW(Ehdr))) &&
-          memcmp(ehdr.e_ident, ELFMAG, SELFMAG) == 0) {
+          UNSAFE_TODO(memcmp(ehdr.e_ident, ELFMAG, SELFMAG)) == 0) {
         switch (ehdr.e_type) {
           case ET_EXEC:
             cur_base = 0;
@@ -900,7 +899,7 @@ class SandboxSymbolizeHelper {
     // Pre-opening and caching the file descriptors of all loaded modules is
     // not safe for production builds.  Hence it is only done in non-official
     // builds.  For more details, take a look at: http://crbug.com/341966.
-#if !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#if !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
     // Open the object files for all read-only executable regions and cache
     // their file descriptors.
     std::vector<MappedMemoryRegion>::const_iterator it;
@@ -936,7 +935,7 @@ class SandboxSymbolizeHelper {
         }
       }
     }
-#endif  // !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#endif  // !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
   }
 
   // Initializes and installs the symbolization callback.
@@ -958,20 +957,20 @@ class SandboxSymbolizeHelper {
 
   // Closes all file descriptors owned by this instance.
   void CloseObjectFiles() {
-#if !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#if !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
     modules_.clear();
-#endif  // !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#endif  // !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
   }
 
   // Set to true upon successful initialization.
   bool is_initialized_ = false;
 
-#if !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#if !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
   // Mapping from file name to file descriptor.  Includes file descriptors
   // for all successfully opened object files and the file descriptor for
   // /proc/self/maps.  This code is not safe for production builds.
   std::map<std::string, base::ScopedFD> modules_;
-#endif  // !defined(OFFICIAL_BUILD) || !defined(NO_UNWIND_TABLES)
+#endif  // !defined(OFFICIAL_BUILD) || !BUILDFLAG(EXCLUDE_UNWIND_TABLES)
 
   // Cache for the process memory regions.  Produced by parsing the contents
   // of /proc/self/maps cache.
@@ -990,7 +989,7 @@ bool EnableInProcessStackDumping() {
   // to be ignored.  Therefore, when testing that same code, it should run
   // with SIGPIPE ignored as well.
   struct sigaction sigpipe_action;
-  memset(&sigpipe_action, 0, sizeof(sigpipe_action));
+  UNSAFE_TODO(memset(&sigpipe_action, 0, sizeof(sigpipe_action)));
   sigpipe_action.sa_handler = SIG_IGN;
   sigemptyset(&sigpipe_action.sa_mask);
   bool success = (sigaction(SIGPIPE, &sigpipe_action, nullptr) == 0);
@@ -999,7 +998,7 @@ bool EnableInProcessStackDumping() {
   WarmUpBacktrace();
 
   struct sigaction action;
-  memset(&action, 0, sizeof(action));
+  UNSAFE_TODO(memset(&action, 0, sizeof(action)));
   action.sa_flags = static_cast<int>(SA_RESETHAND | SA_SIGINFO);
   action.sa_sigaction = &StackDumpSignalHandler;
   sigemptyset(&action.sa_mask);
@@ -1042,7 +1041,8 @@ size_t CollectStackTrace(span<const void*> trace) {
   // NOTE: This code MUST be async-signal safe (it's used by in-process
   // stack dumping signal handler). NO malloc or stdio is allowed here.
 
-#if defined(NO_UNWIND_TABLES) && BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
+#if BUILDFLAG(EXCLUDE_UNWIND_TABLES) && \
+    BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
   // If we do not have unwind tables, then try tracing using frame pointers.
   return base::debug::TraceStackFramePointers(trace, 0);
 #elif defined(HAVE_BACKTRACE)

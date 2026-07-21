@@ -28,6 +28,7 @@
 #include "net/base/url_util.h"
 #include "net/cookies/cookie_setting_override.h"
 #include "net/cookies/cookie_util.h"
+#include "net/http/http_connection_info.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_response_info.h"
@@ -61,6 +62,36 @@ namespace {
 // net/socket/websocket_transport_client_socket_pool.cc to make it hard for
 // JavaScript programs to recognize the timeout cause.
 constexpr int kHandshakeTimeoutIntervalInSeconds = 240;
+
+RequestPriority WebSocketPriorityHintToRequestPriority(
+    WebSocketPriorityHint priority_hint) {
+  switch (priority_hint) {
+    case WebSocketPriorityHint::kDefault:
+      return DEFAULT_PRIORITY;
+    case WebSocketPriorityHint::kMaximum:
+      return MAXIMUM_PRIORITY;
+  }
+}
+
+void RecordWebSocketErrorCodes(const URLRequest& request,
+                               int net_error,
+                               bool is_http2,
+                               bool is_http3) {
+  base::UmaHistogramSparse("Net.WebSocket.ErrorCodes", -net_error);
+
+  if (is_http2) {
+    base::UmaHistogramSparse("Net.WebSocket.ErrorCodes.Http2", -net_error);
+  } else if (is_http3) {
+    base::UmaHistogramSparse("Net.WebSocket.ErrorCodes.Http3", -net_error);
+  }
+
+  if (net::IsLocalhost(request.url())) {
+    base::UmaHistogramSparse("Net.WebSocket.ErrorCodes_Localhost", -net_error);
+  } else {
+    base::UmaHistogramSparse("Net.WebSocket.ErrorCodes_NotLocalhost",
+                             -net_error);
+  }
+}
 
 class WebSocketStreamRequestImpl;
 
@@ -107,20 +138,21 @@ class WebSocketStreamRequestImpl : public WebSocketStreamRequestAPI {
       const std::vector<std::string>& requested_subprotocols,
       const URLRequestContext* context,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
       StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
+      WebSocketPriorityHint priority_hint,
       NetworkTrafficAnnotationTag traffic_annotation,
       std::unique_ptr<WebSocketStream::ConnectDelegate> connect_delegate,
       std::unique_ptr<WebSocketStreamRequestAPI> api_delegate)
       : delegate_(this),
         connect_delegate_(std::move(connect_delegate)),
-        url_request_(context->CreateRequest(url,
-                                            DEFAULT_PRIORITY,
-                                            &delegate_,
-                                            traffic_annotation,
-                                            /*is_for_websockets=*/true)),
+        url_request_(context->CreateRequest(
+            url,
+            WebSocketPriorityHintToRequestPriority(priority_hint),
+            &delegate_,
+            traffic_annotation,
+            /*is_for_websockets=*/true)),
         api_delegate_(std::move(api_delegate)) {
     DCHECK_EQ(IsolationInfo::RequestType::kOther,
               isolation_info.request_type());
@@ -140,7 +172,7 @@ class WebSocketStreamRequestImpl : public WebSocketStreamRequestAPI {
 
     url_request_->SetExtraRequestHeaders(headers);
     url_request_->set_initiator(origin);
-    url_request_->set_site_for_cookies(site_for_cookies);
+    url_request_->set_site_for_cookies(isolation_info.site_for_cookies());
     url_request_->set_isolation_info(isolation_info);
 
     CHECK(!url_request_->cookie_setting_overrides().Has(
@@ -148,8 +180,7 @@ class WebSocketStreamRequestImpl : public WebSocketStreamRequestAPI {
     if (cookie_util::ShouldAddInitialStorageAccessApiOverride(
             url.SchemeIsWSOrWSS() ? ChangeWebSocketSchemeToHttpScheme(url)
                                   : url,
-            storage_access_api_status, url_request_->initiator(),
-            /*emit_metrics=*/true, /*credentials_mode_include=*/true)) {
+            storage_access_api_status, url_request_->initiator())) {
       url_request_->cookie_setting_overrides().Put(
           CookieSettingOverride::kStorageAccessGrantEligible);
     }
@@ -158,7 +189,11 @@ class WebSocketStreamRequestImpl : public WebSocketStreamRequestAPI {
         connect_delegate_.get(), requested_subprotocols, this);
     url_request_->SetUserData(kWebSocketHandshakeUserDataKey,
                               std::move(create_helper));
-    url_request_->SetLoadFlags(LOAD_DISABLE_CACHE | LOAD_BYPASS_CACHE);
+    int load_flags = LOAD_DISABLE_CACHE | LOAD_BYPASS_CACHE;
+    if (priority_hint == WebSocketPriorityHint::kMaximum) {
+      load_flags |= LOAD_IGNORE_LIMITS;
+    }
+    url_request_->SetLoadFlags(load_flags);
     connect_delegate_->OnCreateRequest(url_request_.get());
   }
 
@@ -405,21 +440,11 @@ void Delegate::OnReceivedRedirect(URLRequest* request,
 void Delegate::OnResponseStarted(URLRequest* request, int net_error) {
   DCHECK_NE(ERR_IO_PENDING, net_error);
 
-  const bool is_http2 =
-      request->response_info().connection_info == HttpConnectionInfo::kHTTP2;
-
-  // All error codes, including OK and ABORTED, as with
-  // Net.ErrorCodesForMainFrame4
-  base::UmaHistogramSparse("Net.WebSocket.ErrorCodes", -net_error);
-  if (is_http2) {
-    base::UmaHistogramSparse("Net.WebSocket.ErrorCodes.Http2", -net_error);
-  }
-  if (net::IsLocalhost(request->url())) {
-    base::UmaHistogramSparse("Net.WebSocket.ErrorCodes_Localhost", -net_error);
-  } else {
-    base::UmaHistogramSparse("Net.WebSocket.ErrorCodes_NotLocalhost",
-                             -net_error);
-  }
+  const HttpConnectionInfoCoarse connection_info =
+      HttpConnectionInfoToCoarse(request->response_info().connection_info);
+  const bool is_http2 = connection_info == HttpConnectionInfoCoarse::kHTTP2;
+  const bool is_http3 = connection_info == HttpConnectionInfoCoarse::kQUIC;
+  RecordWebSocketErrorCodes(*request, net_error, is_http2, is_http3);
 
   if (net_error != OK) {
     DVLOG(3) << "OnResponseStarted (request failed)";
@@ -429,7 +454,7 @@ void Delegate::OnResponseStarted(URLRequest* request, int net_error) {
   const int response_code = request->GetResponseCode();
   DVLOG(3) << "OnResponseStarted (response code " << response_code << ")";
 
-  if (is_http2) {
+  if (is_http2 || is_http3) {
     if (response_code == HTTP_OK) {
       owner_->PerformUpgrade();
       return;
@@ -528,19 +553,18 @@ std::unique_ptr<WebSocketStreamRequest> WebSocketStream::CreateAndConnectStream(
     const GURL& socket_url,
     const std::vector<std::string>& requested_subprotocols,
     const url::Origin& origin,
-    const SiteForCookies& site_for_cookies,
     StorageAccessApiStatus storage_access_api_status,
     const IsolationInfo& isolation_info,
     const HttpRequestHeaders& additional_headers,
     URLRequestContext* url_request_context,
     const NetLogWithSource& net_log,
+    WebSocketPriorityHint priority_hint,
     NetworkTrafficAnnotationTag traffic_annotation,
     std::unique_ptr<ConnectDelegate> connect_delegate) {
   auto request = std::make_unique<WebSocketStreamRequestImpl>(
       socket_url, requested_subprotocols, url_request_context, origin,
-      site_for_cookies, storage_access_api_status, isolation_info,
-      additional_headers, traffic_annotation, std::move(connect_delegate),
-      nullptr);
+      storage_access_api_status, isolation_info, additional_headers,
+      priority_hint, traffic_annotation, std::move(connect_delegate), nullptr);
   request->Start(std::make_unique<base::OneShotTimer>());
   return std::move(request);
 }
@@ -550,20 +574,20 @@ WebSocketStream::CreateAndConnectStreamForTesting(
     const GURL& socket_url,
     const std::vector<std::string>& requested_subprotocols,
     const url::Origin& origin,
-    const SiteForCookies& site_for_cookies,
     StorageAccessApiStatus storage_access_api_status,
     const IsolationInfo& isolation_info,
     const HttpRequestHeaders& additional_headers,
     URLRequestContext* url_request_context,
     const NetLogWithSource& net_log,
+    WebSocketPriorityHint priority_hint,
     NetworkTrafficAnnotationTag traffic_annotation,
     std::unique_ptr<WebSocketStream::ConnectDelegate> connect_delegate,
     std::unique_ptr<base::OneShotTimer> timer,
     std::unique_ptr<WebSocketStreamRequestAPI> api_delegate) {
   auto request = std::make_unique<WebSocketStreamRequestImpl>(
       socket_url, requested_subprotocols, url_request_context, origin,
-      site_for_cookies, storage_access_api_status, isolation_info,
-      additional_headers, traffic_annotation, std::move(connect_delegate),
+      storage_access_api_status, isolation_info, additional_headers,
+      priority_hint, traffic_annotation, std::move(connect_delegate),
       std::move(api_delegate));
   request->Start(std::move(timer));
   return std::move(request);

@@ -29,7 +29,8 @@ void QuicChromiumClientSessionPeer::SetHostname(
       session->session_key_.network_anonymization_key(),
       session->session_key_.secure_dns_policy(),
       session->session_key_.require_dns_https_alpn(),
-      session->session_key_.disable_cert_verification_network_fetches());
+      session->session_key_.disable_cert_verification_network_fetches(),
+      session->session_key_.target_network());
 }
 
 // static
@@ -37,7 +38,8 @@ QuicChromiumClientStream* QuicChromiumClientSessionPeer::CreateOutgoingStream(
     QuicChromiumClientSession* session) {
   return session->ShouldCreateOutgoingBidirectionalStream()
              ? session->CreateOutgoingReliableStreamImpl(
-                   TRAFFIC_ANNOTATION_FOR_TESTS)
+                   TRAFFIC_ANNOTATION_FOR_TESTS,
+                   /*max_stream_limit_pending_delay=*/base::TimeDelta())
              : nullptr;
 }
 
@@ -51,6 +53,19 @@ bool QuicChromiumClientSessionPeer::GetSessionGoingAway(
 MigrationCause QuicChromiumClientSessionPeer::GetCurrentMigrationCause(
     QuicChromiumClientSession* session) {
   return session->current_migration_cause_;
+}
+
+// static
+void QuicChromiumClientSessionPeer::DisableConnectionMigration(
+    QuicChromiumClientSession* session) {
+  session->connection_migration_disabled_ = true;
+}
+
+// static
+void QuicChromiumClientSessionPeer::SetDefaultNetwork(
+    QuicChromiumClientSession* session,
+    handles::NetworkHandle network) {
+  session->default_network_ = network;
 }
 
 }  // namespace net::test

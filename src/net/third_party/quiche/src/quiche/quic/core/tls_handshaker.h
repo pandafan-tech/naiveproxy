@@ -122,9 +122,11 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
   // Returns the PRF used by the cipher suite negotiated in the TLS handshake.
   const EVP_MD* Prf(const SSL_CIPHER* cipher);
 
-  virtual const TlsConnection* tls_connection() const = 0;
+  virtual const TlsConnection& tls_connection() const = 0;
 
-  SSL* ssl() const { return tls_connection()->ssl(); }
+  virtual TlsConnection& tls_connection() = 0;
+
+  SSL* ssl() const { return tls_connection().ssl(); }
 
   QuicCryptoStream* stream() { return stream_; }
   HandshakerDelegateInterface* handshaker_delegate() {
@@ -176,6 +178,8 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
   void set_extra_error_details(std::string extra_error_details) {
     extra_error_details_ = std::move(extra_error_details);
   }
+
+  virtual const SSL_CIPHER* GetCipher() const;
 
  private:
   // ProofVerifierCallbackImpl handles the result of an asynchronous certificate

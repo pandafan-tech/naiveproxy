@@ -2,21 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_ADDRESS_POOL_MANAGER_H_
 #define PARTITION_ALLOC_ADDRESS_POOL_MANAGER_H_
 
+#include <array>
 #include <bitset>
 #include <limits>
 
 #include "partition_alloc/address_pool_manager_types.h"
 #include "partition_alloc/build_config.h"
 #include "partition_alloc/buildflags.h"
-#include "partition_alloc/partition_address_space.h"
+#include "partition_alloc/internal/partition_address_space_internal.h"
 #include "partition_alloc/partition_alloc_base/compiler_specific.h"
 #include "partition_alloc/partition_alloc_base/component_export.h"
 #include "partition_alloc/partition_alloc_base/thread_annotations.h"
@@ -160,6 +156,10 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC)
 
     // The bitset stores the allocation state of the address pool. 1 bit per
     // super-page: 1 = allocated, 0 = free.
+    // Note that we should not use bitset::set, bitset::reset(size_t), or
+    // bitset::test. These methods can throw std::out_of_range, which can cause
+    // unexpected dependencies and lead to symbol duplication errors during
+    // linking.
     std::bitset<kMaxSuperPagesInPool> alloc_bitset_ PA_GUARDED_BY(lock_);
 
     // An index of a bit in the bitset before which we know for sure there all
@@ -205,7 +205,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC)
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
-  Pool pools_[kNumPools];
+  std::array<Pool, kNumPools> pools_;
 
 #endif  // PA_BUILDFLAG(HAS_64_BIT_POINTERS)
 

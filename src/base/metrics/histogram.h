@@ -177,6 +177,7 @@ class BASE_EXPORT Histogram : public HistogramBase {
   // Create a histogram using data in persistent storage.
   static std::unique_ptr<HistogramBase> PersistentCreate(
       DurableStringView durable_name,
+      uint64_t name_hash,
       const BucketRanges* ranges,
       const DelayedPersistentAllocation& counts,
       const DelayedPersistentAllocation& logged_counts,
@@ -213,15 +214,26 @@ class BASE_EXPORT Histogram : public HistogramBase {
   virtual Sample32 ranges(size_t i) const;
   virtual size_t bucket_count() const;
 
-  // This function validates histogram construction arguments. It returns false
-  // if some of the arguments are bad but also corrects them so they should
-  // function on non-dcheck builds without crashing.
-  // Note. Currently it allow some bad input, e.g. 0 as minimum, but silently
-  // converts it to good input: 1.
-  static bool InspectConstructionArguments(std::string_view name,
-                                           Sample32* minimum,
-                                           Sample32* maximum,
-                                           size_t* bucket_count);
+  enum ConstructionArgumentsValidity {
+    kOK = 0,
+    kRangeSwapped,
+    kRangeTooBig,
+    kTooManyBuckets,
+    kBucketsInvalidMinMaxSame,
+    kBucketsInvalidMinMaxCount,
+    kBucketsInvalidMax,
+  };
+
+  // Validates histogram construction arguments, return kOK if they are valid.
+  // Otherwise, it returns a code for the first issue it finds.
+  // Note: It currently allows some bad inputs, e.g. 0 as minimum, silently
+  // converting it to 1.
+  static ConstructionArgumentsValidity InspectConstructionArguments(
+      std::string_view name,
+      uint64_t name_hash,
+      Sample32* minimum,
+      Sample32* maximum,
+      size_t* bucket_count);
 
   // HistogramBase implementation:
   uint64_t name_hash() const override;
@@ -238,7 +250,7 @@ class BASE_EXPORT Histogram : public HistogramBase {
   std::unique_ptr<HistogramSamples> SnapshotFinalDelta() const override;
   bool AddSamples(const HistogramSamples& samples) override;
   bool AddSamplesFromPickle(base::PickleIterator* iter) override;
-  base::Value::Dict ToGraphDict() const override;
+  base::DictValue ToGraphDict() const override;
 
  protected:
   // This class, defined entirely within the .cc file, contains all the
@@ -250,7 +262,9 @@ class BASE_EXPORT Histogram : public HistogramBase {
 
   // |ranges| should contain the underflow and overflow buckets. See top
   // comments for example.
-  Histogram(DurableStringView durable_name, const BucketRanges* ranges);
+  Histogram(DurableStringView durable_name,
+            uint64_t name_hash,
+            const BucketRanges* ranges);
 
   // Traditionally, histograms allocate their own memory for the bucket
   // vector but "shared" histograms use memory regions allocated from a
@@ -259,6 +273,7 @@ class BASE_EXPORT Histogram : public HistogramBase {
   // of this object. Practically, this memory is never released until the
   // process exits and the OS cleans it up.
   Histogram(DurableStringView durable_name,
+            uint64_t name_hash,
             const BucketRanges* ranges,
             const DelayedPersistentAllocation& counts,
             const DelayedPersistentAllocation& logged_counts,
@@ -267,11 +282,6 @@ class BASE_EXPORT Histogram : public HistogramBase {
 
   // HistogramBase implementation:
   void SerializeInfoImpl(base::Pickle* pickle) const override;
-
-  // Return a string description of what goes in a given bucket.
-  // Most commonly this is the numeric value, but in derived classes it may
-  // be a name (or string description) given to the bucket.
-  virtual std::string GetAsciiBucketRange(size_t it) const;
 
  private:
   // Allow tests to corrupt our innards for testing purposes.
@@ -284,9 +294,11 @@ class BASE_EXPORT Histogram : public HistogramBase {
   friend class StatisticsRecorder;  // To allow it to delete duplicates.
   friend class StatisticsRecorderTest;
 
-  friend BASE_EXPORT HistogramBase* DeserializeHistogramInfo(
-      base::PickleIterator* iter);
-  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter);
+  friend HistogramBase* HistogramBase::DeserializeInfo(
+      base::PickleIterator* iter,
+      NameMapper mapper);
+  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter,
+                                            NameMapper mapper);
 
   static HistogramBase* FactoryGetInternal(std::string_view name,
                                            Sample32 minimum,
@@ -317,7 +329,7 @@ class BASE_EXPORT Histogram : public HistogramBase {
 
   // Writes the type, min, max, and bucket count information of the histogram in
   // |params|.
-  Value::Dict GetParameters() const override;
+  DictValue GetParameters() const override;
 
   // Samples that have not yet been logged with SnapshotDelta().
   std::unique_ptr<SampleVectorBase> unlogged_samples_;
@@ -384,6 +396,7 @@ class BASE_EXPORT LinearHistogram : public Histogram {
   // Create a histogram using data in persistent storage.
   static std::unique_ptr<HistogramBase> PersistentCreate(
       DurableStringView durable_name,
+      uint64_t name_hash,
       const BucketRanges* ranges,
       const DelayedPersistentAllocation& counts,
       const DelayedPersistentAllocation& logged_counts,
@@ -395,19 +408,6 @@ class BASE_EXPORT LinearHistogram : public Histogram {
     const char* description;  // Null means end of a list of pairs.
   };
 
-  // Create a LinearHistogram and store a list of number/text values for use in
-  // writing the histogram graph.
-  // |descriptions| can be NULL, which means no special descriptions to set. If
-  // it's not NULL, the last element in the array must has a NULL in its
-  // "description" field.
-  static HistogramBase* FactoryGetWithRangeDescription(
-      std::string_view name,
-      Sample32 minimum,
-      Sample32 maximum,
-      size_t bucket_count,
-      int32_t flags,
-      const DescriptionPair descriptions[]);
-
   static void InitializeBucketRanges(Sample32 minimum,
                                      Sample32 maximum,
                                      BucketRanges* ranges);
@@ -418,23 +418,24 @@ class BASE_EXPORT LinearHistogram : public Histogram {
  protected:
   class Factory;
 
-  LinearHistogram(DurableStringView durable_name, const BucketRanges* ranges);
+  LinearHistogram(DurableStringView durable_name,
+                  uint64_t name_hash,
+                  const BucketRanges* ranges);
 
   LinearHistogram(DurableStringView durable_name,
+                  uint64_t name_hash,
                   const BucketRanges* ranges,
                   const DelayedPersistentAllocation& counts,
                   const DelayedPersistentAllocation& logged_counts,
                   HistogramSamples::Metadata* meta,
                   HistogramSamples::Metadata* logged_meta);
 
-  // If we have a description for a bucket, then return that.  Otherwise
-  // let parent class provide a (numeric) description.
-  std::string GetAsciiBucketRange(size_t i) const override;
-
  private:
-  friend BASE_EXPORT HistogramBase* DeserializeHistogramInfo(
-      base::PickleIterator* iter);
-  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter);
+  friend HistogramBase* HistogramBase::DeserializeInfo(
+      base::PickleIterator* iter,
+      NameMapper mapper);
+  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter,
+                                            NameMapper mapper);
 
   static HistogramBase* FactoryGetInternal(std::string_view name,
                                            Sample32 minimum,
@@ -446,12 +447,6 @@ class BASE_EXPORT LinearHistogram : public Histogram {
                                                TimeDelta maximum,
                                                size_t bucket_count,
                                                int32_t flags);
-
-  // For some ranges, we store a printable description of a bucket range.
-  // If there is no description, then GetAsciiBucketRange() uses parent class
-  // to provide a description.
-  typedef std::map<Sample32, std::string> BucketDescriptionMap;
-  BucketDescriptionMap bucket_description_;
 };
 
 //------------------------------------------------------------------------------
@@ -541,6 +536,7 @@ class BASE_EXPORT BooleanHistogram : public LinearHistogram {
   // Create a histogram using data in persistent storage.
   static std::unique_ptr<HistogramBase> PersistentCreate(
       DurableStringView durable_name,
+      uint64_t name_hash,
       const BucketRanges* ranges,
       const DelayedPersistentAllocation& counts,
       const DelayedPersistentAllocation& logged_counts,
@@ -556,17 +552,22 @@ class BASE_EXPORT BooleanHistogram : public LinearHistogram {
   static HistogramBase* FactoryGetInternal(std::string_view name,
                                            int32_t flags);
 
-  BooleanHistogram(DurableStringView durable_name, const BucketRanges* ranges);
   BooleanHistogram(DurableStringView durable_name,
+                   uint64_t name_hash,
+                   const BucketRanges* ranges);
+  BooleanHistogram(DurableStringView durable_name,
+                   uint64_t name_hash,
                    const BucketRanges* ranges,
                    const DelayedPersistentAllocation& counts,
                    const DelayedPersistentAllocation& logged_counts,
                    HistogramSamples::Metadata* meta,
                    HistogramSamples::Metadata* logged_meta);
 
-  friend BASE_EXPORT HistogramBase* DeserializeHistogramInfo(
-      base::PickleIterator* iter);
-  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter);
+  friend HistogramBase* HistogramBase::DeserializeInfo(
+      base::PickleIterator* iter,
+      NameMapper mapper);
+  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter,
+                                            NameMapper mapper);
 };
 
 //------------------------------------------------------------------------------
@@ -598,6 +599,7 @@ class BASE_EXPORT CustomHistogram : public Histogram {
   // Create a histogram using data in persistent storage.
   static std::unique_ptr<HistogramBase> PersistentCreate(
       DurableStringView durable_name,
+      uint64_t name_hash,
       const BucketRanges* ranges,
       const DelayedPersistentAllocation& counts,
       const DelayedPersistentAllocation& logged_counts,
@@ -618,9 +620,12 @@ class BASE_EXPORT CustomHistogram : public Histogram {
  protected:
   class Factory;
 
-  CustomHistogram(DurableStringView durable_name, const BucketRanges* ranges);
+  CustomHistogram(DurableStringView durable_name,
+                  uint64_t name_hash,
+                  const BucketRanges* ranges);
 
   CustomHistogram(DurableStringView durable_name,
+                  uint64_t name_hash,
                   const BucketRanges* ranges,
                   const DelayedPersistentAllocation& counts,
                   const DelayedPersistentAllocation& logged_counts,
@@ -631,9 +636,11 @@ class BASE_EXPORT CustomHistogram : public Histogram {
   void SerializeInfoImpl(base::Pickle* pickle) const override;
 
  private:
-  friend BASE_EXPORT HistogramBase* DeserializeHistogramInfo(
-      base::PickleIterator* iter);
-  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter);
+  friend HistogramBase* HistogramBase::DeserializeInfo(
+      base::PickleIterator* iter,
+      NameMapper mapper);
+  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter,
+                                            NameMapper mapper);
 
   static HistogramBase* FactoryGetInternal(
       std::string_view name,

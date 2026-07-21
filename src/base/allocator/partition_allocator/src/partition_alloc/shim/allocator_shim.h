@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_SHIM_ALLOCATOR_SHIM_H_
 #define PARTITION_ALLOC_SHIM_ALLOCATOR_SHIM_H_
 
@@ -80,16 +75,16 @@ void* UncheckedRealloc(void* ptr, size_t size);
 // Frees memory allocated with UncheckedAlloc().
 PA_COMPONENT_EXPORT(ALLOCATOR_SHIM) void UncheckedFree(void* ptr);
 
-#if PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC) || PA_BUILDFLAG(IS_WIN)
 
 // The aligned allocation functions are only available when PartitionAlloc is
-// acting as malloc. Otherwise there may be nothing to forward them to for the
-// platform allocator.
+// acting as malloc or on Windows. Otherwise there may be nothing to forward
+// them to for the platform allocator.
 
 // Allocates |size| bytes aligned to |align| or returns nullptr. It does NOT
 // call the new_handler, regardless of SetCallNewHandlerOnMallocFailure().
 PA_COMPONENT_EXPORT(ALLOCATOR_SHIM)
-void* UncheckedAlignedAlloc(size_t align, size_t size);
+void* UncheckedAlignedAlloc(size_t size, size_t align);
 
 // Reallocates |ptr| to point at |size| bytes with an alignment of |align|,
 // or returns nullptr while leaving the |ptr| unchanged. It does NOT call the
@@ -153,6 +148,11 @@ using EnableBrp =
 using EnableMemoryTagging =
     partition_alloc::internal::base::StrongAlias<class EnableMemoryTaggingTag,
                                                  bool>;
+using EnableFreeWithSize =
+    partition_alloc::internal::base::StrongAlias<class EnableFreeWithSizeTag,
+                                                 bool>;
+using EnableStrictFreeSizeCheck = partition_alloc::internal::base::
+    StrongAlias<class EnableStrictFreeSizeCheckTag, bool>;
 enum class BucketDistribution : uint8_t { kNeutral, kDenser };
 using EventuallyZeroFreedMemory = partition_alloc::internal::base::
     StrongAlias<class EventuallyZeroFreedMemoryTag, bool>;
@@ -172,12 +172,11 @@ void ConfigurePartitions(
         scheduler_loop_quarantine_thread_local_config,
     partition_alloc::internal::SchedulerLoopQuarantineConfig
         scheduler_loop_quarantine_for_advanced_memory_safety_checks_config,
-    EventuallyZeroFreedMemory eventually_zero_freed_memory);
+    EventuallyZeroFreedMemory eventually_zero_freed_memory,
+    EnableFreeWithSize enable_free_with_size,
+    EnableStrictFreeSizeCheck enable_strict_free_size_check);
 
 PA_COMPONENT_EXPORT(ALLOCATOR_SHIM) uint32_t GetMainPartitionRootExtrasSize();
-
-PA_COMPONENT_EXPORT(ALLOCATOR_SHIM) void AdjustDefaultAllocatorForForeground();
-PA_COMPONENT_EXPORT(ALLOCATOR_SHIM) void AdjustDefaultAllocatorForBackground();
 
 #endif  // PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
 

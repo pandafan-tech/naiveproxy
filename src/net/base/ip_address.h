@@ -235,6 +235,9 @@ class NET_EXPORT IPAddress {
   // IPv4-mapped-to-IPv6 addresses are considered publicly routable.
   bool IsPubliclyRoutable() const;
 
+  // Returns true if |ip_address_| represents a multicast address.
+  bool IsMulticast() const;
+
   // Returns true if the IP is "zero" (e.g. the 0.0.0.0 IPv4 address).
   bool IsZero() const;
 
@@ -368,6 +371,13 @@ NET_EXPORT bool IPAddressMatchesPrefix(const IPAddress& ip_address,
 NET_EXPORT bool ParseCIDRBlock(std::string_view cidr_literal,
                                IPAddress* ip_address,
                                size_t* prefix_length_in_bits);
+
+// Same as above, but parses IPv6 addresses as URL-safe IP literals (surrounded
+// by brackets). Will return std::nullopt on failure. Value of
+// |prefix_length_in_bits| on failure is undefined.
+NET_EXPORT std::optional<IPAddress> ParseCIDRBlockNonStandardURLFormat(
+    std::string_view cidr_literal,
+    size_t* prefix_length_in_bits);
 
 // Parses a URL-safe IP literal (see RFC 3986, Sec 3.2.2) to its numeric value.
 // Returns true on success, and fills |ip_address| with the numeric value.

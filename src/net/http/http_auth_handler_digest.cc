@@ -8,10 +8,10 @@
 #include <string>
 #include <string_view>
 
-#include "base/hash/md5.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/rand_util.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -377,8 +377,7 @@ class HttpAuthHandlerDigest::DigestContext {
     uint8_t md_value[EVP_MAX_MD_SIZE] = {};
     unsigned int md_len = sizeof(md_value);
     CHECK(EVP_DigestFinal_ex(md_ctx_.get(), md_value, &md_len));
-    return base::ToLowerASCII(
-        base::HexEncode(base::span(md_value).first(out_len_)));
+    return base::HexEncodeLower(base::span(md_value).first(out_len_));
   }
 
  private:
@@ -441,32 +440,31 @@ std::string HttpAuthHandlerDigest::AssembleCredentials(
     username = uh_ctx.HexDigest();
   }
 
-  std::string authorization =
-      (std::string("Digest username=") + HttpUtil::Quote(username));
-  authorization += ", realm=" + HttpUtil::Quote(original_realm_);
-  authorization += ", nonce=" + HttpUtil::Quote(nonce_);
-  authorization += ", uri=" + HttpUtil::Quote(path);
+  std::string authorization = base::StrCat(
+      {"Digest username=", HttpUtil::Quote(username),
+       ", realm=", HttpUtil::Quote(original_realm_),
+       ", nonce=", HttpUtil::Quote(nonce_), ", uri=", HttpUtil::Quote(path)});
 
   if (algorithm_ != Algorithm::UNSPECIFIED) {
-    authorization += ", algorithm=" + AlgorithmToString(algorithm_);
+    base::StrAppend(&authorization,
+                    {", algorithm=", AlgorithmToString(algorithm_)});
   }
   std::string response =
       AssembleResponseDigest(method, path, credentials, cnonce, nc);
   // No need to call HttpUtil::Quote() as the response digest cannot contain
   // any characters needing to be escaped.
-  authorization += ", response=\"" + response + "\"";
+  base::StrAppend(&authorization, {", response=\"", response, "\""});
 
   if (!opaque_.empty()) {
-    authorization += ", opaque=" + HttpUtil::Quote(opaque_);
+    base::StrAppend(&authorization, {", opaque=", HttpUtil::Quote(opaque_)});
   }
   if (qop_ != QOP_UNSPECIFIED) {
     // TODO(eroman): Supposedly IIS server requires quotes surrounding qop.
-    authorization += ", qop=" + QopToString(qop_);
-    authorization += ", nc=" + nc;
-    authorization += ", cnonce=" + HttpUtil::Quote(cnonce);
+    base::StrAppend(&authorization, {", qop=", QopToString(qop_), ", nc=", nc,
+                                     ", cnonce=", HttpUtil::Quote(cnonce)});
   }
   if (userhash_) {
-    authorization += ", userhash=true";
+    base::StrAppend(&authorization, {", userhash=true"});
   }
 
   return authorization;

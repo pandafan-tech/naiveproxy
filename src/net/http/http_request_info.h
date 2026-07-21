@@ -13,6 +13,7 @@
 #include "net/base/idempotency.h"
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/base/network_isolation_key.h"
 #include "net/base/privacy_mode.h"
 #include "net/base/reconnect_notifier.h"
@@ -140,11 +141,14 @@ struct NET_EXPORT HttpRequestInfo {
   // connection was closed, or when the connection could not be established).
   std::optional<ConnectionManagementConfig> connection_management_config;
 
-  // True if the page is allowed to access cookies for the request.
+  // True if the request is for a pervasive, shared third-party resource.
   bool is_shared_resource = false;
 
-  // When true, force this request to use QUIC without TCP/HTTP fallback.
-  bool force_quic = false;
+  // TODO(crbug.com/495684670): Do not rely on this, it is not fully implemented
+  // yet. Once fully implemented, to prevent this from being unset, consider
+  // changing it to an optional and CHECK that it is set prior to use (see
+  // https://chromium-review.git.corp.google.com/c/chromium/src/+/7612167/comment/05941166_0f11478f/).
+  handles::NetworkHandle target_network = handles::kInvalidNetworkHandle;
 };
 
 }  // namespace net

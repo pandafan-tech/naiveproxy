@@ -19,6 +19,7 @@
 #include "net/first_party_sets/first_party_set_metadata.h"
 #include "net/first_party_sets/first_party_sets_cache_filter.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 namespace net {
 
@@ -54,7 +55,8 @@ class NET_EXPORT CookieAccessDelegate {
   // value vs the request context.
   virtual bool ShouldIgnoreSameSiteRestrictions(
       const GURL& url,
-      const SiteForCookies& site_for_cookies) const = 0;
+      const SiteForCookies& site_for_cookies,
+      const url::Origin& top_level_origin) const = 0;
 
   // Calls `callback` with First-Party Sets metadata about `site` and
   // `top_frame_site`, and cache filter info for `site`. Cache filter info is
@@ -73,22 +75,6 @@ class NET_EXPORT CookieAccessDelegate {
       base::OnceCallback<void(FirstPartySetMetadata,
                               FirstPartySetsCacheFilter::MatchInfo)> callback)
       const = 0;
-
-  // Returns the entries of a set of sites if the sites are in non-trivial sets.
-  // If a given site is not in a non-trivial set, the output does not contain a
-  // corresponding entry.
-  //
-  // This may return a result synchronously, or asynchronously invoke `callback`
-  // with the result. The callback will be invoked iff the return value is
-  // nullopt; i.e. a result will be provided via return value or callback, but
-  // not both, and not neither.
-  [[nodiscard]] virtual std::optional<
-      base::flat_map<net::SchemefulSite, net::FirstPartySetEntry>>
-  FindFirstPartySetEntries(
-      const base::flat_set<net::SchemefulSite>& sites,
-      base::OnceCallback<
-          void(base::flat_map<net::SchemefulSite, net::FirstPartySetEntry>)>
-          callback) const = 0;
 };
 
 }  // namespace net

@@ -19,9 +19,9 @@
 #include "base/debug/crash_logging.h"
 #include "base/debug/dump_without_crashing.h"
 #include "base/feature_list.h"
+#include "base/features.h"
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/task_features.h"
@@ -56,7 +56,6 @@ DWORD GetSleepTimeoutMs(TimeTicks next_task_time,
   return saturated_cast<DWORD>(timeout_ms);
 }
 
-bool g_ui_pump_improvements_win = false;
 
 }  // namespace
 
@@ -69,11 +68,6 @@ static const int kMsgHaveWork = WM_USER + 1;
 
 MessagePumpWin::MessagePumpWin() = default;
 MessagePumpWin::~MessagePumpWin() = default;
-
-// static
-void MessagePumpWin::InitializeFeatures() {
-  g_ui_pump_improvements_win = FeatureList::IsEnabled(kUIPumpImprovementsWin);
-}
 
 void MessagePumpWin::Run(Delegate* delegate) {
   DCHECK_CALLED_ON_VALID_THREAD(bound_thread_);
@@ -109,8 +103,7 @@ void MessagePumpForUI::ScheduleWork() {
   // This is the only MessagePumpForUI method which can be called outside of
   // |bound_thread_|.
 
-  if (g_ui_pump_improvements_win &&
-      !in_nested_native_loop_with_application_tasks_) {
+  if (!in_nested_native_loop_with_application_tasks_) {
     // The pump is running using `event_` as its chrome-side synchronization
     // variable. In this case, no deduplication is done, since the event has its
     // own state.
@@ -140,8 +133,7 @@ void MessagePumpForUI::ScheduleWork() {
 
   // Clarify that we didn't really insert.
   native_msg_scheduled_.store(false, std::memory_order_relaxed);
-  TRACE_EVENT_INSTANT0("base", "Chrome.MessageLoopProblem.MESSAGE_POST_ERROR",
-                       TRACE_EVENT_SCOPE_THREAD);
+  TRACE_EVENT_INSTANT("base", "Chrome.MessageLoopProblem.MESSAGE_POST_ERROR");
 }
 
 void MessagePumpForUI::ScheduleDelayedWork(
@@ -184,14 +176,27 @@ bool MessagePumpForUI::HandleNestedNativeLoopWithApplicationTasks(
   return true;
 }
 
-void MessagePumpForUI::AddObserver(Observer* observer) {
+void MessagePumpForUI::RegisterNativeEventObserver(
+    NativeEventObserver* observer) {
   DCHECK_CALLED_ON_VALID_THREAD(bound_thread_);
-  observers_.AddObserver(observer);
+  CHECK(!native_event_observer_);
+  native_event_observer_ = observer;
 }
 
-void MessagePumpForUI::RemoveObserver(Observer* observer) {
+void MessagePumpForUI::UnregisterNativeEventObserver(
+    NativeEventObserver* observer) {
   DCHECK_CALLED_ON_VALID_THREAD(bound_thread_);
-  observers_.RemoveObserver(observer);
+  CHECK_EQ(native_event_observer_, observer);
+  native_event_observer_ = nullptr;
+}
+
+MessagePumpForUI::NativeEventObserver*
+MessagePumpForUI::ResetNativeEventObserverForTesting(
+    NativeEventObserver* observer) {
+  DCHECK_CALLED_ON_VALID_THREAD(bound_thread_);
+  NativeEventObserver* old_observer = native_event_observer_;
+  native_event_observer_ = observer;
+  return old_observer;
 }
 
 //-----------------------------------------------------------------------------
@@ -245,8 +250,7 @@ void MessagePumpForUI::DoRunLoop() {
     in_nested_native_loop_with_application_tasks_ = false;
     bool more_work_is_plausible = false;
 
-    if (!g_ui_pump_improvements_win ||
-        wakeup_state_ != WakeupState::kApplicationTask) {
+    if (wakeup_state_ != WakeupState::kApplicationTask) {
       more_work_is_plausible |= ProcessNextWindowsMessage();
       // We can end up in native loops which allow application tasks outside of
       // DoWork() when Windows calls back a Win32 message window owned by some
@@ -313,27 +317,16 @@ void MessagePumpForUI::WaitForWork(Delegate::NextWorkInfo next_work_info) {
     base::debug::Alias(&delay);
     base::debug::Alias(&wait_flags);
     DWORD result;
-    if (g_ui_pump_improvements_win) {
-      HANDLE event_handle = event_.handle();
-      result = MsgWaitForMultipleObjectsEx(1, &event_handle, delay, QS_ALLINPUT,
-                                           wait_flags);
-      DPCHECK(WAIT_FAILED != result);
-      if (result == WAIT_OBJECT_0) {
-        wakeup_state_ = WakeupState::kApplicationTask;
-      } else if (result == WAIT_OBJECT_0 + 1) {
-        wakeup_state_ = WakeupState::kNative;
-      } else {
-        wakeup_state_ = WakeupState::kInactive;
-      }
+    HANDLE event_handle = event_.handle();
+    result = MsgWaitForMultipleObjectsEx(1, &event_handle, delay, QS_ALLINPUT,
+                                         wait_flags);
+    DPCHECK(WAIT_FAILED != result);
+    if (result == WAIT_OBJECT_0) {
+      wakeup_state_ = WakeupState::kApplicationTask;
+    } else if (result == WAIT_OBJECT_0 + 1) {
+      wakeup_state_ = WakeupState::kNative;
     } else {
-      result = MsgWaitForMultipleObjectsEx(0, nullptr, delay, QS_ALLINPUT,
-                                           wait_flags);
-      DPCHECK(WAIT_FAILED != result);
-      if (result == WAIT_OBJECT_0) {
-        wakeup_state_ = WakeupState::kNative;
-      } else {
-        wakeup_state_ = WakeupState::kInactive;
-      }
+      wakeup_state_ = WakeupState::kInactive;
     }
 
     if (wakeup_state_ == WakeupState::kApplicationTask) {
@@ -368,7 +361,16 @@ void MessagePumpForUI::WaitForWork(Delegate::NextWorkInfo next_work_info) {
         MSG msg;
         TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("base"),
                      "MessagePumpForUI::WaitForWork PeekMessage");
-        if (::PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE)) {
+        if (native_event_observer_) {
+          native_event_observer_->WillRunNativeEvent(
+              next_peek_message_event_id_);
+        }
+        bool has_msg = ::PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE) != FALSE;
+        if (native_event_observer_) {
+          native_event_observer_->DidRunNativeEvent(
+              next_peek_message_event_id_++);
+        }
+        if (has_msg) {
           return;
         }
       }
@@ -454,10 +456,8 @@ void MessagePumpForUI::HandleTimerMessage() {
 void MessagePumpForUI::ScheduleNativeTimer(
     Delegate::NextWorkInfo next_work_info) {
   DCHECK(!next_work_info.is_immediate());
-  // We should only ScheduleNativeTimer() under the new pump implementation
-  // while nested with application tasks.
-  DCHECK(!g_ui_pump_improvements_win ||
-         in_nested_native_loop_with_application_tasks_);
+  // We should only ScheduleNativeTimer() while nested with application tasks.
+  DCHECK(in_nested_native_loop_with_application_tasks_);
 
   // Do not redundantly set the same native timer again if it was already set.
   // This can happen when a nested native loop goes idle with pending delayed
@@ -518,8 +518,7 @@ void MessagePumpForUI::ScheduleNativeTimer(
     // full). Since we only use ScheduleNativeTimer() in native nested loops
     // this likely means this pump will not be given a chance to run application
     // tasks until the nested loop completes.
-    TRACE_EVENT_INSTANT0("base", "Chrome.MessageLoopProblem.SET_TIMER_ERROR",
-                         TRACE_EVENT_SCOPE_THREAD);
+    TRACE_EVENT_INSTANT("base", "Chrome.MessageLoopProblem.SET_TIMER_ERROR");
   }
 }
 
@@ -583,7 +582,14 @@ bool MessagePumpForUI::ProcessNextWindowsMessage() {
                 ctx.event()->set_chrome_message_pump();
             msg_pump_data->set_sent_messages_in_queue(more_work_is_plausible);
           });
+      if (native_event_observer_) {
+        native_event_observer_->WillRunNativeEvent(next_peek_message_event_id_);
+      }
       has_msg = ::PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE) != FALSE;
+      if (native_event_observer_) {
+        native_event_observer_->DidRunNativeEvent(
+            next_peek_message_event_id_++);
+      }
     }
   }
   if (has_msg) {
@@ -600,9 +606,8 @@ bool MessagePumpForUI::ProcessMessageHelper(const MSG& msg) {
     // WM_QUIT is the standard way to exit a ::GetMessage() loop. Our
     // MessageLoop has its own quit mechanism, so WM_QUIT is generally
     // unexpected.
-    TRACE_EVENT_INSTANT0("base",
-                         "Chrome.MessageLoopProblem.RECEIVED_WM_QUIT_ERROR",
-                         TRACE_EVENT_SCOPE_THREAD);
+    TRACE_EVENT_INSTANT("base",
+                        "Chrome.MessageLoopProblem.RECEIVED_WM_QUIT_ERROR");
     return true;
   }
 
@@ -621,13 +626,15 @@ bool MessagePumpForUI::ProcessMessageHelper(const MSG& msg) {
                     ->set_message_id(msg.message);
               });
 
-  for (Observer& observer : observers_) {
-    observer.WillDispatchMSG(msg);
+  if (native_event_observer_) {
+    native_event_observer_->WillRunNativeEvent(
+        reinterpret_cast<uintptr_t>(&msg));
   }
   ::TranslateMessage(&msg);
   ::DispatchMessage(&msg);
-  for (Observer& observer : observers_) {
-    observer.DidDispatchMSG(msg);
+  if (native_event_observer_) {
+    native_event_observer_->DidRunNativeEvent(
+        reinterpret_cast<uintptr_t>(&msg));
   }
 
   return true;
@@ -768,9 +775,8 @@ void MessagePumpForIO::ScheduleWork() {
 
   native_msg_scheduled_.store(
       false, std::memory_order_relaxed);  // Clarify that we didn't succeed.
-  TRACE_EVENT_INSTANT0("base",
-                       "Chrome.MessageLoopProblem.COMPLETION_POST_ERROR",
-                       TRACE_EVENT_SCOPE_THREAD);
+  TRACE_EVENT_INSTANT("base",
+                      "Chrome.MessageLoopProblem.COMPLETION_POST_ERROR");
 }
 
 void MessagePumpForIO::ScheduleDelayedWork(

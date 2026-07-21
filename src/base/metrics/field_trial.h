@@ -86,16 +86,12 @@
 #include "base/memory/read_only_shared_memory_region.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/shared_memory_mapping.h"
+#include "base/metrics/field_trial_params.h"
 #include "base/metrics/persistent_memory_allocator.h"
 #include "base/synchronization/lock.h"
 #include "base/types/pass_key.h"
 #include "build/blink_buildflags.h"
 #include "build/build_config.h"
-
-#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE)
-#include "base/files/platform_file.h"
-#include "base/posix/global_descriptors.h"
-#endif
 
 namespace base {
 
@@ -113,6 +109,7 @@ struct LaunchOptions;
 #if BUILDFLAG(USE_BLINK)
 namespace shared_memory {
 enum class SharedMemoryError;
+struct SharedMemorySwitch;
 }  // namespace shared_memory
 #endif
 
@@ -552,10 +549,7 @@ class BASE_EXPORT FieldTrialList {
   // line arguments necessary for a child process to inherit the shared-memory
   // object containing the FieldTrial configuration.
   static void PopulateLaunchOptionsWithFieldTrialState(
-#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE)
-      GlobalDescriptors::Key descriptor_key,
-      ScopedFD& descriptor_to_share,
-#endif  // BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE)
+      shared_memory::SharedMemorySwitch* shared_memory_switch,
       CommandLine* command_line,
       LaunchOptions* launch_options);
 #endif  // !BUILDFLAG(USE_BLINK)
@@ -609,9 +603,8 @@ class BASE_EXPORT FieldTrialList {
   // Gets the parameters for |field_trial| from shared memory and stores them in
   // |params|. This is only exposed for use by FieldTrialParamAssociator and
   // shouldn't be used by anything else.
-  static bool GetParamsFromSharedMemory(
-      FieldTrial* field_trial,
-      std::map<std::string, std::string>* params);
+  static bool GetParamsFromSharedMemory(FieldTrial* field_trial,
+                                        FieldTrialParams* params);
 
   // Clears all the params in the allocator.
   static void ClearParamsFromSharedMemoryForTesting();

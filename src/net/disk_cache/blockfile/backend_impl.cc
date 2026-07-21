@@ -10,6 +10,7 @@
 #include <memory>
 #include <utility>
 
+#include "base/byte_size.h"
 #include "base/containers/heap_array.h"
 #include "base/debug/crash_logging.h"
 #include "base/debug/dump_without_crashing.h"
@@ -39,6 +40,7 @@
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "base/trace_event/trace_event.h"
+#include "base/types/expected.h"
 #include "net/base/net_errors.h"
 #include "net/disk_cache/backend_cleanup_tracker.h"
 #include "net/disk_cache/blockfile/disk_format.h"
@@ -1222,8 +1224,8 @@ void BackendImpl::FlushIndex() {
 
 // ------------------------------------------------------------------------
 
-int32_t BackendImpl::GetEntryCount(
-    net::Int32CompletionOnceCallback callback) const {
+base::expected<int32_t, net::Error> BackendImpl::GetEntryCount(
+    GetEntryCountCallback callback) const {
   return GetEntryCountSync();
 }
 
@@ -2091,8 +2093,8 @@ int BackendImpl::MaxBuffersSize() {
   // then cache the result.
   static const int max_buffers_size = ([]() {
     constexpr uint64_t kMaxMaxBuffersSize = 30 * 1024 * 1024;
-    const base::ByteCount total_memory =
-        base::SysInfo::AmountOfPhysicalMemory();
+    const base::ByteSize total_memory =
+        base::SysInfo::AmountOfTotalPhysicalMemory();
     if (total_memory.is_zero()) {
       return int{kMaxMaxBuffersSize};
     }

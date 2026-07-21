@@ -2,20 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "partition_alloc/thread_isolation/thread_isolation.h"
+
+#include "partition_alloc/partition_alloc_base/compiler_specific.h"
 
 #if PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
 
 #include "partition_alloc/address_pool_manager.h"
+#include "partition_alloc/internal/reservation_offset_table_internal.h"
 #include "partition_alloc/page_allocator.h"
 #include "partition_alloc/partition_alloc_check.h"
 #include "partition_alloc/partition_alloc_constants.h"
-#include "partition_alloc/reservation_offset_table.h"
 
 #if PA_BUILDFLAG(ENABLE_PKEYS)
 #include "partition_alloc/thread_isolation/pkey.h"
@@ -57,7 +54,8 @@ void WriteProtectThreadIsolatedVariable(ThreadIsolationOption thread_isolation,
                                         T& var,
                                         size_t offset = 0,
                                         bool read_only = false) {
-  WriteProtectThreadIsolatedMemory(thread_isolation, (char*)&var + offset,
+  WriteProtectThreadIsolatedMemory(thread_isolation,
+                                   PA_UNSAFE_TODO((char*)&var + offset),
                                    sizeof(T) - offset, read_only);
 }
 

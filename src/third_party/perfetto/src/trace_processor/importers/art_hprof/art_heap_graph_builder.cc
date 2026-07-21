@@ -16,8 +16,40 @@
 
 #include "src/trace_processor/importers/art_hprof/art_heap_graph_builder.h"
 #include <cinttypes>
+#include "src/trace_processor/importers/common/stats_tracker.h"
 
 namespace perfetto::trace_processor::art_hprof {
+
+namespace {
+
+// Root type precedence ranking. Lower rank = higher priority.
+// Matches proto heap graph's kRootTypePrecedence:
+//   STICKY_CLASS (0) > JNI_GLOBAL (1) > JNI_LOCAL (2) > everything else (3)
+size_t RankRootType(HprofHeapRootTag tag) {
+  switch (tag) {
+    case HprofHeapRootTag::kStickyClass:
+      return 0;
+    case HprofHeapRootTag::kJniGlobal:
+      return 1;
+    case HprofHeapRootTag::kJniLocal:
+      return 2;
+    case HprofHeapRootTag::kJavaFrame:
+    case HprofHeapRootTag::kNativeStack:
+    case HprofHeapRootTag::kThreadBlock:
+    case HprofHeapRootTag::kMonitorUsed:
+    case HprofHeapRootTag::kThreadObj:
+    case HprofHeapRootTag::kInternedString:
+    case HprofHeapRootTag::kFinalizing:
+    case HprofHeapRootTag::kDebugger:
+    case HprofHeapRootTag::kVmInternal:
+    case HprofHeapRootTag::kJniMonitor:
+    case HprofHeapRootTag::kUnknown:
+      return 3;
+  }
+  return 3;
+}
+
+}  // namespace
 
 constexpr std::array<std::pair<const char*, FieldType>, 8> kPrimitiveArrayTypes{
     {
@@ -55,27 +87,27 @@ void HeapGraphBuilder::PushBlob(TraceBlobView&& blob) {
 }
 
 HeapGraph HeapGraphBuilder::BuildGraph() {
-  // Phase 3: Resolve the heap graph
-  resolver_ = std::make_unique<HeapGraphResolver>(context_, header_, objects_,
-                                                  classes_, roots_, stats_);
+  resolver_ = std::make_unique<HeapGraphResolver>(
+      context_, header_, objects_, classes_, roots_, string_class_id_, stats_);
   resolver_->ResolveGraph();
 
   stats_.Write(context_);
   HeapGraph graph(header_.GetTimestamp());
 
-  for (auto it = strings_.GetIterator(); it; ++it) {
-    graph.AddString(it.key(), it.value());
-  }
-
-  for (auto it = classes_.GetIterator(); it; ++it) {
-    graph.AddClass(it.value());
-  }
-
-  for (auto it = objects_.GetIterator(); it; ++it) {
-    graph.AddObject(it.value());
-  }
+  graph.SetStrings(std::move(strings_));
+  graph.SetClasses(std::move(classes_));
+  graph.SetObjects(std::move(objects_));
 
   return graph;
+}
+
+void HeapGraphBuilder::Clear() {
+  strings_.Clear();
+  classes_.Clear();
+  objects_.Clear();
+  roots_.Clear();
+  resolver_.reset();
+  current_heap_.clear();
 }
 
 bool HeapGraphBuilder::ParseHeader() {
@@ -164,6 +196,10 @@ bool HeapGraphBuilder::ParseUtf8StringRecord(uint32_t length) {
     return false;
   }
 
+  if (length < header_.GetIdSize()) {
+    return false;
+  }
+
   std::string str;
   if (!iterator_->ReadString(str, length - header_.GetIdSize())) {
     return false;
@@ -198,6 +234,10 @@ bool HeapGraphBuilder::ParseClassDefinition() {
   classes_[class_obj_id] = class_def;
   stats_.class_count++;
 
+  if (class_name == kJavaLangString) {
+    string_class_id_ = class_obj_id;
+  }
+
   for (const auto& [type_name, field_type] : kPrimitiveArrayTypes) {
     if (class_name == type_name) {
       prim_array_class_ids_[static_cast<size_t>(field_type)] = class_obj_id;
@@ -211,23 +251,24 @@ bool HeapGraphBuilder::ParseClassDefinition() {
 bool HeapGraphBuilder::ParseHeapDump(size_t length) {
   size_t end_position = iterator_->GetPosition() + length;
 
-  // Parse heap dump records until we reach the end of the segment
+  // Parse heap dump records until we reach the end of the segment.
+  //
+  // Note: a single sub-record (e.g. CLASS_DUMP) is allowed to extend past
+  // the declared segment end. AHAT (the reference parser) reads sub-records
+  // by their own internal length and does not enforce the segment boundary,
+  // and some producers split segments at arbitrary byte boundaries that
+  // bisect a sub-record. We mirror that lenient behavior here.
   while (iterator_->GetPosition() < end_position) {
     if (!ParseHeapDumpRecord()) {
       return false;
     }
   }
 
-  // Ensure we're at the exact end position
-  if (iterator_->GetPosition() != end_position) {
-    size_t current = iterator_->GetPosition();
-    if (current < end_position) {
-      // Skip any remaining bytes
-      iterator_->SkipBytes(end_position - current);
-    } else {
-      // We went too far, which is an error
-      return false;
-    }
+  if (iterator_->GetPosition() < end_position) {
+    iterator_->SkipBytes(end_position - iterator_->GetPosition());
+  } else if (iterator_->GetPosition() > end_position) {
+    context_->stats_tracker->IncrementStats(
+        stats::hprof_segment_overshoot_counter);
   }
 
   return true;
@@ -269,7 +310,7 @@ bool HeapGraphBuilder::ParseHeapDumpRecord() {
   }
 
   // This should be unreachable given the logic above, but keeping it for safety
-  context_->storage->IncrementStats(stats::hprof_heap_dump_counter);
+  context_->stats_tracker->IncrementStats(stats::hprof_heap_dump_counter);
   return false;
 }
 
@@ -315,7 +356,18 @@ bool HeapGraphBuilder::ParseRootRecord(HprofHeapRootTag tag) {
   }
 
   stats_.root_count++;
-  roots_[object_id] = tag;
+
+  // Root type precedence: only upgrade to a higher-priority root type.
+  // Matches proto heap graph's kRootTypePrecedence logic: STICKY_CLASS >
+  // JNI_GLOBAL > JNI_LOCAL > everything else (including VM_INTERNAL).
+  auto* existing = roots_.Find(object_id);
+  if (existing) {
+    if (RankRootType(tag) < RankRootType(*existing)) {
+      *existing = tag;
+    }
+  } else {
+    roots_[object_id] = tag;
+  }
   return true;
 }
 
@@ -354,7 +406,7 @@ bool HeapGraphBuilder::ParseClassStructure() {
   // Get class definition
   auto cls = classes_.Find(class_id);
   if (!cls) {
-    context_->storage->IncrementStats(stats::hprof_class_errors);
+    context_->stats_tracker->IncrementStats(stats::hprof_class_errors);
     return false;
   }
 
@@ -613,21 +665,22 @@ bool HeapGraphBuilder::ParsePrimitiveArrayObject() {
 
   size_t type_size = GetFieldTypeSize(element_type, header_.GetIdSize());
 
+  size_t data_length = static_cast<size_t>(element_count) * type_size;
   std::vector<uint8_t> data;
-  if (!iterator_->ReadBytes(data, element_count * type_size)) {
+  if (!iterator_->ReadBytes(data, data_length)) {
     return false;
   }
 
   uint64_t class_id = 0;
   size_t element_type_index = static_cast<size_t>(element_type);
   if (element_type_index >= prim_array_class_ids_.size()) {
-    context_->storage->IncrementStats(
+    context_->stats_tracker->IncrementStats(
         stats::hprof_primitive_array_parsing_errors);
     return false;
   } else {
     class_id = prim_array_class_ids_[element_type_index];
     if (class_id == 0) {
-      context_->storage->IncrementStats(
+      context_->stats_tracker->IncrementStats(
           stats::hprof_primitive_array_parsing_errors);
       return false;
     }
@@ -695,7 +748,7 @@ std::string HeapGraphBuilder::NormalizeClassName(
     // If there was an array type signature to start, then interpret the
     // class name as a type signature.
     if (normalized_name.empty()) {
-      context_->storage->IncrementStats(stats::hprof_class_errors);
+      context_->stats_tracker->IncrementStats(stats::hprof_class_errors);
       return name;
     }
 
@@ -728,14 +781,14 @@ std::string HeapGraphBuilder::NormalizeClassName(
       case 'L':
         // Remove the leading 'L' and trailing ';'
         if (normalized_name.back() != ';') {
-          context_->storage->IncrementStats(stats::hprof_class_errors);
+          context_->stats_tracker->IncrementStats(stats::hprof_class_errors);
           return name;
         }
         normalized_name =
             normalized_name.substr(1, normalized_name.length() - 2);
         break;
       default:
-        context_->storage->IncrementStats(stats::hprof_class_errors);
+        context_->stats_tracker->IncrementStats(stats::hprof_class_errors);
         return name;
     }
   }

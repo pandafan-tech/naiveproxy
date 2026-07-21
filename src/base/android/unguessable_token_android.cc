@@ -5,8 +5,8 @@
 #include "base/android/unguessable_token_android.h"
 
 // Must come after all headers that specialize FromJniType() / ToJniType().
-#include "base/base_minimal_jni/TokenBase_jni.h"
-#include "base/base_minimal_jni/UnguessableToken_jni.h"
+#include "base/token_jni/TokenBase_jni.h"
+#include "base/token_jni/UnguessableToken_jni.h"
 
 namespace base {
 namespace android {
@@ -18,8 +18,8 @@ jni_zero::ScopedJavaLocalRef<jobject> UnguessableTokenAndroid::Create(
   const uint64_t low = token.GetLowForSerialization();
   DCHECK(high);
   DCHECK(low);
-  return Java_UnguessableToken_Constructor(env, static_cast<jlong>(high),
-                                           static_cast<jlong>(low));
+  return Java_UnguessableToken_Constructor(env, static_cast<int64_t>(high),
+                                           static_cast<int64_t>(low));
 }
 
 base::UnguessableToken UnguessableTokenAndroid::FromJavaUnguessableToken(
@@ -44,4 +44,5 @@ UnguessableTokenAndroid::ParcelAndUnparcelForTesting(
 }  // namespace android
 }  // namespace base
 
-DEFINE_JNI_FOR_UnguessableToken()
+DEFINE_JNI(UnguessableToken)
+DEFINE_JNI(TokenBase)

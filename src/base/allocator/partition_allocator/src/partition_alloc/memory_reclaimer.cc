@@ -2,14 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "partition_alloc/memory_reclaimer.h"
 
+#include <utility>
+
 #include "partition_alloc/buildflags.h"
+#include "partition_alloc/internal/partition_root_internal.h"
 #include "partition_alloc/partition_alloc.h"
 #include "partition_alloc/partition_alloc_base/no_destructor.h"
 #include "partition_alloc/partition_alloc_check.h"
@@ -26,7 +24,7 @@ MemoryReclaimer* MemoryReclaimer::Instance() {
 void MemoryReclaimer::RegisterPartition(PartitionRoot* partition) {
   internal::ScopedGuard lock(lock_);
   PA_DCHECK(partition);
-  auto it_and_whether_inserted = partitions_.insert(partition);
+  auto it_and_whether_inserted = partitions_.try_emplace(partition);
   PA_DCHECK(it_and_whether_inserted.second);
 }
 
@@ -69,12 +67,12 @@ void MemoryReclaimer::Reclaim(int flags) {
   // as there is periodic purge which makes sure that it doesn't take too much
   // space.
   if (flags & PurgeFlags::kAggressiveReclaim) {
-    ThreadCacheRegistry::Instance().PurgeAll();
+    ThreadCache::PurgeAllThread();
   }
 #endif  // PA_CONFIG(THREAD_CACHE_SUPPORTED)
 
-  for (auto* partition : partitions_) {
-    partition->PurgeMemory(flags);
+  for (auto& partition : partitions_) {
+    partition.first->PurgeMemory(flags, partition.second);
   }
 }
 

@@ -17,6 +17,8 @@
 syntax = "proto2";
 
 import "protos/perfetto/trace/android/graphics/pixelformat.proto";
+import "protos/perfetto/trace/android/graphics/insets.proto";
+import "protos/perfetto/trace/android/graphics/rect.proto";
 import "protos/perfetto/trace/android/view/display.proto";
 import "protos/perfetto/trace/android/typedef.proto";
 
@@ -45,6 +47,7 @@ message WindowLayoutParamsProto {
   optional float button_brightness = 14;
 
   enum RotationAnimation {
+    ROTATION_ANIMATION_NONE = 0;
     ROTATION_ANIMATION_UNSPECIFIED = -1;
     ROTATION_ANIMATION_CROSSFADE = 1;
     ROTATION_ANIMATION_JUMPCUT = 2;
@@ -58,7 +61,7 @@ message WindowLayoutParamsProto {
   optional uint32 input_feature_flags = 19
       [(.perfetto.protos.typedef) =
            "android.view.WindowManager.LayoutParams.InputFeatureFlags"];
-  optional int64 user_activity_timeout = 20;
+  optional int64 user_activity_timeout = 20 [jstype = JS_STRING];
 
   optional ViewDisplayProto.ColorMode color_mode = 23;
   optional uint32 flags = 24
@@ -86,4 +89,34 @@ message WindowLayoutParamsProto {
       [(.perfetto.protos.typedef) =
            "android.view.WindowInsets.Side.InsetsSide"];
   optional bool fit_ignore_visibility = 33;
+  optional uint32 forcibly_shown_types = 34
+      [(.perfetto.protos.typedef) =
+           "android.view.WindowInsets.Type.InsetsType"];
+  repeated InsetsFrameProviderProto provided_insets = 35;
+  repeated WindowLayoutParamsProto params_for_rotation = 36;
+  optional uint32 rendering_hints = 37
+      [(.perfetto.protos.typedef) =
+           "android.view.WindowManager.LayoutParams.RenderingHints"];
+  optional int32 screen_brightness_unit = 38
+      [(.perfetto.protos.typedef) =
+           "android.hardware.display.DisplayManager.BrightnessUnit"];
+}
+
+/* represents InsetsFrameProvider */
+message InsetsFrameProviderProto {
+  optional int32 id = 1;
+  optional int32 type = 2;
+  optional int32 source = 3;
+  optional RectProto arbitrary_rectangle = 4;
+  optional int32 flags = 5;
+  optional InsetsProto insets_size = 6;
+  repeated InsetsSizeOverrideProto insets_size_override = 7;
+  optional InsetsProto minimal_insets_size_in_display_cutout_safe = 8;
+  repeated RectProto bounding_rects = 9;
+}
+
+/* represents InsetsSizeOverride */
+message InsetsSizeOverrideProto {
+  optional int32 windowType = 1;
+  optional InsetsProto insets_size = 2;
 }

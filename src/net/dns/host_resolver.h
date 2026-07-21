@@ -33,6 +33,7 @@
 #include "net/dns/public/host_resolver_results.h"
 #include "net/dns/public/host_resolver_source.h"
 #include "net/dns/public/mdns_listener_update_type.h"
+#include "net/dns/public/resolution_details.h"
 #include "net/dns/public/resolve_error_info.h"
 #include "net/dns/public/secure_dns_policy.h"
 #include "net/log/net_log_with_source.h"
@@ -81,7 +82,10 @@ class NET_EXPORT HostResolver {
 
     std::string ToString() const;
 
+    // Returns the requested type. HasScheme() must return true to use the first
+    // method, second to use the second.
     const url::SchemeHostPort& AsSchemeHostPort() const;
+    const HostPortPair& AsHostPortPair() const;
 
     bool operator==(const Host& other) const { return host_ == other.host_; }
 
@@ -191,6 +195,11 @@ class NET_EXPORT HostResolver {
     // the request is running (after Start() returns |ERR_IO_PENDING| and before
     // the callback is invoked).
     virtual void ChangeRequestPriority(RequestPriority priority) {}
+
+    // Returns details about how the host resolution was performed. Only
+    // available after the request has completed. Returns std::nullopt if the
+    // resolution is not completed or failed.
+    virtual std::optional<ResolutionDetails> GetResolutionDetails() const = 0;
   };
 
   // Handler for a service endpoint resolution request. Unlike
@@ -266,6 +275,10 @@ class NET_EXPORT HostResolver {
     // Change the priority of this request.
     virtual void ChangeRequestPriority(RequestPriority priority) = 0;
 
+    // Returns details about how the host resolution was performed. Returns
+    // std::nullopt if the resolution is not completed or failed.
+    virtual std::optional<ResolutionDetails> GetResolutionDetails() const = 0;
+
     // TODO(crbug.com/403373872): Remove this method once we identify the cause
     // of the bug.
     // Returns a string representation of the state of the request.
@@ -295,7 +308,7 @@ class NET_EXPORT HostResolver {
     HttpsSvcbOptions& operator=(HttpsSvcbOptions&&) = default;
     ~HttpsSvcbOptions();
 
-    static HttpsSvcbOptions FromDict(const base::Value::Dict& dict);
+    static HttpsSvcbOptions FromDict(const base::DictValue& dict);
     static HttpsSvcbOptions FromFeatures();
 
     base::TimeDelta insecure_extra_time_max;
@@ -334,6 +347,19 @@ class NET_EXPORT HostResolver {
     // asynchronous DnsClient is enabled or disabled. See HostResolverManager::
     // SetInsecureDnsClientEnabled() for details.
     bool insecure_dns_client_enabled = false;
+
+    // Initial setting for whether TaskType::DNS_PLATFORM must be used instead
+    // of TaskType::DNS. Requires `insecure_dns_client_enabled` to be true to
+    // have any effect (otherwise TaskType::DNS won't be used in the first
+    // place). See HostResolverManager::SetInsecureDnsClientEnabled() for
+    // details.
+    // Before setting this to true one must ensure that the platform DNS APIs
+    // are supported on the current device
+    // (via net::features::IsDnsPlatformSupported()).
+    // This exists as a separate option to let different Chromium-based products
+    // make different choices. It cannot be a build flag because embedders can
+    // build in the same way but want different behavior.
+    bool insecure_dns_via_platform_apis_enabled = false;
 
     // Initial setting for whether additional DNS types (e.g. HTTPS) may be
     // queried when using the built-in resolver for insecure DNS.
@@ -549,7 +575,7 @@ class NET_EXPORT HostResolver {
   virtual HostCache* GetHostCache();
 
   // Returns the current DNS configuration |this| is using, as a Value.
-  virtual base::Value::Dict GetDnsConfigAsValue() const;
+  virtual base::DictValue GetDnsConfigAsValue() const;
 
   // Set the associated URLRequestContext, generally expected to be called by
   // URLRequestContextBuilder on passing ownership of |this| to a context. May

@@ -48,17 +48,37 @@ class CRYPTO_EXPORT PrivateKey {
   // Generates a fresh, random Ed25519 key.
   static PrivateKey GenerateEd25519();
 
+  // Generates a fresh, random X25519 key.
+  static PrivateKey GenerateX25519();
+
+  // Generates a fresh, random ML-DSA-44 key.
+  static PrivateKey GenerateMldsa44();
+
   // Imports a PKCS#8 PrivateKeyInfo block. Returns nullopt if the passed-in
   // buffer is not a valid PrivateKeyInfo block, or if there is trailing data in
   // it after the PrivateKeyInfo block.
   static std::optional<PrivateKey> FromPrivateKeyInfo(
       base::span<const uint8_t> pki);
 
+  // Imports an RFC 8017-encoded RSA private key. Returns nullopt if the
+  // passed-in buffer is not a valid RSA private key.
+  static std::optional<PrivateKey> FromRSAPrivateKey(
+      base::span<const uint8_t> key);
+
+  // Imports an RFC 5915-encoded EC private key. Returns nullopt if the
+  // passed-in buffer is not a valid P-256 private key. If the passed-in key
+  // does not specify a group, it will be treated as though it was P-256.
+  static std::optional<PrivateKey> FromEcP256PrivateKey(
+      base::span<const uint8_t> key);
+
   // Imports an RFC 8032-encoded Ed25519 private key.
   //
   // The encoding used doesn't allow for importing to fail (all input bit
   // strings are potentially valid keys).
   static PrivateKey FromEd25519PrivateKey(base::span<const uint8_t, 32> key);
+
+  // Imports an X25519 private key.
+  static PrivateKey FromX25519PrivateKey(base::span<const uint8_t, 32> key);
 
   // Deliberately not present in this API:
   // ECPrivateKey::CreateFromEncryptedPrivateKeyInfo(): imports a PKCS#8
@@ -68,9 +88,23 @@ class CRYPTO_EXPORT PrivateKey {
   // Exports a PKCS#8 PrivateKeyInfo block.
   std::vector<uint8_t> ToPrivateKeyInfo() const;
 
+  // Exports an RFC 8017-encoded RSA private key. It is illegal to call this if
+  // !IsRsa().
+  std::vector<uint8_t> ToRSAPrivateKey() const;
+
+  // Exports an RFC 5915-encoded EC private key. It is illegal to call this if
+  // !IsEcP256(). The returned ECPrivateKey struct does *not* include the
+  // optional parameters or publicKey fields, despite what RFC 5915 recommends,
+  // because existing clients don't use them. If you need those fields, please
+  // talk to an owner of this class.
+  std::vector<uint8_t> ToEcP256PrivateKey() const;
+
   // Exports an Ed25519 private key in RFC 8032 format. It is illegal to call
   // this if !IsEd25519().
   std::array<uint8_t, 32> ToEd25519PrivateKey() const;
+
+  // Exports an X25519 private key.
+  std::array<uint8_t, 32> ToX25519PrivateKey() const;
 
   // Computes and exports an X.509 SubjectPublicKeyInfo block corresponding to
   // this key.
@@ -78,11 +112,14 @@ class CRYPTO_EXPORT PrivateKey {
 
   // Exports an EC public key in X9.62 uncompressed form. It is illegal to call
   // this on a non-EC PrivateKey.
-  std::vector<uint8_t> ToUncompressedForm() const;
+  std::vector<uint8_t> ToUncompressedX962Point() const;
 
   // Exports an Ed25519 public key in RFC 8032 format. It is illegal to call
   // this if !IsEd25519().
   std::array<uint8_t, 32> ToEd25519PublicKey() const;
+
+  // Exports an X25519 public key.
+  std::array<uint8_t, 32> ToX25519PublicKey() const;
 
   EVP_PKEY* key() { return key_.get(); }
   const EVP_PKEY* key() const { return key_.get(); }
@@ -90,6 +127,8 @@ class CRYPTO_EXPORT PrivateKey {
   bool IsRsa() const;
   bool IsEc() const;
   bool IsEd25519() const;
+  bool IsX25519() const;
+  bool IsMldsa44() const;
 
   bool IsEcP256() const;
   bool IsEcP384() const;
@@ -153,12 +192,21 @@ class CRYPTO_EXPORT PublicKey {
   // importing to fail.
   static PublicKey FromEd25519PublicKey(base::span<const uint8_t, 32> key);
 
+  // Imports an X25519 public key.
+  static PublicKey FromX25519PublicKey(base::span<const uint8_t, 32> key);
+
   // Exports a PublicKey as an X.509 SubjectPublicKeyInfo.
   std::vector<uint8_t> ToSubjectPublicKeyInfo() const;
 
   // Exports an EC public key in X9.62 uncompressed form. It is illegal to call
   // this on a non-EC PublicKey.
-  std::vector<uint8_t> ToUncompressedForm() const;
+  std::vector<uint8_t> ToUncompressedX962Point() const;
+
+  // Exports an Ed25519 public key in RFC 8032 format.
+  std::array<uint8_t, 32> ToEd25519PublicKey() const;
+
+  // Exports an X25519 public key.
+  std::array<uint8_t, 32> ToX25519PublicKey() const;
 
   // Export the components (e, n) of an RSA public key, as big-endian integers.
   // It is illegal to call these on a non-RSA PublicKey.
@@ -171,6 +219,8 @@ class CRYPTO_EXPORT PublicKey {
   bool IsRsa() const;
   bool IsEc() const;
   bool IsEd25519() const;
+  bool IsX25519() const;
+  bool IsMldsa44() const;
 
   bool IsEcP256() const;
   bool IsEcP384() const;

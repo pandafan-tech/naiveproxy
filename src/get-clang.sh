@@ -78,7 +78,9 @@ case "$target_os" in
   ;;
   android)
     case "$target_cpu" in
-      arm64) WITH_PGO=android-arm64;;
+      arm64) WITH_PGO=android-desktop-arm64;;
+      x64) WITH_PGO=android-desktop-x64;;
+      arm) WITH_PGO=android-arm32;;
       *) WITH_PGO=android-arm32;;
     esac
   ;;
@@ -94,8 +96,7 @@ if [ "$WITH_PGO" -a ! -f chrome/build/pgo_profiles/"$PGO_PATH" ]; then
 fi
 
 if [ "$target_os" = android -a ! -d third_party/android_toolchain/ndk ]; then
-  # https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-  android_ndk_version=$(grep 'default_android_ndk_version = ' build/config/android/config.gni | cut -d'"' -f2)
+  android_ndk_version=r24
   curl -LO https://dl.google.com/android/repository/android-ndk-$android_ndk_version-linux.zip
   unzip android-ndk-$android_ndk_version-linux.zip
   mkdir -p third_party/android_toolchain/ndk

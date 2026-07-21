@@ -25,7 +25,6 @@
 #include <iterator>
 #include <memory>
 #include <optional>
-#include <regex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -33,6 +32,7 @@
 
 #include "perfetto/base/logging.h"
 #include "perfetto/base/status.h"
+#include "perfetto/ext/base/regex.h"
 #include "perfetto/ext/base/status_macros.h"
 #include "perfetto/ext/base/status_or.h"
 #include "perfetto/ext/base/string_view.h"
@@ -41,7 +41,7 @@
 #include "perfetto/protozero/proto_utils.h"
 #include "perfetto/protozero/scattered_heap_buffer.h"
 #include "perfetto/trace_processor/basic_types.h"
-#include "src/trace_processor/perfetto_sql/engine/perfetto_sql_engine.h"
+#include "src/trace_processor/perfetto_sql/engine/perfetto_sql_connection.h"
 #include "src/trace_processor/sqlite/bindings/sqlite_result.h"
 #include "src/trace_processor/sqlite/bindings/sqlite_type.h"
 #include "src/trace_processor/sqlite/bindings/sqlite_value.h"
@@ -475,24 +475,25 @@ int TemplateReplace(
     const std::string& raw_text,
     const std::unordered_map<std::string, std::string>& substitutions,
     std::string* out) {
-  std::regex re(R"(\{\{\s*(\w*)\s*\}\})", std::regex_constants::ECMAScript);
+  auto re = base::Regex::CreateOrCheck(R"(\{\{\s*(\w*)\s*\}\})");
 
-  auto it = std::sregex_iterator(raw_text.begin(), raw_text.end(), re);
-  auto regex_end = std::sregex_iterator();
-  auto start = raw_text.begin();
-  for (; it != regex_end; ++it) {
-    out->insert(out->end(), start, raw_text.begin() + it->position(0));
+  std::string_view input(raw_text);
+  size_t last_end = 0;
+  std::vector<std::string_view> groups;
+  for (auto iter = re.PartialMatchAll(input);
+       iter.NextWithGroups(groups).has_value();) {
+    // groups[0] is the full match, groups[1] is the capture group.
+    size_t match_pos = static_cast<size_t>(groups[0].data() - input.data());
+    out->append(input.substr(last_end, match_pos - last_end));
 
-    auto value_it = substitutions.find(it->str(1));
+    auto value_it = substitutions.find(std::string(groups[1]));
     if (value_it == substitutions.end()) {
       return 1;
     }
-
-    const auto& value = value_it->second;
-    std::copy(value.begin(), value.end(), std::back_inserter(*out));
-    start = raw_text.begin() + it->position(0) + it->length(0);
+    out->append(value_it->second);
+    last_end = match_pos + groups[0].size();
   }
-  out->insert(out->end(), start, raw_text.end());
+  out->append(input.substr(last_end));
   return 0;
 }
 
@@ -680,8 +681,8 @@ void RunMetric::Step(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
                         metric_it->sql.c_str()));
   }
 
-  auto res =
-      user_ctx->engine->Execute(SqlSource::FromMetricFile(subbed_sql, path));
+  auto res = user_ctx->connection->Execute(
+      SqlSource::FromMetricFile(subbed_sql, path));
   if (!res.status().ok()) {
     return sqlite::utils::SetError(ctx, res.status());
   }
@@ -727,7 +728,7 @@ void UnwrapMetricProto::Step(sqlite3_context* ctx,
                                         static_cast<int>(bytes->size));
 }
 
-base::Status ComputeMetrics(PerfettoSqlEngine* engine,
+base::Status ComputeMetrics(PerfettoSqlConnection* connection,
                             const std::vector<std::string>& metrics_to_compute,
                             const std::vector<SqlMetricFile>& sql_metrics,
                             const DescriptorPool& pool,
@@ -746,8 +747,8 @@ base::Status ComputeMetrics(PerfettoSqlEngine* engine,
     }
 
     const SqlMetricFile& sql_metric = *metric_it;
-    auto prep_it =
-        engine->Execute(SqlSource::FromMetric(sql_metric.sql, metric_it->path));
+    auto prep_it = connection->Execute(
+        SqlSource::FromMetric(sql_metric.sql, metric_it->path));
     RETURN_IF_ERROR(prep_it.status());
 
     auto output_query =
@@ -756,7 +757,7 @@ base::Status ComputeMetrics(PerfettoSqlEngine* engine,
         metatrace::Category::QUERY_TIMELINE, "COMPUTE_METRIC_QUERY",
         [&](metatrace::Record* r) { r->AddArg("SQL", output_query); });
 
-    auto it = engine->ExecuteUntilLastStatement(
+    auto it = connection->ExecuteUntilLastStatement(
         SqlSource::FromTraceProcessorImplementation(std::move(output_query)));
     RETURN_IF_ERROR(it.status());
 

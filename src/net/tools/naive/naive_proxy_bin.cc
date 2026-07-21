@@ -3,6 +3,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -54,6 +55,7 @@
 #include "net/proxy_resolution/proxy_config.h"
 #include "net/proxy_resolution/proxy_config_service_fixed.h"
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
+#include "net/socket/client_socket_pool.h"
 #include "net/socket/client_socket_pool_manager.h"
 #include "net/socket/ssl_client_socket.h"
 #include "net/socket/tcp_server_socket.h"
@@ -70,6 +72,7 @@
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "net/url_request/url_request_context.h"
 #include "net/url_request/url_request_context_builder.h"
+#include "third_party/boringssl/src/include/openssl/ssl.h"
 #include "url/gurl.h"
 #include "url/scheme_host_port.h"
 #include "url/url_util.h"
@@ -100,16 +103,16 @@ constexpr int kExpectedMaxUsers = 8;
 constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
     net::DefineNetworkTrafficAnnotation("naive", "");
 
-std::unique_ptr<base::Value::Dict> GetConstants() {
-  base::Value::Dict constants_dict = net::GetNetConstants();
-  base::Value::Dict dict;
+std::unique_ptr<base::DictValue> GetConstants() {
+  base::DictValue constants_dict = net::GetNetConstants();
+  base::DictValue dict;
   std::string os_type = base::StringPrintf(
       "%s: %s (%s)", base::SysInfo::OperatingSystemName().c_str(),
       base::SysInfo::OperatingSystemVersion().c_str(),
       base::SysInfo::OperatingSystemArchitecture().c_str());
   dict.Set("os_type", os_type);
   constants_dict.Set("clientInfo", std::move(dict));
-  return std::make_unique<base::Value::Dict>(std::move(constants_dict));
+  return std::make_unique<base::DictValue>(std::move(constants_dict));
 }
 }  // namespace
 
@@ -167,7 +170,7 @@ std::unique_ptr<URLRequestContext> BuildCertURLRequestContext(NetLog* net_log) {
       ConfiguredProxyResolutionService::CreateWithoutProxyResolver(
           std::make_unique<ProxyConfigServiceFixed>(
               ProxyConfigWithAnnotation(proxy_config, kTrafficAnnotation)),
-          net_log);
+          nullptr, net_log);
   proxy_service->ForceReloadProxyConfig();
   builder.set_proxy_resolution_service(std::move(proxy_service));
 
@@ -232,7 +235,7 @@ std::unique_ptr<URLRequestContext> BuildURLRequestContext(
       ConfiguredProxyResolutionService::CreateWithoutProxyResolver(
           std::make_unique<ProxyConfigServiceFixed>(
               ProxyConfigWithAnnotation(proxy_config, kTrafficAnnotation)),
-          net_log);
+          nullptr, net_log);
   proxy_service->ForceReloadProxyConfig();
   builder.set_proxy_resolution_service(std::move(proxy_service));
 
@@ -251,6 +254,12 @@ std::unique_ptr<URLRequestContext> BuildURLRequestContext(
     struct NoPostQuantum : public SSLConfigService {
       SSLContextConfig GetSSLContextConfig() override {
         SSLContextConfig config;
+        std::erase_if(
+            config.supported_named_groups, [](const SSLNamedGroupInfo& g) {
+              return g.group_id == SSL_GROUP_X25519_MLKEM768 ||
+                     g.group_id == SSL_GROUP_X25519_KYBER768_DRAFT00 ||
+                     g.group_id == SSL_GROUP_MLKEM1024;
+            });
         return config;
       }
 
@@ -359,19 +368,20 @@ int main(int argc, char* argv[]) {
   url::AddStandardScheme("socks",
                          url::SCHEME_WITH_HOST_PORT_AND_USER_INFORMATION);
   url::AddStandardScheme("redir", url::SCHEME_WITH_HOST_AND_PORT);
-  net::ClientSocketPoolManager::set_max_sockets_per_pool(
-      net::HttpNetworkSession::NORMAL_SOCKET_POOL,
+  net::ClientSocketPoolManager::set_socket_soft_cap_per_pool_for_test(
+      net::HttpNetworkSession::SocketPoolType::kNormal,
       kDefaultMaxSocketsPerPool * kExpectedMaxUsers);
   net::ClientSocketPoolManager::set_max_sockets_per_proxy_chain(
-      net::HttpNetworkSession::NORMAL_SOCKET_POOL,
+      net::HttpNetworkSession::SocketPoolType::kNormal,
       kDefaultMaxSocketsPerPool * kExpectedMaxUsers);
-  net::ClientSocketPoolManager::set_max_sockets_per_group(
-      net::HttpNetworkSession::NORMAL_SOCKET_POOL,
+  net::ClientSocketPoolManager::set_max_sockets_per_group_for_test(
+      net::HttpNetworkSession::SocketPoolType::kNormal,
       kDefaultMaxSocketsPerGroup * kExpectedMaxUsers);
+  net::ClientSocketPool::set_used_idle_socket_timeout(base::Seconds(60));
 
   const auto& proc = *base::CommandLine::ForCurrentProcess();
   const auto& args = proc.GetArgs();
-  base::Value::Dict config_dict;
+  base::DictValue config_dict;
   if (args.empty() && proc.argv().size() >= 2) {
     config_dict = GetSwitchesAsValue(proc);
   } else {
@@ -391,7 +401,7 @@ int main(int argc, char* argv[]) {
                 << ") " << error_message << std::endl;
       return EXIT_FAILURE;
     }
-    if (const base::Value::Dict* dict = value->GetIfDict()) {
+    if (const base::DictValue* dict = value->GetIfDict()) {
       config_dict = dict->Clone();
     }
   }
@@ -408,6 +418,8 @@ int main(int argc, char* argv[]) {
                  "--proxy=<proto>://[<user>:<pass>@]<hostname>[:<port>]\n"
                  "                           proto: https, quic\n"
                  "--insecure-concurrency=<N> Use N connections, insecure\n"
+                 "--tunnel-timeout=<SECONDS> Rotate tunnels after timeout\n"
+                 "--idle-timeout=<SECONDS>   Close idle streams after timeout\n"
                  "--extra-headers=...        Extra headers split by CRLF\n"
                  "--host-resolver-rules=...  Resolver rules\n"
                  "--resolver-range=...       Redirect resolver range\n"
@@ -531,8 +543,8 @@ int main(int argc, char* argv[]) {
     auto* session = context->http_transaction_factory()->GetSession();
     auto naive_proxy = std::make_unique<net::NaiveProxy>(
         std::move(listen_socket), listen_config.protocol, listen_config.user,
-        listen_config.pass, config.insecure_concurrency, resolver.get(),
-        session, kTrafficAnnotation,
+        listen_config.pass, config.insecure_concurrency, config.tunnel_timeout,
+        config.idle_timeout, resolver.get(), session, kTrafficAnnotation,
         std::vector<net::PaddingType>{net::PaddingType::kVariant1,
                                       net::PaddingType::kNone});
     naive_proxies.push_back(std::move(naive_proxy));

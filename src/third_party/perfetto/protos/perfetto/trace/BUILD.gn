@@ -82,6 +82,7 @@ perfetto_proto_library("non_minimal_@TYPE@") {
   deps = [
     ":minimal_@TYPE@",
     "../config:@TYPE@",
+    "../protovm:@TYPE@",
     "android:@TYPE@",
     "chrome:@TYPE@",
     "etw:@TYPE@",
@@ -90,6 +91,7 @@ perfetto_proto_library("non_minimal_@TYPE@") {
     "generic_kernel:@TYPE@",
     "gpu:@TYPE@",
     "interned_data:@TYPE@",
+    "linux:@TYPE@",
     "perfetto:@TYPE@",
     "power:@TYPE@",
     "profiling:@TYPE@",
@@ -113,8 +115,10 @@ perfetto_proto_library("@TYPE@") {
   deps = [ ":non_minimal_@TYPE@" ]
   sources = []
   generate_descriptor = "trace.descriptor"
-  generator_visibility =
-      [ "../../../src/trace_processor/importers/proto:gen_cc_trace_descriptor" ]
+  generator_visibility = [
+    "../../../src/trace_processor/importers/proto:gen_cc_trace_descriptor",
+    "../../third_party/chromium:extension_descriptor",
+  ]
   descriptor_root_source = "trace.proto"
 }
 

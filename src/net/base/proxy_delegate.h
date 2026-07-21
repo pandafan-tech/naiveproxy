@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "base/memory/scoped_refptr.h"
 #include "base/types/expected.h"
 #include "base/types/optional_ref.h"
 #include "net/base/completion_once_callback.h"
@@ -14,6 +15,8 @@
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
 #include "net/base/proxy_chain.h"
+#include "net/http/http_request_headers.h"
+#include "net/http/http_response_headers.h"
 #include "net/proxy_resolution/proxy_retry_info.h"
 
 class GURL;
@@ -111,23 +114,23 @@ class NET_EXPORT ProxyDelegate {
   virtual void SetProxyResolutionService(
       ProxyResolutionService* proxy_resolution_service) = 0;
 
-  // Checks DNS aliases returned during host resolution against the MDL
-  // (Masked Domain List) manager to determine if any alias points to a
-  // third-party resource. If method returns true and
-  // `fail_if_alias_requires_proxy_override_` is set for connection request, the
-  // stream creation will be canceled with `ERR_PROXY_REQUIRED`, prompting a
-  // subsequent call to `OnResolveProxy`.
-  virtual bool AliasRequiresProxyOverride(
-      const std::string scheme,
-      const std::vector<std::string>& dns_aliases,
-      const net::NetworkAnonymizationKey& network_anonymization_key) = 0;
-
   // Called after a stream creation succeeds or fails. `duration` indicates
   // how long the attempt took, from when the jobs started to when the attempt
   // succeeded or failed.
   virtual void OnStreamCreationAttempted(const ProxyChain& proxy_chain,
                                          base::TimeDelta duration,
                                          base::optional_ref<int> net_error) {}
+
+  virtual void OnBeforePreambleRequest(const ProxyChain& proxy_chain,
+                                       size_t proxy_index,
+                                       size_t preamble_index,
+                                       HttpRequestHeaders& headers) const {}
+
+  virtual void OnPreambleHeadersReceived(
+      const ProxyChain& proxy_chain,
+      size_t proxy_index,
+      size_t preamble_index,
+      scoped_refptr<HttpResponseHeaders> response_headers) {}
 };
 
 }  // namespace net

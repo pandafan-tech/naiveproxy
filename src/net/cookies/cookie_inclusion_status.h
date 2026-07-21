@@ -110,8 +110,16 @@ class NET_EXPORT CookieInclusionStatus {
     EXCLUDE_NO_COOKIE_CONTENT = 26,
     // Cookie is unpartitioned and being accessed from an anonymous context
     EXCLUDE_ANONYMOUS_CONTEXT = 27,
+    // Cookie was set with an invalid Path attribute (path was modified during
+    // canonicalization, indicating the original path was malformed).
+    EXCLUDE_INVALID_PATH = 28,
+    // Cookie was rejected in parsing due to having an ambiguous serialization.
+    // This can result from having an empty name and a value containing an
+    // equals sign, such as a cookie line "=Foo=Bar", which is serialized as
+    // "Foo=Bar" and could shadow a cookie named "Foo".
+    EXCLUDE_AMBIGUOUS_SERIALIZATION = 29,
     // This should be kept last.
-    MAX_EXCLUSION_REASON = EXCLUDE_ANONYMOUS_CONTEXT
+    MAX_EXCLUSION_REASON = EXCLUDE_AMBIGUOUS_SERIALIZATION
   };
 
   // Reason to warn about a cookie. Any information contained in
@@ -261,13 +269,10 @@ class NET_EXPORT CookieInclusionStatus {
     kNone = 0,
     // For user explicit settings, including User bypass.
     kUserSetting = 1,
-    // For 3PCD metadata .
-    k3PCDMetadata = 2,
-    // For 3PCD 1P and 3P deprecation trial.
-    k3PCDDeprecationTrial = 3,
-    kTopLevel3PCDDeprecationTrial = 4,
-    // For 3PCD heuristics.
-    k3PCDHeuristics = 5,
+    // k3PCDMetadata = 2,  // Deprecated
+    // k3PCDDeprecationTrial = 3,  // Deprecated
+    // kTopLevel3PCDDeprecationTrial = 4,  // Deprecated
+    // k3PCDHeuristics = 5,  // Deprecated
     // For Enterprise Policy : CookieAllowedForUrls and BlockThirdPartyCookies.
     kEnterprisePolicy = 6,
     kStorageAccess = 7,

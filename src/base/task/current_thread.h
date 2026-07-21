@@ -18,7 +18,6 @@
 #include "base/message_loop/message_pump_for_ui.h"
 #include "base/pending_task.h"
 #include "base/task/sequence_manager/task_time_observer.h"
-#include "base/task/single_thread_task_runner.h"
 #include "base/task/task_observer.h"
 #include "build/build_config.h"
 
@@ -131,11 +130,6 @@ class BASE_EXPORT CurrentThread {
   // DestructionObserver is receiving a notification callback.
   void RemoveDestructionObserver(DestructionObserver* destruction_observer);
 
-  // Forwards to SequenceManager::SetTaskRunner().
-  // DEPRECATED(https://crbug.com/825327): only owners of the SequenceManager
-  // instance should replace its TaskRunner.
-  void SetTaskRunner(scoped_refptr<SingleThreadTaskRunner> task_runner);
-
   // Forwards to SequenceManager::(Add|Remove)TaskObserver.
   // DEPRECATED(https://crbug.com/825327): only owners of the SequenceManager
   // instance should add task observers on it.
@@ -222,6 +216,8 @@ class BASE_EXPORT CurrentThread {
   // Returns the IOWatcher instance exposed by this thread, if any.
   IOWatcher* GetIOWatcher();
 
+  bool IsAsyncIOSupported() const;
+
  protected:
   explicit CurrentThread(
       sequence_manager::internal::SequenceManagerImpl* sequence_manager)
@@ -280,8 +276,15 @@ class BASE_EXPORT CurrentUIThread : public CurrentThread {
 #endif
 
 #if BUILDFLAG(IS_WIN)
-  void AddMessagePumpObserver(MessagePumpForUI::Observer* observer);
-  void RemoveMessagePumpObserver(MessagePumpForUI::Observer* observer);
+  void RegisterNativeEventObserver(
+      MessagePumpForUI::NativeEventObserver* observer);
+  void UnregisterNativeEventObserver(
+      MessagePumpForUI::NativeEventObserver* observer);
+
+  // For testing only, allows overriding the current observer.
+  // Returns the previous observer.
+  MessagePumpForUI::NativeEventObserver* ResetNativeEventObserverForTesting(
+      MessagePumpForUI::NativeEventObserver* observer);
 #endif
 
  private:

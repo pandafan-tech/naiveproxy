@@ -50,13 +50,15 @@ WITH frames AS (
     process.upid,
     process.name AS process_name,
     timeline.name AS vsync,
-    jank_type GLOB '*App Deadline Missed*' AS missed_app_frame,
+    jank_type GLOB '*App Deadline Missed*'
+      OR jank_type GLOB '*App Resynced Jitter*' AS missed_app_frame,
     jank_type GLOB '*SurfaceFlinger CPU Deadline Missed*'
       OR jank_type GLOB '*SurfaceFlinger GPU Deadline Missed*'
       OR jank_type GLOB '*SurfaceFlinger Scheduling*'
       OR jank_type GLOB '*Prediction Error*'
       OR jank_type GLOB '*Display HAL*' AS missed_sf_frame,
     jank_type GLOB '*App Deadline Missed*'
+      OR jank_type GLOB '*App Resynced Jitter*'
       OR jank_type GLOB '*SurfaceFlinger CPU Deadline Missed*'
       OR jank_type GLOB '*SurfaceFlinger GPU Deadline Missed*'
       OR jank_type GLOB '*SurfaceFlinger Scheduling*'
@@ -66,9 +68,30 @@ WITH frames AS (
     jank_type GLOB '*Dropped Frame*' AS dropped_frame,
     -- discard dropped frame duration as it is not a meaningful value
     IIF(jank_type GLOB '*Dropped Frame*', NULL, dur) AS dur,
-    IIF(jank_type GLOB '*Dropped Frame*', NULL, dur / 1e6) AS dur_ms
+    IIF(jank_type GLOB '*Dropped Frame*', NULL, dur / 1e6) AS dur_ms,
+    timeline.jank_score AS jank_score
   FROM actual_frame_timeline_slice timeline
-  JOIN process USING (upid))
+  JOIN process USING (upid)),
+frames_per_vsync AS (
+  SELECT
+    upid,
+    vsync,
+    MAX(missed_app_frame) AS missed_app_frame,
+    MAX(missed_sf_frame) AS missed_sf_frame,
+    MAX(missed_frame) AS missed_frame,
+    IFNULL(MAX(ABS(jank_score)), 0) AS jank_score
+  FROM frames
+  GROUP BY upid, vsync
+),
+weighted_jank AS (
+  SELECT
+    upid,
+    SUM(missed_frame * jank_score) AS weighted_missed_frames,
+    SUM(missed_app_frame * jank_score) AS weighted_missed_app_frames,
+    SUM(missed_sf_frame * jank_score) AS weighted_missed_sf_frames
+  FROM frames_per_vsync
+  GROUP BY upid
+)
 SELECT
   upid,
   process_name,
@@ -87,9 +110,13 @@ SELECT
   PERCENTILE(dur_ms, 95) AS frame_dur_ms_p95,
   PERCENTILE(dur_ms, 99) AS frame_dur_ms_p99,
   CAST(AVG(dur) AS INTEGER) AS frame_dur_avg,
-  MAX(dur) AS frame_dur_max
+  MAX(dur) AS frame_dur_max,
+  COALESCE(weighted_jank.weighted_missed_frames, 0) AS weighted_missed_frames,
+  COALESCE(weighted_jank.weighted_missed_app_frames, 0) AS weighted_missed_app_frames,
+  COALESCE(weighted_jank.weighted_missed_sf_frames, 0) AS weighted_missed_sf_frames
 FROM frames
 JOIN process_metadata USING (upid)
+LEFT JOIN weighted_jank USING (upid)
 GROUP BY upid, process_name;
 
 DROP VIEW IF EXISTS android_frame_timeline_metric_output;
@@ -135,6 +162,9 @@ SELECT
             'missed_frames', missed_frames,
             'missed_app_frames', missed_app_frames,
             'missed_sf_frames', missed_sf_frames,
+            'weighted_missed_frames', weighted_missed_frames,
+            'weighted_missed_app_frames', weighted_missed_app_frames,
+            'weighted_missed_sf_frames', weighted_missed_sf_frames,
             'frame_dur_max', frame_dur_max,
             'frame_dur_avg', frame_dur_avg,
             'frame_dur_p50', frame_dur_p50,

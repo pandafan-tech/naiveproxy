@@ -10,7 +10,6 @@
 #include <memory>
 #include <vector>
 
-#include "base/containers/span.h"
 #include "base/memory/scoped_refptr.h"
 #include "net/base/load_timing_info.h"
 #include "net/base/net_export.h"
@@ -87,13 +86,6 @@ class NET_EXPORT_PRIVATE BidirectionalStreamImpl {
     // point. No other delegate functions will be called after this.
     virtual void OnFailed(int status) = 0;
 
-    // cronet-reality: called when an HTTP/3 datagram is received on this
-    // stream (RFC 9297 / RFC 9298). |payload| is the decoded payload AFTER
-    // the Quarter Stream ID prefix (which is owned by the QUIC layer) but
-    // BEFORE the context-id (RFC 9298 §5: leading varint). Default impl
-    // drops the datagram; non-datagram streams never see this called.
-    virtual void OnHttp3DatagramReceived(base::span<const uint8_t> payload) {}
-
    protected:
     virtual ~Delegate();
   };
@@ -146,22 +138,6 @@ class NET_EXPORT_PRIVATE BidirectionalStreamImpl {
   virtual void SendvData(const std::vector<scoped_refptr<IOBuffer>>& buffers,
                          const std::vector<int>& lengths,
                          bool end_stream) = 0;
-
-  // cronet-reality: sends an HTTP/3 datagram on this stream (RFC 9297 /
-  // RFC 9298). |payload| should start with the RFC 9298 context-id varint
-  // for CONNECT-UDP (context-id 0 for raw UDP). Returns net error code:
-  // OK on success, ERR_INVALID_ARGUMENT if the underlying stream is not
-  // an HTTP/3 stream, ERR_MSG_TOO_BIG if the datagram exceeds the QUIC
-  // MAX_DATAGRAM_FRAME_SIZE, other errors as appropriate. The default
-  // returns ERR_NOT_IMPLEMENTED (only overridden by the QUIC impl).
-  virtual int SendHttp3Datagram(base::span<const uint8_t> payload);
-
-  // cronet-reality: registers / unregisters this stream's datagram
-  // delivery. After Register, the delegate's OnHttp3DatagramReceived
-  // will be invoked for every incoming datagram on this stream. Only
-  // valid for HTTP/3 streams; no-op otherwise.
-  virtual void RegisterHttp3DatagramVisitor() {}
-  virtual void UnregisterHttp3DatagramVisitor() {}
 
   // Returns the protocol used by this stream. If stream has not been
   // established, return kProtoUnknown.

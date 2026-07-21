@@ -26,6 +26,11 @@
 #include "perfetto/public/pb_macros.h"
 
 PERFETTO_PB_MSG_DECL(perfetto_protos_DebugAnnotation);
+PERFETTO_PB_MSG_DECL(perfetto_protos_TestEvent_ProtoVmIncrementalState);
+PERFETTO_PB_MSG_DECL(perfetto_protos_TestEvent_ProtoVmMessage);
+PERFETTO_PB_MSG_DECL(
+    perfetto_protos_TestEvent_ProtoVmMessage_ProtoVmSubmessage);
+PERFETTO_PB_MSG_DECL(perfetto_protos_TestEvent_ProtoVmPatch);
 PERFETTO_PB_MSG_DECL(perfetto_protos_TestEvent_TestPayload);
 
 PERFETTO_PB_MSG(perfetto_protos_TestEvent);
@@ -38,6 +43,84 @@ PERFETTO_PB_FIELD(perfetto_protos_TestEvent,
                   perfetto_protos_TestEvent_TestPayload,
                   payload,
                   5);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent,
+                  MSG,
+                  perfetto_protos_TestEvent_ProtoVmPatch,
+                  protovm_patch,
+                  6);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent,
+                  MSG,
+                  perfetto_protos_TestEvent_ProtoVmIncrementalState,
+                  protovm_incremental_state,
+                  7);
+
+PERFETTO_PB_MSG(perfetto_protos_TestEvent_ProtoVmIncrementalState);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmIncrementalState,
+                  STRING,
+                  const char*,
+                  string_merged,
+                  1);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmIncrementalState,
+                  VARINT,
+                  int32_t,
+                  int_merged,
+                  2);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmIncrementalState,
+                  MSG,
+                  perfetto_protos_TestEvent_ProtoVmMessage,
+                  single_message,
+                  3);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmIncrementalState,
+                  MSG,
+                  perfetto_protos_TestEvent_ProtoVmMessage,
+                  messages,
+                  4);
+
+PERFETTO_PB_MSG(perfetto_protos_TestEvent_ProtoVmPatch);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmPatch,
+                  STRING,
+                  const char*,
+                  string_to_merge,
+                  1);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmPatch,
+                  VARINT,
+                  int32_t,
+                  int_to_merge,
+                  2);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmPatch,
+                  MSG,
+                  perfetto_protos_TestEvent_ProtoVmMessage,
+                  single_message,
+                  3);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmPatch,
+                  MSG,
+                  perfetto_protos_TestEvent_ProtoVmMessage,
+                  messages,
+                  4);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmPatch,
+                  VARINT,
+                  uint32_t,
+                  delete_message_ids,
+                  5);
+
+PERFETTO_PB_MSG(perfetto_protos_TestEvent_ProtoVmMessage);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmMessage,
+                  VARINT,
+                  uint32_t,
+                  id,
+                  1);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmMessage,
+                  MSG,
+                  perfetto_protos_TestEvent_ProtoVmMessage_ProtoVmSubmessage,
+                  submessage,
+                  2);
+
+PERFETTO_PB_MSG(perfetto_protos_TestEvent_ProtoVmMessage_ProtoVmSubmessage);
+PERFETTO_PB_FIELD(perfetto_protos_TestEvent_ProtoVmMessage_ProtoVmSubmessage,
+                  VARINT,
+                  uint32_t,
+                  single_int,
+                  1);
 
 PERFETTO_PB_MSG(perfetto_protos_TestEvent_TestPayload);
 PERFETTO_PB_FIELD(perfetto_protos_TestEvent_TestPayload,

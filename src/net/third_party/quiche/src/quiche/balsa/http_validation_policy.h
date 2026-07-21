@@ -6,8 +6,8 @@
 #define QUICHE_BALSA_HTTP_VALIDATION_POLICY_H_
 
 #include <cstdint>
-#include <ostream>
 
+#include "absl/strings/str_format.h"
 #include "quiche/common/platform/api/quiche_export.h"
 
 namespace quiche {
@@ -16,6 +16,9 @@ namespace quiche {
 // requests.  It offers individual Boolean members to be consulted during the
 // parsing of an HTTP request.  For historical reasons, every member is set up
 // such that `true` means more strict validation.
+//
+// NOTE: When modifying this struct's members, please update `AbslStringify()`
+// below and `ArbitraryHttpValidationPolicy()` in balsa_fuzz_util.h.
 struct QUICHE_EXPORT HttpValidationPolicy {
   // https://tools.ietf.org/html/rfc7230#section-3.2.4 deprecates "folding"
   // of long header lines onto continuation lines.
@@ -76,6 +79,8 @@ struct QUICHE_EXPORT HttpValidationPolicy {
     NONE,
     SANITIZE,
     REJECT,
+    kMinValue = NONE,
+    kMaxValue = REJECT,
   };
   FirstLineValidationOption sanitize_cr_tab_in_first_line =
       FirstLineValidationOption::NONE;
@@ -101,6 +106,55 @@ struct QUICHE_EXPORT HttpValidationPolicy {
   // If true, the parser will replace obs-fold in header field values with one
   // or more space characters.
   bool sanitize_obs_fold_in_header_values = false;
+
+  // If true, rejects messages with stray bytes after a HTTP chunk (before the
+  // \r\n that separates it from the next chunk length).
+  bool disallow_stray_data_after_chunk = false;
+
+  // If true, disallow HTTP request methods that do not conform to RFC
+  // 9110, Section 5.6.2.
+  // https://datatracker.ietf.org/doc/html/rfc9110#section-5.6.2
+  bool disallow_invalid_request_methods = false;
+
+  // Chunk extensions are optional but, if they are present, they MUST be
+  // preceded by a semicolon and follow the grammar:
+  // chunk-ext = *( BWS ";" BWS chunk-ext-name [ BWS "=" BWS chunk-ext-val ] )
+  // where BWS is SP or HTAB. See
+  // https://datatracker.ietf.org/doc/html/rfc9112#name-chunk-extensions for
+  // more information
+  bool require_semicolon_delimited_chunk_extension = false;
+
+  // Status codes outside the range [100, 599] are invalid, per RFC 9110,
+  // Section 15 https://www.rfc-editor.org/rfc/rfc9110#section-15. Additionally,
+  // status codes must begin with a digit within the range [1 - 5] and not
+  // contain any non-digit characters.
+  bool disallow_invalid_response_codes = false;
+};
+
+static constexpr HttpValidationPolicy kMostStrictHttpValidationPolicy = {
+    .disallow_header_continuation_lines = true,
+    .require_header_colon = true,
+    .disallow_multiple_content_length = true,
+    .disallow_transfer_encoding_with_content_length = true,
+    .validate_transfer_encoding = true,
+    .require_content_length_if_body_required = true,
+    .disallow_double_quote_in_header_name = true,
+    .disallow_invalid_header_characters_in_response = true,
+    .disallow_lone_cr_in_request_headers = true,
+    .disallow_lone_cr_in_chunk_extension = true,
+    .disallow_invalid_target_uris = true,
+    .sanitize_cr_tab_in_first_line =
+        quiche::HttpValidationPolicy::FirstLineValidationOption::SANITIZE,
+    .disallow_obs_text_in_field_names = true,
+    .disallow_lone_lf_in_chunk_extension = true,
+    .require_chunked_body_end_with_crlf_crlf = true,
+    .sanitize_firstline_spaces =
+        quiche::HttpValidationPolicy::FirstLineValidationOption::SANITIZE,
+    .sanitize_obs_fold_in_header_values = true,
+    .disallow_stray_data_after_chunk = true,
+    .disallow_invalid_request_methods = true,
+    .require_semicolon_delimited_chunk_extension = true,
+    .disallow_invalid_response_codes = true,
 };
 
 }  // namespace quiche

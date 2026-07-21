@@ -44,9 +44,9 @@
 namespace perfetto {
 namespace internal {
 class TrackRegistry;
-}
-class Flow;
-class TerminatingFlow;
+template <class T>
+class FlowImpl;
+}  // namespace internal
 
 // Track events are recorded on a timeline track, which maintains the relative
 // time ordering of all events on that track. Each thread has its own default
@@ -117,7 +117,8 @@ struct PERFETTO_EXPORT_COMPONENT Track {
     // per-proccess and the same pointer value can be used in different
     // processes. If you hit this check but are providing no |parent| track,
     // verify that Tracing::Initialize() was called for the current process.
-    PERFETTO_DCHECK(parent.uuid != Track().uuid);
+    PERFETTO_DCHECK(parent.uuid != Track().uuid ||
+                    MakeProcessTrack().uuid == 0);
 
     return Track(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)),
                  parent);
@@ -147,8 +148,8 @@ struct PERFETTO_EXPORT_COMPONENT Track {
 
  private:
   friend class internal::TrackRegistry;
-  friend class Flow;
-  friend class TerminatingFlow;
+  template <class T>
+  friend class internal::FlowImpl;
   static uint64_t process_uuid;
 };
 
@@ -226,7 +227,8 @@ class PERFETTO_EXPORT_COMPONENT NamedTrack : public Track {
     // per-proccess and the same pointer value can be used in different
     // processes. If you hit this check but are providing no |parent| track,
     // verify that Tracing::Initialize() was called for the current process.
-    PERFETTO_DCHECK(parent.uuid != Track().uuid);
+    PERFETTO_DCHECK(parent.uuid != Track().uuid ||
+                    MakeProcessTrack().uuid == 0);
 
     return NamedTrack(std::forward<TrackEventName>(name),
                       static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)),

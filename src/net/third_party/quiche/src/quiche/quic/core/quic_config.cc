@@ -1057,6 +1057,8 @@ void QuicConfig::SetDefaults() {
   SetMaxPacketSizeToSend(kMaxIncomingPacketSize);
   SetMaxDatagramFrameSizeToSend(kMaxAcceptedDatagramFrameSize);
   SetReliableStreamReset(false);
+  scone_packet_interval_ = QuicTimeDelta::Zero();
+  parse_scone_packets_ = false;
 }
 
 void QuicConfig::ToHandshakeMessage(
@@ -1081,7 +1083,7 @@ void QuicConfig::ToHandshakeMessage(
   // as "MIDS" -- the max initial dynamic streams tag -- if
   // doing some version other than IETF QUIC.
   max_bidirectional_streams_.ToHandshakeMessage(out);
-  if (VersionHasIetfQuicFrames(transport_version)) {
+  if (VersionIsIetfQuic(transport_version)) {
     max_unidirectional_streams_.ToHandshakeMessage(out);
     ack_delay_exponent_.ToHandshakeMessage(out);
   }
@@ -1310,6 +1312,8 @@ bool QuicConfig::FillTransportParameters(TransportParameters* params) const {
 
   params->custom_parameters = custom_transport_parameters_to_send_;
 
+  params->scone_supported = parse_scone_packets_;
+
   return true;
 }
 
@@ -1450,6 +1454,10 @@ QuicErrorCode QuicConfig::ProcessTransportParameters(
 
   if (reliable_stream_reset_) {
     reliable_stream_reset_ = params.reliable_stream_reset;
+  }
+
+  if (!params.scone_supported) {
+    scone_packet_interval_ = QuicTimeDelta::Zero();
   }
 
   if (!is_resumption) {

@@ -7,9 +7,12 @@
 
 #include <stddef.h>
 
-#include <vector>
+#include <cstddef>
 
+#include "base/functional/callback.h"
+#include "base/memory/weak_ptr.h"
 #include "base/memory_coordinator/memory_consumer_registry.h"
+#include "base/observer_list.h"
 
 namespace base {
 
@@ -21,11 +24,12 @@ class TestMemoryConsumerRegistry : public MemoryConsumerRegistry {
   ~TestMemoryConsumerRegistry() override;
 
   // MemoryConsumerRegistry:
-  void OnMemoryConsumerAdded(std::string_view consumer_id,
-                             MemoryConsumerTraits traits,
-                             RegisteredMemoryConsumer consumer) override;
-  void OnMemoryConsumerRemoved(std::string_view consumer_id,
-                               RegisteredMemoryConsumer consumer) override;
+  void OnMemoryConsumerAdded(uint32_t consumer_id,
+                             std::string_view consumer_name,
+                             std::optional<MemoryConsumerTraits> traits,
+                             MemoryConsumer* consumer) override;
+  void OnMemoryConsumerRemoved(uint32_t consumer_id,
+                               MemoryConsumer* consumer) override;
 
   // Invokes UpdateMemoryLimit(percentage) on all consumers.
   void NotifyUpdateMemoryLimit(int percentage);
@@ -33,10 +37,17 @@ class TestMemoryConsumerRegistry : public MemoryConsumerRegistry {
   // Invokes DoReleaseMemory() on all consumers.
   void NotifyReleaseMemory();
 
-  size_t size() const { return memory_consumers_.size(); }
+  void NotifyUpdateMemoryLimitAsync(int percentage,
+                                    OnceClosure on_notification_sent_callback);
+  void NotifyReleaseMemoryAsync(OnceClosure on_notification_sent_callback);
+
+  size_t size() const { return size_; }
 
  private:
-  std::vector<RegisteredMemoryConsumer> memory_consumers_;
+  ObserverList<MemoryConsumer> memory_consumers_;
+  size_t size_ = 0;
+
+  WeakPtrFactory<TestMemoryConsumerRegistry> weak_ptr_factory_{this};
 };
 
 }  // namespace base

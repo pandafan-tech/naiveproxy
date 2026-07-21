@@ -49,7 +49,7 @@ _IGNORE_WARNINGS = (
         # https://crbug.com/1441226
         r'PaymentRequest[BH]',
         # This service is defined in Native not Java.
-        r'NativeServiceSandboxedProcessService',
+        r'NativeOnlySandboxedProcessService',
         # TODO(450243304): Temporary.
         r'DnsNameResolverProvider',
     ]) + ')',
@@ -111,17 +111,15 @@ def _ParseOptions():
                       ' those --feature-jars.')
   parser.add_argument('--output-path', help='Path to the generated .jar file.')
   parser.add_argument('--tracerefs-json-out')
-  parser.add_argument(
-      '--proguard-configs',
-      action='append',
-      required=True,
-      help='GN-list of configuration files.')
-  parser.add_argument(
-      '--apply-mapping', help='Path to ProGuard mapping to apply.')
-  parser.add_argument(
-      '--mapping-output',
-      required=True,
-      help='Path for ProGuard to output mapping file to.')
+  parser.add_argument('--proguard-configs',
+                      action='append',
+                      required=True,
+                      help='GN-list of configuration files.')
+  parser.add_argument('--apply-mapping',
+                      help='Path to ProGuard mapping to apply.')
+  parser.add_argument('--mapping-output',
+                      required=True,
+                      help='Path for ProGuard to output mapping file to.')
   parser.add_argument(
       '--extra-mapping-output-paths',
       help='GN-list of additional paths to copy output mapping file to.')
@@ -136,13 +134,15 @@ def _ParseOptions():
   parser.add_argument('--main-dex-rules-path',
                       action='append',
                       help='Path to main dex rules for multidex.')
-  parser.add_argument(
-      '--min-api', help='Minimum Android API level compatibility.')
+  parser.add_argument('--min-api',
+                      help='Minimum Android API level compatibility.')
   parser.add_argument('--enable-obfuscation',
                       action='store_true',
                       help='Minify symbol names')
-  parser.add_argument(
-      '--verbose', '-v', action='store_true', help='Print all ProGuard output')
+  parser.add_argument('--verbose',
+                      '-v',
+                      action='store_true',
+                      help='Print all ProGuard output')
   parser.add_argument('--repackage-classes',
                       default='',
                       help='Value for -repackageclasses.')
@@ -152,10 +152,9 @@ def _ParseOptions():
   parser.add_argument('--source-file', help='Value for source file attribute.')
   parser.add_argument('--package-name',
                       help='Goes into a comment in the mapping file.')
-  parser.add_argument(
-      '--force-enable-assertions',
-      action='store_true',
-      help='Forcefully enable javac generated assertion code.')
+  parser.add_argument('--force-enable-assertions',
+                      action='store_true',
+                      help='Forcefully enable javac generated assertion code.')
   parser.add_argument('--assertion-handler',
                       help='The class name of the assertion handler class.')
   parser.add_argument(
@@ -167,11 +166,10 @@ def _ParseOptions():
       action='append',
       dest='dex_dests',
       help='Destination for dex file of the corresponding feature.')
-  parser.add_argument(
-      '--feature-name',
-      action='append',
-      dest='feature_names',
-      help='The name of the feature module.')
+  parser.add_argument('--feature-name',
+                      action='append',
+                      dest='feature_names',
+                      help='The name of the feature module.')
   parser.add_argument(
       '--uses-split',
       action='append',
@@ -208,21 +206,16 @@ def _ParseOptions():
       '--dump-unknown-refs',
       action='store_true',
       help='Log all reasons why API modelling cannot determine API level')
-  parser.add_argument(
-      '--stamp',
-      help='File to touch upon success. Mutually exclusive with --output-path')
   parser.add_argument('--desugared-library-keep-rule-output',
                       help='Path to desugared library keep rule output file.')
+  parser.add_argument('--keep-radius-output', help='Create a keepradius.html')
 
   diff_utils.AddCommandLineFlags(parser)
   options = parser.parse_args(args)
 
-  if options.feature_names:
-    if options.output_path:
-      parser.error('Feature splits cannot specify an output in GN.')
-    if not options.actual_file and not options.stamp:
-      parser.error('Feature splits require a stamp file as output.')
-  elif not options.output_path:
+  if options.feature_names and options.output_path:
+    parser.error('Feature splits cannot specify an output in GN.')
+  elif not options.feature_names and not options.output_path:
     parser.error('Output path required when feature splits aren\'t used')
 
   if bool(options.keep_rules_targets_regex) != bool(
@@ -281,6 +274,7 @@ def _ParseOptions():
 
 
 class _SplitContext:
+
   def __init__(self, name, output_path, input_jars, work_dir, parent_name=None):
     self.name = name
     self.parent_name = parent_name
@@ -380,6 +374,11 @@ def _OptimizeWithR8(options, config_paths, libraries, dynamic_config_data):
       cmd += ['-Dcom.android.tools.r8.dumpinputtofile=r8inputs.zip']
     if options.dump_unknown_refs:
       cmd += ['-Dcom.android.tools.r8.reportUnknownApiReferences=1']
+    if options.keep_radius_output:
+      cmd += [
+          '-Dcom.android.tools.r8.dumpkeepradiushtmltofile=' +
+          options.keep_radius_output
+      ]
     cmd += [
         '-cp',
         '{}:{}'.format(options.r8_path, options.custom_r8_path),
@@ -481,7 +480,7 @@ def _OptimizeWithR8(options, config_paths, libraries, dynamic_config_data):
 def _OutputKeepRules(r8_path, input_paths, libraries, targets_re_string,
                      keep_rules_output):
 
-  cmd = build_utils.JavaCmd(xmx='2G') + [
+  cmd = build_utils.JavaCmd(xmx='4G') + [
       '-cp', r8_path, 'com.android.tools.r8.tracereferences.TraceReferences',
       '--map-diagnostics:MissingDefinitionsDiagnostic', 'error', 'warning',
       '--keep-rules', '--output', keep_rules_output
@@ -541,7 +540,6 @@ def _CombineConfigs(configs,
   for path, contents in sorted(embedded_configs.items()):
     ret.extend(format_config_contents(path, contents))
 
-
   if dynamic_config_data:
     ret.append('# File: //build/android/gyp/proguard.py (generated rules)')
     ret.append(dynamic_config_data)
@@ -583,15 +581,6 @@ def _ExtractEmbeddedConfigs(jar_path, embedded_configs):
     for filename in active:
       config_path = '{}:{}'.format(jar_path, filename)
       embedded_configs[config_path] = z.read(filename).decode('utf-8').rstrip()
-
-
-def _MaybeWriteStampAndDepFile(options, inputs):
-  output = options.output_path
-  if options.stamp:
-    build_utils.Touch(options.stamp)
-    output = options.stamp
-  if options.depfile:
-    action_helpers.write_depfile(options.depfile, output, inputs=inputs)
 
 
 def _IterParentContexts(context_name, split_contexts_by_name):
@@ -682,7 +671,11 @@ def _Run(options):
   if options.apply_mapping:
     depfile_inputs.append(options.apply_mapping)
 
-  _MaybeWriteStampAndDepFile(options, depfile_inputs)
+  if options.depfile:
+    first_gn_output = options.output_path or options.mapping_output
+    action_helpers.write_depfile(options.depfile,
+                                 first_gn_output,
+                                 inputs=depfile_inputs)
 
 
 def main():

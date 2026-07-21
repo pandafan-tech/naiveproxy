@@ -17,6 +17,27 @@ import zipfile
 # limit.
 _TARGET_LINE_LENGTH = 100
 
+_CPP_RESERVED_KEYWORDS = {
+    "alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel",
+    "atomic_commit", "atomic_noexcept", "auto", "bitand", "bitor", "bool",
+    "break", "case", "catch", "char", "char16_t", "char32_t", "char8_t",
+    "class", "compl", "concept", "const", "const_cast", "consteval",
+    "constexpr", "constinit", "continue", "contract_assert", "co_await",
+    "co_return", "co_yield", "decltype", "default", "delete", "do", "double",
+    "dynamic_cast", "else", "enum", "explicit", "export", "extern", "false",
+    "final", "float", "for", "friend", "goto", "if", "import", "inline", "int",
+    "long", "module", "mutable", "namespace", "new", "noexcept", "not",
+    "not_eq", "nullptr", "operator", "or", "or_eq", "override", "post", "pre",
+    "private", "protected", "public", "reflexpr", "register",
+    "reinterpret_cast", "replaceable_if_eligible", "requires", "return",
+    "short", "signed", "sizeof", "static", "static_assert", "static_cast",
+    "struct", "switch", "synchronized", "template", "this", "thread_local",
+    "throw", "transaction_safe", "transaction_safe_dynamic",
+    "trivially_relocatable_if_eligible", "true", "try", "typedef", "typeid",
+    "typename", "union", "unsigned", "using", "virtual", "void", "volatile",
+    "wchar_t", "while", "xor", "xor_eq"
+}
+
 
 @dataclasses.dataclass(frozen=True)
 class JniMode:
@@ -107,29 +128,41 @@ class StringBuilder:
     self('\n')
 
   @contextlib.contextmanager
-  def namespace(self, namespace_name):
+  def namespace(self, namespace_name, skip_newline=False):
     if namespace_name is None:
       yield
       return
     value = f' {namespace_name}' if namespace_name else ''
-    self(f'namespace{value} {{\n\n')
+    self(f'namespace{value} {{\n')
+    if not skip_newline:
+      self('\n')
     yield
-    if self._in_cpp_macro:
-      self(f'\n}}  /* namespace{value} */\n')
+    if skip_newline:
+      self(f'}}\n')
     else:
-      self(f'\n}}  // namespace{value}\n')
+      self('\n')
+      if self._in_cpp_macro:
+        self(f'}}  /* namespace{value} */\n')
+      else:
+        self(f'}}  // namespace{value}\n')
 
   @contextlib.contextmanager
-  def block(self, *, indent=2, after=None):
+  def ifndef(self, macro_name):
+    self(f'#ifndef {macro_name}\n')
+    self(f'#define {macro_name}\n')
+    yield
+    self('#endif\n\n')
+
+  @contextlib.contextmanager
+  def block(self, *, indent=2, after=None, no_trailing_newline=False):
     self(' {\n')
     with self.indent(indent):
       yield
+    self('}')
     if after:
-      self('}')
       self(after)
+    if not no_trailing_newline:
       self('\n')
-    else:
-      self('}\n')
 
   @contextlib.contextmanager
   def indent(self, amount):
@@ -179,6 +212,22 @@ def jni_mangle(name):
   return name.replace('_', '_1').replace('/', '_').replace('$', '_00024')
 
 
+def sanitize_cpp_keywords(value):
+  """Add a _ suffix to the method value if it is a C++ reserved keyword."""
+  if value in _CPP_RESERVED_KEYWORDS:
+    return value + '_'
+  return value
+
+
+def add_note(e, note):
+  """Adds a suffix to an exception message."""
+  note = f' ({note})'
+  if e.args and isinstance(e.args[0], str):
+    e.args = (e.args[0] + note, *e.args[1:])
+  else:
+    e.args = e.args + (note, )
+
+
 @contextlib.contextmanager
 def atomic_output(path, mode='w+b'):
   with tempfile.NamedTemporaryFile(mode, delete=False) as f:
@@ -201,8 +250,11 @@ def add_to_zip_hermetic(zip_file, zip_path, data=None):
   zip_file.writestr(zipinfo, data, zipfile.ZIP_STORED)
 
 
-def should_rename_package(package_name, filter_list_string):
-  # If the filter list is empty, all packages should be renamed.
+def should_prefix_package(package_name, filter_list_string):
+  # Never prefix system packages.
+  if package_name.startswith(('android.', 'java.')):
+    return False
+  # If the filter list is empty, all packages should be prefixed.
   if not filter_list_string:
     return True
 

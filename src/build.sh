@@ -15,6 +15,7 @@ else
   out=out/Release
   flags="
     is_official_build=true
+    is_chrome_branded=true
     exclude_unwind_tables=true
     enable_resource_allowlist_generation=false
     chrome_pgo_phase=2
@@ -79,6 +80,8 @@ flags="$flags"'
 
   enable_backup_ref_ptr_support=false
   enable_dangling_raw_ptr_checks=false
+
+  use_clang_modules=false
 '
 
 if [ "$WITH_SYSROOT" ]; then
@@ -88,6 +91,7 @@ fi
 
 if [ "$host_os" = "mac" ]; then
   flags="$flags"'
+    mac_allow_system_xcode_for_official_builds_for_testing=true
     enable_dsyms=false'
 fi
 
@@ -96,6 +100,7 @@ case "$EXTRA_FLAGS" in
   # default_min_sdk_version=24: 26 introduces unnecessary snew symbols
   # is_high_end_android=true: Does not optimize for size, Uses PGO profiles
   flags="$flags"'
+    is_desktop_android=true
     default_min_sdk_version=24
     is_high_end_android=true'
   ;;
@@ -114,5 +119,17 @@ mkdir -p out
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0
 
 ./gn/out/gn gen "$out" --args="$flags $EXTRA_FLAGS"
+
+if [ "$host_os" = linux ]; then
+  clang_x64_targets=$(grep -o ' | .*' $out/toolchain.ninja | grep -o ' clang_x64/[^ ]*' | sort -u)
+  if [ "$clang_x64_targets" ]; then
+    CCACHE_DIR=$PWD/.host_tool_cache ccache -z
+    CCACHE_DIR=$PWD/.host_tool_cache ninja -C "$out" $clang_x64_targets
+    CCACHE_DIR=$PWD/.host_tool_cache ccache -s
+    if [ "$WARMUP_HOST_TOOLS" ]; then
+      exit 0
+    fi
+  fi
+fi
 
 ninja -C "$out" naive

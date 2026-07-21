@@ -74,12 +74,12 @@ NaiveConfig::NaiveConfig() = default;
 NaiveConfig::NaiveConfig(const NaiveConfig&) = default;
 NaiveConfig::~NaiveConfig() = default;
 
-bool NaiveConfig::Parse(const base::Value::Dict& value) {
+bool NaiveConfig::Parse(const base::DictValue& value) {
   if (const base::Value* v = value.Find("listen")) {
     std::vector<std::string> listen_strs;
     if (const std::string* str = v->GetIfString()) {
       listen_strs.push_back(*str);
-    } else if (const base::Value::List* strs = v->GetIfList()) {
+    } else if (const base::ListValue* strs = v->GetIfList()) {
       for (const auto& str_e : *strs) {
         if (const std::string* s = str_e.GetIfString()) {
           listen_strs.push_back(*s);
@@ -120,6 +120,42 @@ bool NaiveConfig::Parse(const base::Value::Dict& value) {
     }
   }
 
+  if (const base::Value* v = value.Find("tunnel-timeout")) {
+    if (std::optional<int> i = v->GetIfInt()) {
+      tunnel_timeout = *i;
+    } else if (const std::string* str = v->GetIfString()) {
+      if (!base::StringToInt(*str, &tunnel_timeout)) {
+        std::cerr << "Invalid tunnel-timeout" << std::endl;
+        return false;
+      }
+    } else {
+      std::cerr << "Invalid tunnel-timeout" << std::endl;
+      return false;
+    }
+    if (tunnel_timeout < 1) {
+      std::cerr << "Invalid tunnel-timeout" << std::endl;
+      return false;
+    }
+  }
+
+  if (const base::Value* v = value.Find("idle-timeout")) {
+    if (std::optional<int> i = v->GetIfInt()) {
+      idle_timeout = *i;
+    } else if (const std::string* str = v->GetIfString()) {
+      if (!base::StringToInt(*str, &idle_timeout)) {
+        std::cerr << "Invalid idle-timeout" << std::endl;
+        return false;
+      }
+    } else {
+      std::cerr << "Invalid idle-timeout" << std::endl;
+      return false;
+    }
+    if (idle_timeout < 1) {
+      std::cerr << "Invalid idle-timeout" << std::endl;
+      return false;
+    }
+  }
+
   if (const base::Value* v = value.Find("extra-headers")) {
     if (const std::string* str = v->GetIfString()) {
       extra_headers.AddHeadersFromString(*str);
@@ -133,7 +169,7 @@ bool NaiveConfig::Parse(const base::Value::Dict& value) {
     std::vector<std::string> proxy_strs;
     if (const std::string* str = v->GetIfString(); str && !str->empty()) {
       proxy_strs.push_back(*str);
-    } else if (const base::Value::List* strs = v->GetIfList()) {
+    } else if (const base::ListValue* strs = v->GetIfList()) {
       for (const auto& str_e : *strs) {
         if (const std::string* s = str_e.GetIfString(); s && !s->empty()) {
           proxy_strs.push_back(*s);

@@ -22,6 +22,7 @@
 #include "src/trace_processor/importers/art_hprof/art_heap_graph.h"
 #include "src/trace_processor/importers/art_hprof/art_hprof_model.h"
 #include "src/trace_processor/importers/art_hprof/art_hprof_types.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/types/trace_processor_context.h"
@@ -41,6 +42,10 @@ constexpr size_t kHprofHeaderLength = 20;           // Header size in bytes
 
 constexpr const char* kJavaLangString = "java.lang.String";
 constexpr const char* kSunMiscCleaner = "sun.misc.Cleaner";
+constexpr const char* kNativeAllocationRegistryCleanerThunk =
+    "libcore.util.NativeAllocationRegistry$CleanerThunk";
+constexpr const char* kNativeAllocationRegistry =
+    "libcore.util.NativeAllocationRegistry";
 
 class ByteIterator {
  public:
@@ -73,22 +78,23 @@ struct DebugStats {
   size_t record_count = 0;
 
   void Write(TraceProcessorContext* context_) const {
-    context_->storage->SetStats(stats::hprof_string_counter,
-                                static_cast<int64_t>(string_count));
-    context_->storage->SetStats(stats::hprof_class_counter,
-                                static_cast<int64_t>(class_count));
-    context_->storage->SetStats(stats::hprof_heap_dump_counter,
-                                static_cast<int64_t>(heap_dump_count));
-    context_->storage->SetStats(stats::hprof_instance_counter,
-                                static_cast<int64_t>(instance_count));
-    context_->storage->SetStats(stats::hprof_object_array_counter,
-                                static_cast<int64_t>(object_array_count));
-    context_->storage->SetStats(stats::hprof_primitive_array_counter,
-                                static_cast<int64_t>(primitive_array_count));
-    context_->storage->SetStats(stats::hprof_reference_counter,
-                                static_cast<int64_t>(reference_count));
-    context_->storage->SetStats(stats::hprof_root_counter,
-                                static_cast<int64_t>(root_count));
+    context_->stats_tracker->SetStats(stats::hprof_string_counter,
+                                      static_cast<int64_t>(string_count));
+    context_->stats_tracker->SetStats(stats::hprof_class_counter,
+                                      static_cast<int64_t>(class_count));
+    context_->stats_tracker->SetStats(stats::hprof_heap_dump_counter,
+                                      static_cast<int64_t>(heap_dump_count));
+    context_->stats_tracker->SetStats(stats::hprof_instance_counter,
+                                      static_cast<int64_t>(instance_count));
+    context_->stats_tracker->SetStats(stats::hprof_object_array_counter,
+                                      static_cast<int64_t>(object_array_count));
+    context_->stats_tracker->SetStats(
+        stats::hprof_primitive_array_counter,
+        static_cast<int64_t>(primitive_array_count));
+    context_->stats_tracker->SetStats(stats::hprof_reference_counter,
+                                      static_cast<int64_t>(reference_count));
+    context_->stats_tracker->SetStats(stats::hprof_root_counter,
+                                      static_cast<int64_t>(root_count));
   }
 
   void AddRecordCount(size_t count) { record_count += count; }
@@ -103,31 +109,22 @@ class HeapGraphResolver {
                     base::FlatHashMap<uint64_t, Object>& objects,
                     base::FlatHashMap<uint64_t, ClassDefinition>& classes,
                     base::FlatHashMap<uint64_t, HprofHeapRootTag>& roots,
+                    uint64_t string_class_id,
                     DebugStats& stats);
 
-  // Build the complete object graph with references and field values
   void ResolveGraph();
 
  private:
-  // Extract data for all objects
   void ExtractAllObjectData();
-
-  // Mark objects reachable from roots
   void MarkReachableObjects();
-
-  // Extract references from array elements
   void ExtractArrayElementReferences(Object& obj);
-
-  // Helper methods for data extraction
   bool ExtractObjectReferences(Object& obj, const ClassDefinition& cls);
   void ExtractFieldValues(Object& obj, const ClassDefinition& cls);
   void ExtractPrimitiveArrayValues(Object& obj);
   std::optional<std::string> DecodeJavaString(const Object& string_obj) const;
-
-  // Utility methods
-  std::vector<Field> GetClassHierarchyFields(uint64_t class_id) const;
-
-  // Calculate native memory sizes for objects
+  void DecodeJavaStrings();
+  const std::vector<Field>& GetClassHierarchyFields(uint64_t class_id);
+  void ComputeSelfSizes();
   void CalculateNativeSizes();
 
   // Data references (not owned)
@@ -137,6 +134,14 @@ class HeapGraphResolver {
   base::FlatHashMap<uint64_t, HprofHeapRootTag>& roots_;
   base::FlatHashMap<uint64_t, ClassDefinition>& classes_;
   DebugStats& stats_;
+
+  // Cache for class hierarchy fields (avoids repeated hierarchy walks)
+  base::FlatHashMap<uint64_t, std::vector<Field>> field_cache_;
+
+  // Set during construction, used by DecodeJavaStrings().
+  uint64_t string_class_id_;
+  // Collected during ExtractAllObjectData() for efficient DecodeJavaStrings().
+  std::vector<uint64_t> string_object_ids_;
 };
 
 // Main parser class that builds a heap graph from HPROF data
@@ -160,6 +165,9 @@ class HeapGraphBuilder {
 
   // Build and return the final heap graph
   HeapGraph BuildGraph();
+
+  // Clear all parsed data for idempotency
+  void Clear();
 
  private:
   //--------------------------------------------------------------------------
@@ -231,6 +239,7 @@ class HeapGraphBuilder {
 
   // Type mapping and root tracking
   std::array<uint64_t, 12> prim_array_class_ids_ = {};
+  uint64_t string_class_id_ = 0;
   base::FlatHashMap<uint64_t, HprofHeapRootTag> roots_;
 
   // Debug statistics
@@ -241,7 +250,6 @@ class HeapGraphBuilder {
   TraceProcessorContext* context_;
 };
 
-// Helper method
 inline size_t GetFieldTypeSize(FieldType type, size_t id_size) {
   switch (type) {
     case FieldType::kObject:

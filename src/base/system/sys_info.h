@@ -14,9 +14,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "base/base_export.h"
 #include "base/byte_count.h"
+#include "base/byte_size.h"
 #include "base/functional/callback_forward.h"
 #include "base/gtest_prod_util.h"
 #include "base/metrics/field_trial_params.h"
@@ -70,34 +72,71 @@ class BASE_EXPORT SysInfo {
   // LITTLE cores on ARM bit.LITTLE architecture.
   // Returns 0 on symmetric architecture or when it failed to recognize.
   // This function will cache the result value in its implementation.
+  //
+  // Note that due to caching, this is not expected to be accurate in case of
+  // CPU unplug, which can happen, in particular in VMs. More specifically, the
+  // returned value is only expected to be valid at the time where this was
+  // first called. Subsequent calls may return a stable value, which can be an
+  // under/overestimate in case of CPU hotplug.
   static int NumberOfEfficientProcessors();
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+  // Returns the maximum frequency of all the processors in Hz, if
+  // available. The data may not be available in virtual machines for
+  // instance. In this case, the returned value is empty.
+  //
+  // Also note that due to caching, this is not expected to be accurate in case
+  // of CPU unplug, which can happen, in particular in VMs. More specifically,
+  // the returned value is only expected to be valid at the time where this was
+  // first called. Subsequent calls may return a stable value, which can be an
+  // under/overestimate in case of CPU hotplug.
+  static const std::vector<uint64_t>& MaxFrequencyPerProcessor();
+#endif
 
   // Return the number of bytes of physical memory on the current machine.
   // If low-end device mode is manually enabled via command line flag, this
   // will return the lesser of the actual physical memory, or 512MB.
-  static ByteCount AmountOfPhysicalMemory();
+  static ByteSize AmountOfTotalPhysicalMemory();
+
+  // Deprecated: Prefer AmountOfTotalPhysicalMemory(), which returns a ByteSize.
+  // ByteCount is deprecated.
+  // TODO(crbug.com/448661443): Migrate all callers and remove this.
+  static ByteCount AmountOfPhysicalMemory() {
+    return AmountOfTotalPhysicalMemory().AsDeprecatedByteCount();
+  }
 
   // Return the number of bytes of current available physical memory on the
   // machine.
   // (The amount of memory that can be allocated without any significant
   // impact on the system. It can lead to freeing inactive file-backed
   // and/or speculative file-backed memory).
-  static ByteCount AmountOfAvailablePhysicalMemory();
+  static ByteSize AmountOfAvailablePhysicalMemory();
 
   // Return the number of bytes of virtual memory of this process. A return
   // value of zero means that there is no limit on the available virtual
   // memory.
-  static ByteCount AmountOfVirtualMemory();
+  static ByteSize AmountOfVirtualMemory();
 
   // Return the available disk space in bytes on the volume containing |path|,
   // or nullopt on failure.
-  // TODO(crbug.com/429140103): Convert the return type to ByteCount.
+  // TODO(crbug.com/505771669): Use `AmountOfDiskSpace()` instead of this
+  // function.
   static std::optional<int64_t> AmountOfFreeDiskSpace(const FilePath& path);
 
   // Return the total disk space in bytes on the volume containing |path|, or
   // nullopt on failure.
-  // TODO(crbug.com/429140103): Convert the return type to ByteCount.
+  // TODO(crbug.com/505771669): Use `AmountOfDiskSpace()` instead of this
+  // function.
   static std::optional<int64_t> AmountOfTotalDiskSpace(const FilePath& path);
+
+  struct DiskSpaceInfo {
+    ByteSize total;
+    ByteSize available;
+  };
+
+  // Return the total and available disk space on the volume containing |path|,
+  // or nullopt on failure.
+  static std::optional<DiskSpaceInfo> AmountOfDiskSpace(const FilePath& path);
 
 #if BUILDFLAG(IS_FUCHSIA)
   // Sets the total amount of disk space to report under the specified |path|.
@@ -127,6 +166,13 @@ class BASE_EXPORT SysInfo {
   // e.g. "Google" on Pixel 8 Pro. Only implemented on Android, returns an
   // empty string on other platforms.
   static std::string SocManufacturer();
+
+#if BUILDFLAG(IS_ANDROID)
+  // Returns the hardware manufacturer name of the current machine
+  // synchronously. This is only supported on Android as Windows and Linux
+  // would require IO operations and other platforms are static.
+  static std::string HardwareManufacturer();
+#endif
 
 #if BUILDFLAG(IS_MAC)
   struct HardwareModelNameSplit {
@@ -296,6 +342,9 @@ class BASE_EXPORT SysInfo {
   // component Hardware ID, this is at a device level to capture a class of
   // devices with similar hardware components.
   static std::string GetAndroidHardwareClass();
+
+  // Returns the SDK API level that the device initially launched with.
+  static std::string GetAndroidFirstApiLevel();
 #endif  // BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(IS_IOS)
@@ -313,7 +362,7 @@ class BASE_EXPORT SysInfo {
 
   // Returns true for low-end devices that may require extreme tradeoffs,
   // including user-visible changes, for acceptable performance.
-  // For general memory optimizations, consider |AmountOfPhysicalMemoryMB|.
+  // For general memory optimizations, consider |AmountOfTotalPhysicalMemory|.
   //
   // On Android this returns true when memory <= 1GB on Android O and later.
   // This is not the same as "low-memory".
@@ -360,21 +409,21 @@ class BASE_EXPORT SysInfo {
   FRIEND_TEST_ALL_PREFIXES(debug::SystemMetricsTest, ParseMeminfo);
 
   static int NumberOfEfficientProcessorsImpl();
-  static ByteCount AmountOfPhysicalMemoryImpl();
-  static ByteCount AmountOfAvailablePhysicalMemoryImpl();
+  static ByteSize AmountOfTotalPhysicalMemoryImpl();
+  static ByteSize AmountOfAvailablePhysicalMemoryImpl();
   static bool IsLowEndDeviceImpl();
   static HardwareInfo GetHardwareInfoSync();
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
     BUILDFLAG(IS_AIX)
-  static ByteCount AmountOfAvailablePhysicalMemory(
+  static ByteSize AmountOfAvailablePhysicalMemory(
       const SystemMemoryInfo& meminfo);
 #endif
 
   // Sets the amount of physical memory for testing, thus allowing tests to run
   // irrespective of the host machine's configuration.
-  static std::optional<ByteCount> SetAmountOfPhysicalMemoryForTesting(
-      ByteCount amount_of_memory);
+  static std::optional<ByteSize> SetAmountOfPhysicalMemoryForTesting(
+      ByteSize amount_of_memory);
   static void ClearAmountOfPhysicalMemoryForTesting();
 };
 

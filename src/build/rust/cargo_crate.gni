@@ -21,6 +21,7 @@ import("//build/rust/rust_static_library.gni")
 #  aliased_deps
 #  allow_unsafe
 #  build_native_rust_unit_tests
+#  cpp_api_from_rust
 #  crate_name
 #  crate_root
 #  deps
@@ -87,6 +88,13 @@ import("//build/rust/rust_static_library.gni")
 #  crate_type "bin", "proc-macro" or "rlib" (optional)
 #    Whether to build an executable. The default is "rlib".
 #    At present others are not supported.
+#
+#  override_crate_type_as_dylib_in_component_builds (optional)
+#    Whether to change `crate_type` to `dylib` if `is_component_build`.
+#    Can be used as needed (e.g. to avoid bifurcating a global variable which
+#    would happen when linking the crate statically into multiple components).
+#    TODO(https://crbug.com/505430456): Automatically opt-in all `cargo_crate`
+#    targets into `override_crate_type_as_dylib_in_component_builds`
 #
 #  cargo_pkg_authors
 #  cargo_pkg_version
@@ -282,6 +290,9 @@ template("cargo_crate") {
       # Don't import the `chromium` crate into third-party code.
       no_chromium_prelude = true
 
+      # Disable generating `..._clippy` targets for third-party code.
+      no_clippy = true
+
       # Depend by default on the `//build/rust/allocator` library, but avoid this
       # dependency in `no_std` mode.  This is desirable for two reasons:
       # 1. It gives users of `cargo_crate` an indirect way to control presence of
@@ -451,6 +462,13 @@ template("cargo_crate") {
         _rustflags_txt,
         rustc_print_cfg_path,
       ]
+
+      if (host_os == "win") {
+        inputs += [ "//third_party/rust-toolchain/bin/rustc.exe" ]
+      } else {
+        inputs += [ "//third_party/rust-toolchain/bin/rustc" ]
+      }
+
       build_script_target = ":${_build_script_name}($rust_macro_toolchain)"
       deps = [
         ":${_build_script_name}_write_rustflags",
@@ -539,6 +557,9 @@ template("cargo_crate") {
 
         # Don't import the `chromium` crate into third-party code.
         no_chromium_prelude = true
+
+        # Disable generating `..._clippy` targets for third-party code.
+        no_clippy = true
 
         # Build scripts do not need to link to chrome's allocator.
         no_allocator_crate = true

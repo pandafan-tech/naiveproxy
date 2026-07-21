@@ -28,18 +28,16 @@
 #include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_packets.h"
 #include "quiche/quic/core/quic_stream_frame_data_producer.h"
-#include "quiche/quic/core/quic_stream_send_buffer.h"
+#include "quiche/quic/core/quic_stream_send_buffer_inlining.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/core/tls_chlo_extractor.h"
-#include "quiche/quic/platform/api/quic_export.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/common/platform/api/quiche_export.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/common/quiche_buffer_allocator.h"
 #include "quiche/common/quiche_intrusive_list.h"
-#include "quiche/common/quiche_linked_hash_map.h"
 
 namespace quic {
 
@@ -216,8 +214,11 @@ class QUICHE_EXPORT QuicBufferedPacketStore {
   // populated with the SNI tag in CHLO. |out_resumption_attempted| is populated
   // if the CHLO has the 'pre_shared_key' TLS extension.
   // |out_early_data_attempted| is populated if the CHLO has the 'early_data'
-  // TLS extension. When this returns false, and an unrecoverable error happened
-  // due to a TLS alert, |*tls_alert| will be set to the alert value.
+  // TLS extension. When this returns false, either an unrecoverable error
+  // happened due to a TLS alert, |*tls_alert| will be set to the alert value or
+  // an invalid ack is received that will cause a connection close,
+  // |*out_invalid_ack| will be set to true. An invalid ack is an ack that the
+  // peer sent for a packet that was not sent by the dispatcher.
   bool IngestPacketForTlsChloExtraction(
       const QuicConnectionId& connection_id, const ParsedQuicVersion& version,
       const QuicReceivedPacket& packet,
@@ -225,7 +226,7 @@ class QUICHE_EXPORT QuicBufferedPacketStore {
       std::vector<uint16_t>* out_cert_compression_algos,
       std::vector<std::string>* out_alpns, std::string* out_sni,
       bool* out_resumption_attempted, bool* out_early_data_attempted,
-      std::optional<uint8_t>* tls_alert);
+      std::optional<uint8_t>* tls_alert, bool* out_invalid_ack);
 
   // Returns the list of buffered packets for |connection_id| and removes them
   // from the store. Returns an empty list if no early arrived packets for this
@@ -340,12 +341,11 @@ class QUICHE_EXPORT QuicBufferedPacketStore {
 };
 
 // Collects packets serialized by a QuicPacketCreator.
-class QUICHE_NO_EXPORT PacketCollector
+class QUICHE_EXPORT PacketCollector
     : public QuicPacketCreator::DelegateInterface,
       public QuicStreamFrameDataProducer {
  public:
-  explicit PacketCollector(quiche::QuicheBufferAllocator* allocator)
-      : send_buffer_(allocator) {}
+  explicit PacketCollector(quiche::QuicheBufferAllocator* allocator);
   ~PacketCollector() override = default;
 
   // QuicPacketCreator::DelegateInterface methods:
@@ -386,6 +386,8 @@ class QUICHE_NO_EXPORT PacketCollector
     return SEND_TO_WRITER;
   }
 
+  bool NextSpinBitToSend() override { return false; }
+
   // QuicStreamFrameDataProducer
   WriteStreamDataResult WriteStreamData(QuicStreamId /*id*/,
                                         QuicStreamOffset offset,
@@ -410,7 +412,7 @@ class QUICHE_NO_EXPORT PacketCollector
   std::vector<std::unique_ptr<QuicEncryptedPacket>> packets_;
   // This is only needed until the packets are encrypted. Once packets are
   // encrypted, the stream data is no longer required.
-  QuicStreamSendBuffer send_buffer_;
+  QuicStreamSendBufferInlining send_buffer_;
 };
 
 }  // namespace quic

@@ -14,6 +14,7 @@
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
 #include "components/cbor/constants.h"
 
 namespace cbor {
@@ -27,40 +28,6 @@ Value::Value() noexcept : type_(Type::NONE) {}
 
 Value::Value(Value&& that) noexcept {
   InternalMoveConstructFrom(std::move(that));
-}
-
-Value::Value(Type type) : type_(type) {
-  // Initialize with the default value.
-  switch (type_) {
-    case Type::UNSIGNED:
-    case Type::NEGATIVE:
-      integer_value_ = 0;
-      return;
-    case Type::INVALID_UTF8:
-    case Type::BYTE_STRING:
-      new (&bytestring_value_) BinaryValue();
-      return;
-    case Type::STRING:
-      new (&string_value_) std::string();
-      return;
-    case Type::ARRAY:
-      new (&array_value_) ArrayValue();
-      return;
-    case Type::MAP:
-      new (&map_value_) MapValue();
-      return;
-    case Type::TAG:
-      NOTREACHED() << constants::kUnsupportedMajorType;
-    case Type::SIMPLE_VALUE:
-      simple_value_ = Value::SimpleValue::UNDEFINED;
-      return;
-    case Type::FLOAT_VALUE:
-      float_value_ = 0.0;
-      return;
-    case Type::NONE:
-      return;
-  }
-  NOTREACHED();
 }
 
 Value::Value(SimpleValue in_simple)
@@ -232,10 +199,7 @@ const Value::BinaryValue& Value::GetBytestring() const {
 
 std::string_view Value::GetBytestringAsString() const {
   CHECK(is_bytestring());
-  const auto& bytestring_value = GetBytestring();
-  return std::string_view(
-      reinterpret_cast<const char*>(bytestring_value.data()),
-      bytestring_value.size());
+  return base::as_string_view(GetBytestring());
 }
 
 const Value::ArrayValue& Value::GetArray() const {

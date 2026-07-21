@@ -19,10 +19,12 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "perfetto/ext/base/flat_hash_map.h"
+#include "perfetto/ext/base/string_utils.h"
 #include "perfetto/ext/base/string_view.h"
 
 namespace perfetto ::trace_processor::sql_modules {
@@ -31,14 +33,16 @@ using NameToPackage =
     base::FlatHashMap<std::string,
                       std::vector<std::pair<std::string, std::string>>>;
 
-// Map from include key to sql file. Include key is the string used in INCLUDE
-// function.
+// A package registered with |PerfettoSqlDatabase|. Each entry in |modules|
+// maps the include key (the string used in INCLUDE PERFETTO MODULE) to the
+// body SQL of that module. Whether a module has already been imported (or
+// previously poisoned an attempt) is tracked centrally on
+// |PerfettoSqlDatabase| so connections attached to the same database share a
+// consistent view.
+//
+// The string_view bodies must outlive every connection holding this package.
 struct RegisteredPackage {
-  struct ModuleFile {
-    std::string sql;
-    bool included;
-  };
-  base::FlatHashMap<std::string, ModuleFile> modules;
+  base::FlatHashMap<std::string, std::string_view> modules;
 };
 
 inline std::string ReplaceSlashWithDot(std::string str) {
@@ -62,6 +66,25 @@ inline std::string GetPackageName(const std::string& str) {
     return str;
   }
   return str.substr(0, found);
+}
+
+// Returns true if |prefix| is a prefix of |str| where the prefix must either
+// be the entire string or followed by a dot separator. Examples:
+//   IsPackagePrefixOf("foo", "foo") -> true
+//   IsPackagePrefixOf("foo", "foo.bar") -> true
+//   IsPackagePrefixOf("foo.bar", "foo.bar.baz") -> true
+//   IsPackagePrefixOf("foo", "foobar") -> false (no dot separator)
+//   IsPackagePrefixOf("foo.bar", "foo") -> false (prefix longer than str)
+inline bool IsPackagePrefixOf(const std::string& prefix,
+                              const std::string& str) {
+  if (prefix.size() > str.size()) {
+    return false;
+  }
+  if (!base::StartsWith(str, prefix)) {
+    return false;
+  }
+  // Must be exact match OR followed by a dot
+  return prefix.size() == str.size() || str[prefix.size()] == '.';
 }
 
 }  // namespace perfetto::trace_processor::sql_modules

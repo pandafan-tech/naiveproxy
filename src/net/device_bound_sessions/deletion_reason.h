@@ -11,7 +11,7 @@ namespace net::device_bound_sessions {
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
 // LINT.IfChange(DeletionReason)
-enum DeletionReason {
+enum class DeletionReason {
   kExpired = 0,                  // Session was not used for too long.
   kFailedToRestoreKey = 1,       // Could not restore key from disk.
   kFailedToUnwrapKey = 2,        // Could not unwrap a key loaded from disk.
@@ -23,7 +23,8 @@ enum DeletionReason {
   kServerRequested = 5,          // Server explicitly requested termination.
   kInvalidSessionParams = 6,     // Refresh provided invalid params.
   kRefreshFatalError = 7,        // Fatal error during refresh.
-  kMaxValue = kRefreshFatalError,
+  kDevTools = 8,                 // Deleted via DevTools.
+  kMaxValue = kDevTools,
 };
 // LINT.ThenChange(//tools/metrics/histograms/metadata/net/enums.xml:DeviceBoundSessionDeletionReason)
 

@@ -11,11 +11,11 @@
 
 #include "base/check_op.h"
 #include "base/compiler_specific.h"
-#include "base/containers/contains.h"
 #include "base/containers/span.h"
 #include "base/debug/debugging_buildflags.h"
 #include "base/files/file_path.h"
 #include "base/logging.h"
+#include "base/not_fatal_until.h"
 #include "base/notreached.h"
 #include "base/numerics/checked_math.h"
 #include "base/strings/strcat.h"
@@ -174,6 +174,7 @@ std::wstring QuoteForCommandLineToArgvWInternal(
 
   return out;
 }
+
 #endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace
@@ -281,6 +282,19 @@ bool CommandLine::Init(int argc, const char* const* argv) {
 }
 
 // static
+bool CommandLine::Init(const StringVector& argv) {
+  if (current_process_commandline_) {
+    // If this is intentional, Reset() must be called first. If we are using
+    // the shared build mode, we have to share a single object across multiple
+    // shared libraries.
+    return false;
+  }
+
+  current_process_commandline_ = new CommandLine(argv);
+  return true;
+}
+
+// static
 void CommandLine::Reset() {
   DCHECK(current_process_commandline_);
   delete current_process_commandline_;
@@ -353,7 +367,7 @@ void CommandLine::SetProgram(const FilePath& program) {
 
 bool CommandLine::HasSwitch(std::string_view switch_string) const {
   CHECK(IsSwitchNameValid(switch_string));
-  return Contains(switches_, switch_string);
+  return switches_.contains(switch_string);
 }
 
 bool CommandLine::HasSwitch(const char switch_constant[]) const {
@@ -768,12 +782,53 @@ void CommandLine::ParseAsSingleArgument(
   // Remove any previously parsed arguments.
   argv_.resize(static_cast<size_t>(begin_args_));
 
-  // Locate "--single-argument" in the process's raw command line. Results are
-  // unpredictable if "--single-argument" appears as part of a previous
+  // Find the end of the program path in the raw command line to avoid
+  // matching switches inside the program path itself (which can happen
+  // with PWA launchers on Windows where the PWA name contains switches).
+  //
+  // We can estimate this by finding the first non-space character (start of
+  // program) and adding the length of the program name parsed by
+  // CommandLineToArgvW (stored in argv_[0]).
+  //
+  // Invariants we expect:
+  // 1. `CommandLineToArgvW` treats backslashes as literal characters (not
+  //    escapes) when parsing the application name (first argument).
+  // 2. Windows filenames cannot contain double quotes (").
+  // 3. Thus, the program path in the raw command line can never contain
+  //    escaped quotes. It is either unquoted (ends at first space) or quoted
+  //    (starts and ends with double quotes, with no quotes in between).
+  //
+  // This means the length of `GetProgram()` is exactly the length of the
+  // program path in the raw command line (minus the outer quotes if it
+  // was quoted).
+  size_t program_start = raw_command_line_string_.find_first_not_of(L' ');
+  if (program_start == StringType::npos) {
+    return;
+  }
+
+  size_t switches_and_args_start = program_start + argv_[0].length();
+  const bool is_quoted = raw_command_line_string_[program_start] == L'"';
+  if (is_quoted) {
+    switches_and_args_start += 2;  // Account for the start and end quotes.
+  }
+
+  if (switches_and_args_start >= raw_command_line_string_.length()) {
+    return;
+  }
+
+  if (is_quoted) {
+    CHECK_EQ(raw_command_line_string_[switches_and_args_start - 1], L'"',
+             base::NotFatalUntil::M154);
+  }
+
+  // Locate "--single-argument" in the process's switches and arguments. Results
+  // are unpredictable if "--single-argument" appears as part of a previous
   // argument or switch.
   const size_t single_arg_switch_position =
-      raw_command_line_string_.find(single_arg_switch);
-  DCHECK_NE(single_arg_switch_position, StringType::npos);
+      raw_command_line_string_.find(single_arg_switch, switches_and_args_start);
+  if (single_arg_switch_position == StringType::npos) {
+    return;
+  }
 
   // Append the portion of the raw command line that starts one character past
   // "--single-argument" as the one and only argument, or return if no

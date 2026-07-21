@@ -11,10 +11,36 @@
 #include "base/apple/bridging.h"
 #include "base/apple/foundation_util.h"
 #include "base/apple/scoped_cftyperef.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/sys_string_conversions.h"
 #include "crypto/apple/keychain_v2.h"
+#include "crypto/features.h"
 
 namespace crypto::apple {
+
+namespace {
+
+#if BUILDFLAG(IS_IOS)
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class KeychainMigrationResult {
+  kNotNeeded = 0,
+  kSuccess = 1,
+  kFailure = 2,
+  kMaxValue = kFailure,
+};
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class KeychainMigrationUserStatus {
+  kNoItems = 0,
+  kMigrated = 1,
+  kPendingMigration = 2,
+  kMaxValue = kPendingMigration,
+};
+#endif  // BUILDFLAG(IS_IOS)
+
+}  // namespace
 
 #if !BUILDFLAG(IS_IOS)
 bool ExecutableHasKeychainAccessGroupEntitlement(
@@ -41,5 +67,133 @@ bool ExecutableHasKeychainAccessGroupEntitlement(
       containsObject:base::SysUTF8ToNSString(keychain_access_group)];
 }
 #endif  // !BUILDFLAG(IS_IOS)
+
+#if BUILDFLAG(IS_IOS)
+// Creates a dictionary containing the attributes for an accessibility
+// migration. Only used on iOS.
+base::apple::ScopedCFTypeRef<CFDictionaryRef> MakeAttributeMigrationQuery() {
+  NSDictionary* query = @{
+    base::apple::CFToNSPtrCast(kSecAttrAccessible) :
+        base::apple::CFToNSPtrCast(kSecAttrAccessibleAfterFirstUnlock),
+  };
+  return base::apple::ScopedCFTypeRef<CFDictionaryRef>(
+      base::apple::NSToCFOwnershipCast(query));
+}
+#endif  // BUILDFLAG(IS_IOS)
+
+CFStringRef GetKeychainAccessibilityAttribute() {
+#if BUILDFLAG(IS_IOS)
+  if (base::FeatureList::IsEnabled(
+          crypto::features::kMigrateIOSKeychainAccessibility)) {
+    return kSecAttrAccessibleAfterFirstUnlock;
+  }
+#endif  // BUILDFLAG(IS_IOS)
+  return kSecAttrAccessibleWhenUnlocked;
+}
+
+#if BUILDFLAG(IS_IOS)
+bool MigrateKeychainItemAccessibilityIfNeeded(CFDictionaryRef attributes,
+                                              CFDictionaryRef query) {
+  if (!base::FeatureList::IsEnabled(
+          crypto::features::kMigrateIOSKeychainAccessibility)) {
+    return false;
+  }
+
+  CFStringRef accessibility = base::apple::GetValueFromDictionary<CFStringRef>(
+      attributes, kSecAttrAccessible);
+  if (CFStringCompare(accessibility, kSecAttrAccessibleWhenUnlocked, 0) ==
+      kCFCompareEqualTo) {
+    // The item has the old accessibility attribute, so update it.
+    base::apple::ScopedCFTypeRef<CFDictionaryRef> attributes_to_update =
+        MakeAttributeMigrationQuery();
+    OSStatus status =
+        KeychainV2::GetInstance().ItemUpdate(query, attributes_to_update.get());
+    if (status == errSecSuccess) {
+      base::UmaHistogramEnumeration("Security.iOS.KeychainMigration.Result",
+                                    KeychainMigrationResult::kSuccess);
+    } else {
+      base::UmaHistogramEnumeration("Security.iOS.KeychainMigration.Result",
+                                    KeychainMigrationResult::kFailure);
+    }
+    return true;
+  }
+
+  base::UmaHistogramEnumeration("Security.iOS.KeychainMigration.Result",
+                                KeychainMigrationResult::kNotNeeded);
+  return false;
+}
+
+void RecordKeychainMigrationStatus(std::string_view access_group) {
+  if (!base::FeatureList::IsEnabled(
+          crypto::features::kMigrateIOSKeychainAccessibility)) {
+    return;
+  }
+
+  // Query for any generic password item that has the old accessibility.
+  NSMutableDictionary* query = [NSMutableDictionary dictionaryWithDictionary:@{
+    base::apple::CFToNSPtrCast(kSecClass) :
+        base::apple::CFToNSPtrCast(kSecClassGenericPassword),
+    base::apple::CFToNSPtrCast(kSecAttrAccessible) :
+        base::apple::CFToNSPtrCast(kSecAttrAccessibleWhenUnlocked),
+    base::apple::CFToNSPtrCast(kSecMatchLimit) :
+        base::apple::CFToNSPtrCast(kSecMatchLimitOne),
+  }];
+
+  if (!access_group.empty()) {
+    query[base::apple::CFToNSPtrCast(kSecAttrAccessGroup)] =
+        base::SysUTF8ToNSString(access_group);
+  }
+
+  OSStatus status = KeychainV2::GetInstance().ItemCopyMatching(
+      base::apple::NSToCFOwnershipCast(query), nullptr);
+
+  if (status == errSecSuccess) {
+    // Found at least one item that needs migration.
+    base::UmaHistogramEnumeration(
+        "Security.iOS.KeychainMigration.UserStatus",
+        KeychainMigrationUserStatus::kPendingMigration);
+    return;
+  }
+
+  if (status == errSecItemNotFound) {
+    // No items found with the old accessibility.
+    // Check if there are ANY items at all to distinguish between "Migrated" and
+    // "No Items".
+    NSMutableDictionary* all_items_query =
+        [NSMutableDictionary dictionaryWithDictionary:@{
+          base::apple::CFToNSPtrCast(kSecClass) :
+              base::apple::CFToNSPtrCast(kSecClassGenericPassword),
+          base::apple::CFToNSPtrCast(kSecMatchLimit) :
+              base::apple::CFToNSPtrCast(kSecMatchLimitOne),
+        }];
+    if (!access_group.empty()) {
+      all_items_query[base::apple::CFToNSPtrCast(kSecAttrAccessGroup)] =
+          base::SysUTF8ToNSString(access_group);
+    }
+
+    OSStatus all_status = KeychainV2::GetInstance().ItemCopyMatching(
+        base::apple::NSToCFOwnershipCast(all_items_query), nullptr);
+    if (all_status == errSecSuccess) {
+      base::UmaHistogramEnumeration("Security.iOS.KeychainMigration.UserStatus",
+                                    KeychainMigrationUserStatus::kMigrated);
+    } else {
+      base::UmaHistogramEnumeration("Security.iOS.KeychainMigration.UserStatus",
+                                    KeychainMigrationUserStatus::kNoItems);
+    }
+  }
+}
+
+base::apple::ScopedCFTypeRef<CFDictionaryRef>
+GenerateGenericPasswordUpdateQuery(std::string_view account_name) {
+  NSDictionary* query = @{
+    base::apple::CFToNSPtrCast(kSecClass) :
+        base::apple::CFToNSPtrCast(kSecClassGenericPassword),
+    base::apple::CFToNSPtrCast(kSecAttrAccount) :
+        base::SysUTF8ToNSString(account_name),
+  };
+  return base::apple::ScopedCFTypeRef<CFDictionaryRef>(
+      base::apple::NSToCFOwnershipCast(query));
+}
+#endif  // BUILDFLAG(IS_IOS)
 
 }  // namespace crypto::apple

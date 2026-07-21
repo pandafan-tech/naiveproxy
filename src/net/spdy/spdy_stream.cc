@@ -9,17 +9,17 @@
 #include <string_view>
 #include <utility>
 
-#include "build/build_config.h"
 #include "base/check_op.h"
 #include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/notreached.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "base/trace_event/memory_usage_estimator.h"
 #include "base/values.h"
 #include "net/base/load_timing_info.h"
@@ -36,29 +36,28 @@ namespace net {
 
 namespace {
 
-base::Value::Dict NetLogSpdyStreamErrorParams(spdy::SpdyStreamId stream_id,
-                                              int net_error,
-                                              std::string_view description) {
-  return base::Value::Dict()
+base::DictValue NetLogSpdyStreamErrorParams(spdy::SpdyStreamId stream_id,
+                                            int net_error,
+                                            std::string_view description) {
+  return base::DictValue()
       .Set("stream_id", static_cast<int>(stream_id))
       .Set("net_error", ErrorToShortString(net_error))
       .Set("description", description);
 }
 
-base::Value::Dict NetLogSpdyStreamWindowUpdateParams(
-    spdy::SpdyStreamId stream_id,
-    int32_t delta,
-    int32_t window_size) {
-  return base::Value::Dict()
+base::DictValue NetLogSpdyStreamWindowUpdateParams(spdy::SpdyStreamId stream_id,
+                                                   int32_t delta,
+                                                   int32_t window_size) {
+  return base::DictValue()
       .Set("stream_id", static_cast<int>(stream_id))
       .Set("delta", delta)
       .Set("window_size", window_size);
 }
 
-base::Value::Dict NetLogSpdyDataParams(spdy::SpdyStreamId stream_id,
-                                       int size,
-                                       bool fin) {
-  return base::Value::Dict()
+base::DictValue NetLogSpdyDataParams(spdy::SpdyStreamId stream_id,
+                                     int size,
+                                     bool fin) {
+  return base::DictValue()
       .Set("stream_id", static_cast<int>(stream_id))
       .Set("size", size)
       .Set("fin", fin);
@@ -275,16 +274,18 @@ void SpdyStream::IncreaseRecvWindowSize(int32_t delta_window_size) {
   unacked_recv_window_bytes_ += delta_window_size;
   const base::TimeDelta elapsed =
       base::TimeTicks::Now() - last_recv_window_update_;
-#if BUILDFLAG(IS_IOS)
-  constexpr int kWindowUpdateDivisor = 8;
-#else
-  constexpr int kWindowUpdateDivisor = 2;
-#endif
-  if (unacked_recv_window_bytes_ > max_recv_window_size_ / kWindowUpdateDivisor ||
+  if (unacked_recv_window_bytes_ > max_recv_window_size_ / 2 ||
       elapsed >= session_->TimeToBufferSmallWindowUpdates()) {
     last_recv_window_update_ = base::TimeTicks::Now();
+    // SendStreamWindowUpdate() can result in session draining and stream
+    // destruction if the number of queued capped frames exceeds the limit.
+    // Check weak_this after the call to detect this.
+    base::WeakPtr<SpdyStream> weak_this = weak_ptr_factory_.GetWeakPtr();
     session_->SendStreamWindowUpdate(
         stream_id_, static_cast<uint32_t>(unacked_recv_window_bytes_));
+    if (!weak_this) {
+      return;
+    }
     unacked_recv_window_bytes_ = 0;
   }
 }
@@ -299,9 +300,10 @@ void SpdyStream::DecreaseRecvWindowSize(int32_t delta_window_size) {
   if (delta_window_size > recv_window_size_ - unacked_recv_window_bytes_) {
     session_->ResetStream(
         stream_id_, ERR_HTTP2_FLOW_CONTROL_ERROR,
-        "delta_window_size is " + base::NumberToString(delta_window_size) +
-            " in DecreaseRecvWindowSize, which is larger than the receive " +
-            "window size of " + base::NumberToString(recv_window_size_));
+        base::StrCat(
+            {"delta_window_size is ", base::NumberToString(delta_window_size),
+             " in DecreaseRecvWindowSize, which is larger than the receive ",
+             "window size of ", base::NumberToString(recv_window_size_)}));
     return;
   }
 
@@ -686,6 +688,10 @@ bool SpdyStream::IsLocallyClosed() const {
   return io_state_ == STATE_HALF_CLOSED_LOCAL || io_state_ == STATE_CLOSED;
 }
 
+bool SpdyStream::IsRemoteClosed() const {
+  return io_state_ == STATE_HALF_CLOSED_REMOTE;
+}
+
 bool SpdyStream::IsIdle() const {
   return io_state_ == STATE_IDLE;
 }
@@ -699,11 +705,11 @@ bool SpdyStream::IsReservedRemote() const {
 }
 
 void SpdyStream::AddRawReceivedBytes(size_t received_bytes) {
-  raw_received_bytes_ += received_bytes;
+  raw_received_bytes_ += base::ByteSize(received_bytes);
 }
 
 void SpdyStream::AddRawSentBytes(size_t sent_bytes) {
-  raw_sent_bytes_ += sent_bytes;
+  raw_sent_bytes_ += base::ByteSize(sent_bytes);
 }
 
 bool SpdyStream::GetLoadTimingInfo(LoadTimingInfo* load_timing_info) const {
@@ -721,8 +727,8 @@ bool SpdyStream::GetLoadTimingInfo(LoadTimingInfo* load_timing_info) const {
   return result;
 }
 
-base::Value::Dict SpdyStream::GetInfoAsValue() const {
-  base::Value::Dict dict;
+base::DictValue SpdyStream::GetInfoAsValue() const {
+  base::DictValue dict;
   dict.Set("stream_id", static_cast<int>(stream_id_));
   dict.Set("io_state", DescribeState(io_state_));
   dict.Set("send_stalled_by_flow_control", send_stalled_by_flow_control_);

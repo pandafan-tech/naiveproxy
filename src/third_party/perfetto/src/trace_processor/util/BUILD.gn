@@ -14,6 +14,7 @@
 
 import("../../../gn/perfetto.gni")
 import("../../../gn/perfetto_cc_proto_descriptor.gni")
+import("../../../gn/perfetto_component.gni")
 
 # Track event args parsing logic here is tentatitively planned to eventually
 # move to src/util and will be used to implement writing typed args in console
@@ -24,6 +25,28 @@ import("../../../gn/perfetto_cc_proto_descriptor.gni")
 
 source_set("stdlib") {
   sources = [ "sql_modules.h" ]
+}
+
+source_set("sql_bundle") {
+  sources = [ "sql_bundle.h" ]
+  deps = [
+    "../../../gn:default_deps",
+    "../../../include/perfetto/base",
+  ]
+}
+
+if (enable_perfetto_trace_processor_sqlite) {
+  source_set("sql_module_doc_parser") {
+    sources = [
+      "sql_module_doc_parser.cc",
+      "sql_module_doc_parser.h",
+    ]
+    deps = [
+      "../../../gn:default_deps",
+      "../../base",
+      "../perfetto_sql/syntaqlite",
+    ]
+  }
 }
 
 source_set("bump_allocator") {
@@ -53,7 +76,7 @@ source_set("gzip") {
   }
 }
 
-source_set("build_id") {
+perfetto_component("build_id") {
   sources = [
     "build_id.cc",
     "build_id.h",
@@ -76,7 +99,10 @@ source_set("blob") {
 }
 
 source_set("clock") {
-  sources = [ "clock_synchronizer.h" ]
+  sources = [
+    "clock_synchronizer.cc",
+    "clock_synchronizer.h",
+  ]
   deps = [
     "../../../gn:default_deps",
     "../../../include/perfetto/ext/base:base",
@@ -93,6 +119,7 @@ source_set("profiler_util") {
     "../../../gn:default_deps",
     "../../../include/perfetto/ext/base:base",
     "../../../protos/perfetto/trace/profiling:zero",
+    "../importers/common:stats_tracker",
     "../storage:storage",
   ]
 }
@@ -119,6 +146,7 @@ source_set("protozero_to_json") {
   ]
   deps = [
     ":descriptors",
+    ":json_serializer",
     "../../../gn:default_deps",
     "../../../protos/perfetto/common:zero",
     "../../../protos/perfetto/trace/track_event:zero",
@@ -154,8 +182,6 @@ source_set("descriptors") {
 
 source_set("proto_to_args_parser") {
   sources = [
-    "debug_annotation_parser.cc",
-    "debug_annotation_parser.h",
     "proto_to_args_parser.cc",
     "proto_to_args_parser.h",
   ]
@@ -196,19 +222,16 @@ source_set("zip_reader") {
   }
 }
 
+source_set("galloping_search") {
+  sources = [ "galloping_search.h" ]
+  deps = [ "../../../gn:default_deps" ]
+}
+
 source_set("glob") {
   sources = [
     "glob.cc",
     "glob.h",
   ]
-  deps = [
-    "../../../gn:default_deps",
-    "../../base",
-  ]
-}
-
-source_set("regex") {
-  sources = [ "regex.h" ]
   deps = [
     "../../../gn:default_deps",
     "../../base",
@@ -229,6 +252,16 @@ source_set("sql_argument") {
   ]
 }
 
+source_set("owned_sql_value") {
+  sources = [ "owned_sql_value.h" ]
+  deps = [
+    "../../../gn:default_deps",
+    "../../../include/perfetto/base",
+    "../../../include/perfetto/ext/base",
+    "../../../include/perfetto/trace_processor:basic_types",
+  ]
+}
+
 source_set("args_utils") {
   sources = [
     "args_utils.cc",
@@ -239,36 +272,86 @@ source_set("args_utils") {
     "../../../include/perfetto/base",
     "../../../include/perfetto/ext/base",
     "../containers",
+    "../core/dataframe",
     "../storage",
+    "../tables",
     "../types",
   ]
 }
 
+# Header only part of the json_parser (just json_parser.h).
+# The old json_utils.cc/h files have been removed and replaced by json_args.cc/h.
 source_set("json_parser") {
-  sources = [
-    "json_parser.h",
-    "json_utils.cc",
-    "json_utils.h",
-  ]
+  sources = [ "json_parser.h" ]
   deps = [
     "../../../gn:default_deps",
+    "../../../include/perfetto/base",
+    "../../../include/perfetto/ext/base",
+  ]
+}
+
+# Header-only JSON streaming parser. No external dependencies.
+source_set("simple_json_parser") {
+  sources = [
+    "simple_json_parser.cc",
+    "simple_json_parser.h",
+  ]
+  public_deps = [ ":json_parser" ]
+  deps = [
+    "../../../gn:default_deps",
+    "../../../include/perfetto/base",
+    "../../../include/perfetto/ext/base",
+  ]
+}
+
+# JSON args flattening using the streaming parser.
+source_set("json_args") {
+  sources = [
+    "json_args.cc",
+    "json_args.h",
+  ]
+  deps = [
+    ":json_parser",
+    ":simple_json_parser",
+    "../../../gn:default_deps",
+    "../../../include/perfetto/base",
+    "../../../include/perfetto/ext/base",
     "../containers",
     "../importers/common",
     "../storage",
     "../types",
   ]
-  if (enable_perfetto_trace_processor_json) {
-    public_deps = [ "../../../gn:jsoncpp" ]
-  }
 }
 
-source_set("json_writer") {
-  sources = [
-    "json_writer.cc",
-    "json_writer.h",
-  ]
+source_set("json_serializer") {
+  sources = [ "json_serializer.h" ]
   deps = [
     "../../../gn:default_deps",
+    "../../../include/perfetto/ext/base",
+  ]
+}
+
+source_set("simple_json_serializer") {
+  sources = [
+    "simple_json_serializer.cc",
+    "simple_json_serializer.h",
+  ]
+  deps = [
+    ":json_serializer",
+    "../../../gn:default_deps",
+  ]
+}
+
+source_set("json_value") {
+  sources = [
+    "json_value.cc",
+    "json_value.h",
+  ]
+  deps = [
+    ":json_parser",
+    ":json_serializer",
+    "../../../gn:default_deps",
+    "../../../include/perfetto/base",
     "../../../include/perfetto/ext/base",
   ]
 }
@@ -303,8 +386,8 @@ source_set("profile_builder") {
     "../../../protos/third_party/pprof:zero",
     "../../base",
     "../containers",
-    "../dataframe",
-    "../dataframe",
+    "../core/dataframe",
+    "../core/dataframe",
     "../storage",
     "../tables",
     "../types",
@@ -332,6 +415,7 @@ source_set("trace_type") {
     "../../../gn:default_deps",
     "../../../include/perfetto/ext/base",
     "../../../protos/perfetto/trace:non_minimal_zero",
+    "../../../protos/third_party/pprof:zero",
     "../../protozero",
     "../importers/android_bugreport:android_dumpstate_event",
     "../importers/android_bugreport:android_log_event",
@@ -351,28 +435,21 @@ source_set("tar_writer") {
   ]
 }
 
-source_set("winscope_proto_mapping") {
-  sources = [ "winscope_proto_mapping.h" ]
-  deps = [
-    "../../../gn:default_deps",
-    "../../../include/perfetto/ext/base:base",
-    "../dataframe",
-    "../storage:storage",
-    "../tables",
-  ]
-}
-
 source_set("unittests") {
   sources = [
     "bump_allocator_unittest.cc",
-    "debug_annotation_parser_unittest.cc",
+    "descriptors_unittest.cc",
+    "galloping_search_unittest.cc",
     "glob_unittest.cc",
     "json_parser_unittest.cc",
-    "json_writer_unittest.cc",
+    "json_serializer_unittest.cc",
+    "json_value_unittest.cc",
     "proto_profiler_unittest.cc",
     "proto_to_args_parser_unittest.cc",
     "protozero_to_json_unittests.cc",
     "protozero_to_text_unittests.cc",
+    "simple_json_parser_unittest.cc",
+    "simple_json_serializer_unittest.cc",
     "sql_argument_unittest.cc",
     "streaming_line_reader_unittest.cc",
     "tar_writer_unittest.cc",
@@ -380,23 +457,22 @@ source_set("unittests") {
     "zip_reader_unittest.cc",
   ]
 
-  if (!is_win) {
-    sources += [ "regex_unittest.cc" ]
-  }
-
   testonly = true
   deps = [
     ":bump_allocator",
     ":descriptors",
+    ":galloping_search",
     ":glob",
     ":gzip",
     ":json_parser",
-    ":json_writer",
+    ":json_serializer",
+    ":json_value",
     ":proto_profiler",
     ":proto_to_args_parser",
     ":protozero_to_json",
     ":protozero_to_text",
-    ":regex",
+    ":simple_json_parser",
+    ":simple_json_serializer",
     ":sql_argument",
     ":tar_writer",
     ":trace_blob_view_reader",
@@ -412,6 +488,7 @@ source_set("unittests") {
     "../../base:test_support",
     "../../protozero",
     "../../protozero:testing_messages_zero",
+    "../importers/common",
     "../importers/proto:gen_cc_track_event_descriptor",
     "../importers/proto:minimal",
     "../importers/proto:packet_sequence_state_generation_hdr",
@@ -420,13 +497,17 @@ source_set("unittests") {
   ]
   if (perfetto_build_standalone) {
     deps += [
-      "../../../protos/perfetto/metrics/chrome:lite",
+      "../../../protos/perfetto/metrics/chrome:zero",
       "../metrics:gen_cc_all_chrome_metrics_descriptor",
     ]
   }
   if (enable_perfetto_zlib) {
     sources += [ "gzip_utils_unittest.cc" ]
     deps += [ "../../../gn:zlib" ]
+  }
+  if (enable_perfetto_trace_processor_sqlite) {
+    sources += [ "sql_module_doc_parser_unittest.cc" ]
+    deps += [ ":sql_module_doc_parser" ]
   }
 }
 

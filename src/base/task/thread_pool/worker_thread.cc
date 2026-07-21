@@ -150,12 +150,12 @@ WorkerThread::WorkerThread(ThreadType thread_type_hint,
                            ? reinterpret_cast<intptr_t>(this)
                            : reinterpret_cast<intptr_t>(flow_terminator)),
       delegate_(std::move(delegate)) {
-  DCHECK(task_tracker_);
-  DCHECK(CanUseBackgroundThreadTypeForWorkerThread() ||
-         thread_type_hint_ != ThreadType::kBackground);
-  DCHECK(CanUseUtilityThreadTypeForWorkerThread() ||
-         thread_type_hint != ThreadType::kUtility);
-  DCHECK(delegate_);
+  CHECK(task_tracker_);
+  CHECK(CanUseBackgroundThreadTypeForWorkerThread() ||
+        thread_type_hint_ != ThreadType::kBackground);
+  CHECK(CanUseUtilityThreadTypeForWorkerThread() ||
+        thread_type_hint != ThreadType::kUtility);
+  CHECK(delegate_);
   delegate_->wake_up_event_.declare_only_used_while_idle();
 }
 
@@ -409,7 +409,7 @@ NOINLINE void WorkerThread::RunBackgroundDedicatedCOMWorker() {
 
 void WorkerThread::RunWorker() {
   DCHECK_EQ(self_, this);
-  TRACE_EVENT_INSTANT0("base", "WorkerThread born", TRACE_EVENT_SCOPE_THREAD);
+  TRACE_EVENT_INSTANT("base", "WorkerThread born");
   TRACE_EVENT_BEGIN0("base", "WorkerThread active");
 
   if (worker_thread_observer_) {
@@ -509,7 +509,7 @@ void WorkerThread::RunWorker() {
   self_ = nullptr;
 
   TRACE_EVENT_END0("base", "WorkerThread active");
-  TRACE_EVENT_INSTANT0("base", "WorkerThread dead", TRACE_EVENT_SCOPE_THREAD);
+  TRACE_EVENT_INSTANT("base", "WorkerThread dead");
 }
 
 }  // namespace base::internal

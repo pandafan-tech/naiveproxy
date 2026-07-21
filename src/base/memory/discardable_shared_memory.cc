@@ -13,7 +13,6 @@
 #include "base/feature_list.h"
 #include "base/logging.h"
 #include "base/memory/discardable_memory.h"
-#include "base/memory/discardable_memory_internal.h"
 #include "base/memory/page_size.h"
 #include "base/memory/shared_memory_tracker.h"
 #include "base/numerics/safe_math.h"
@@ -30,6 +29,8 @@
 #endif
 
 #if BUILDFLAG(IS_ANDROID)
+#include <linux/ashmem.h>
+
 #include "base/android/linker/ashmem.h"
 #endif
 
@@ -129,21 +130,6 @@ SharedState* SharedStateFromSharedMemory(
 size_t AlignToPageSize(size_t size) {
   return bits::AlignUp(size, base::GetPageSize());
 }
-
-#if BUILDFLAG(IS_ANDROID)
-bool UseAshmemUnpinningForDiscardableMemory() {
-  if (!ashmem_device_is_supported()) {
-    return false;
-  }
-
-  if (base::DiscardableMemoryBackingFieldTrialIsEnabled()) {
-    // With the DiscardableMemoryTrial neither kEmulatedSharedMemory nor
-    // kMadvFree support unpinning.
-    return false;
-  }
-  return true;
-}
-#endif  // BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
@@ -355,7 +341,7 @@ void DiscardableSharedMemory::Unlock(size_t offset, size_t length) {
     return;
   }
 
-  Time current_time = Now();
+  Time current_time = Time::Now();
   DCHECK(!current_time.is_null());
 
   SharedState old_state(SharedState::LOCKED, Time());
@@ -540,9 +526,9 @@ DiscardableSharedMemory::LockResult DiscardableSharedMemory::LockPages(
     size_t length) {
 #if BUILDFLAG(IS_ANDROID)
   if (region.IsValid()) {
-    if (UseAshmemUnpinningForDiscardableMemory()) {
+    if (AshmemDeviceIsSupported()) {
       int pin_result =
-          ashmem_pin_region(region.GetPlatformHandle(), offset, length);
+          AshmemPinRegion(region.GetPlatformHandle(), offset, length);
       if (pin_result == ASHMEM_WAS_PURGED) {
         return PURGED;
       }
@@ -562,23 +548,19 @@ void DiscardableSharedMemory::UnlockPages(
     size_t length) {
 #if BUILDFLAG(IS_ANDROID)
   if (region.IsValid()) {
-    if (UseAshmemUnpinningForDiscardableMemory()) {
+    if (AshmemDeviceIsSupported()) {
       int unpin_result =
-          ashmem_unpin_region(region.GetPlatformHandle(), offset, length);
+          AshmemUnpinRegion(region.GetPlatformHandle(), offset, length);
       DCHECK_EQ(0, unpin_result);
     }
   }
 #endif
 }
 
-Time DiscardableSharedMemory::Now() const {
-  return Time::Now();
-}
-
 #if BUILDFLAG(IS_ANDROID)
 // static
 bool DiscardableSharedMemory::IsAshmemDeviceSupportedForTesting() {
-  return UseAshmemUnpinningForDiscardableMemory();
+  return AshmemDeviceIsSupported();
 }
 #endif
 

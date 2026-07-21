@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_PARTITION_ALLOC_CONFIG_H_
 #define PARTITION_ALLOC_PARTITION_ALLOC_CONFIG_H_
 
@@ -66,7 +61,7 @@ static_assert(sizeof(void*) != 8, "");
 // Too expensive for official builds, as it adds cache misses to all
 // allocations. On the other hand, we want wide metrics coverage to get
 // realistic profiles.
-#if PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC) && !defined(OFFICIAL_BUILD)
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC) && !PA_BUILDFLAG(OFFICIAL)
 #define PA_CONFIG_THREAD_CACHE_ALLOC_STATS() 1
 #else
 #define PA_CONFIG_THREAD_CACHE_ALLOC_STATS() 0
@@ -125,8 +120,8 @@ static_assert(sizeof(void*) == 8);
 //
 // Regardless, the "normal" TLS access is fast on x86_64 (see partition_tls.h),
 // so don't bother with thread_local anywhere.
-#if !(PA_BUILDFLAG(IS_WIN) && defined(COMPONENT_BUILD)) && \
-    !PA_BUILDFLAG(IS_APPLE) && !PA_BUILDFLAG(IS_LINUX) &&  \
+#if !(PA_BUILDFLAG(IS_WIN) && PA_BUILDFLAG(IS_COMPONENT_BUILD)) && \
+    !PA_BUILDFLAG(IS_APPLE) && !PA_BUILDFLAG(IS_LINUX) &&          \
     !PA_BUILDFLAG(IS_CHROMEOS)
 #define PA_CONFIG_THREAD_LOCAL_TLS() 1
 #else
@@ -265,14 +260,12 @@ constexpr bool kUseFewerMemoryRegions =
 #define PA_CONFIG_IS_NONCLANG_MSVC() 0
 #endif
 
-// Set GN build override 'assert_cpp_20' to false to disable assertion.
-#if PA_BUILDFLAG(ASSERT_CPP_20)
-static_assert(__cplusplus >= 202002L,
-              "PartitionAlloc targets C++20 or higher.");
-#endif  // PA_BUILDFLAG(ASSERT_CPP_20)
+// Enables Zero Segment maintained by PA.
+#define PA_CONFIG_ENABLE_USER_SPACE_ZERO_SEGMENT() \
+  PA_BUILDFLAG(ENABLE_USER_SPACE_ZERO_SEGMENT)
 
-// Named pass-through that determines whether or not PA should generally
-// enforce that `SlotStart` instances are in fact slot starts.
-#define PA_CONFIG_ENFORCE_SLOT_STARTS() PA_BUILDFLAG(DCHECKS_ARE_ON)
+// Size of the Zero Segment in MB.
+#define PA_CONFIG_USER_SPACE_ZERO_SEGMENT_SIZE_MB() \
+  PA_BUILDFLAG(USER_SPACE_ZERO_SEGMENT_SIZE_MB)
 
 #endif  // PARTITION_ALLOC_PARTITION_ALLOC_CONFIG_H_

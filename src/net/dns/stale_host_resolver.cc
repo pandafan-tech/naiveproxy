@@ -56,6 +56,7 @@ class StaleHostResolver::RequestImpl : public HostResolver::ResolveHostRequest {
   ResolveErrorInfo GetResolveErrorInfo() const override;
   const std::optional<HostCache::EntryStaleness>& GetStaleInfo() const override;
   void ChangeRequestPriority(RequestPriority priority) override;
+  std::optional<ResolutionDetails> GetResolutionDetails() const override;
 
   // Called on completion of an asynchronous (network) inner request. Expected
   // to be called by StaleHostResolver::OnNetworkRequestComplete().
@@ -255,6 +256,17 @@ void StaleHostResolver::RequestImpl::ChangeRequestPriority(
   }
 }
 
+std::optional<ResolutionDetails>
+StaleHostResolver::RequestImpl::GetResolutionDetails() const {
+  if (network_request_) {
+    return network_request_->GetResolutionDetails();
+  }
+  if (cache_request_) {
+    return cache_request_->GetResolutionDetails();
+  }
+  return std::nullopt;
+}
+
 void StaleHostResolver::RequestImpl::OnNetworkRequestComplete(int error) {
   DCHECK(resolver_);
   DCHECK(have_network_request());
@@ -384,7 +396,7 @@ HostCache* StaleHostResolver::GetHostCache() {
   return inner_resolver_->GetHostCache();
 }
 
-base::Value::Dict StaleHostResolver::GetDnsConfigAsValue() const {
+base::DictValue StaleHostResolver::GetDnsConfigAsValue() const {
   return inner_resolver_->GetDnsConfigAsValue();
 }
 

@@ -41,6 +41,7 @@
 #include <__type_traits/is_swappable.h>
 #include <__type_traits/remove_const.h>
 #include <__type_traits/remove_cvref.h>
+#include <__utility/exchange.h>
 #include <__utility/forward.h>
 #include <__utility/move.h>
 #include <__utility/pair.h>
@@ -82,18 +83,6 @@ struct __hash_node_base {
   typedef __rebind_pointer_t<_NodePtr, __first_node> __node_base_pointer;
   typedef _NodePtr __node_pointer;
   typedef __node_base_pointer __next_pointer;
-
-// TODO(LLVM 22): Remove this check
-#ifndef _LIBCPP_ABI_FIX_UNORDERED_NODE_POINTER_UB
-  static_assert(sizeof(__node_base_pointer) == sizeof(__node_pointer) && _LIBCPP_ALIGNOF(__node_base_pointer) ==
-                    _LIBCPP_ALIGNOF(__node_pointer),
-                "It looks like you are using std::__hash_table (an implementation detail for the unordered containers) "
-                "with a fancy pointer type that thas a different representation depending on whether it points to a "
-                "__hash_table base pointer or a __hash_table node pointer (both of which are implementation details of "
-                "the standard library). This means that your ABI is being broken between LLVM 19 and LLVM 20. If you "
-                "don't care about your ABI being broken, define the _LIBCPP_ABI_TREE_REMOVE_NODE_POINTER_UB macro to "
-                "silence this diagnostic.");
-#endif
 
   __next_pointer __next_;
 
@@ -536,9 +525,7 @@ public:
 
   _LIBCPP_HIDE_FROM_ABI __bucket_list_deallocator(__bucket_list_deallocator&& __x)
       _NOEXCEPT_(is_nothrow_move_constructible<allocator_type>::value)
-      : __size_(std::move(__x.__size_)), __alloc_(std::move(__x.__alloc_)) {
-    __x.size() = 0;
-  }
+      : __size_(std::__exchange(__x.__size_, 0)), __alloc_(std::move(__x.__alloc_)) {}
 
   _LIBCPP_HIDE_FROM_ABI size_type& size() _NOEXCEPT { return __size_; }
   _LIBCPP_HIDE_FROM_ABI size_type size() const _NOEXCEPT { return __size_; }
@@ -1922,6 +1909,8 @@ __hash_table<_Tp, _Hash, _Equal, _Alloc>::erase(const_iterator __first, const_it
         __bucket_list_[__next_chash] = __before_first;
         __chash                      = __next_chash;
       }
+    } else { // When __next is a nullptr we've fully erased the last bucket. Update the bucket list accordingly.
+      __bucket_list_[__chash] = nullptr;
     }
   }
 

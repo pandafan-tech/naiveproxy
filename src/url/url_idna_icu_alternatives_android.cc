@@ -27,15 +27,17 @@ bool IDNToASCII(std::u16string_view src, CanonOutputW* output) {
   base::android::ScopedJavaLocalRef<jstring> java_src =
       base::android::ConvertUTF16ToJavaString(env, src);
   ScopedJavaLocalRef<jstring> java_result =
-      android::Java_IDNStringUtil_idnToASCII(env, java_src);
+      android::Java_IDNStringUtil_nativeIdnToASCII(env, java_src);
   // NULL indicates failure.
   if (java_result.is_null())
     return false;
 
   std::u16string utf16_result =
       base::android::ConvertJavaStringToUTF16(java_result);
-  output->Append(utf16_result.data(), utf16_result.size());
+  output->Append(utf16_result);
   return true;
 }
 
 }  // namespace url
+
+DEFINE_JNI(IDNStringUtil)

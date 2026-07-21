@@ -20,6 +20,7 @@
 #include "perfetto/public/pb_msg.h"
 #include "perfetto/public/pb_utils.h"
 #include "perfetto/public/protos/config/data_source_config.pzc.h"
+#include "perfetto/public/protos/config/protovm/protovm_config.pzc.h"
 #include "perfetto/public/protos/config/trace_config.pzc.h"
 #include "perfetto/public/protos/config/track_event/track_event_config.pzc.h"
 #include "perfetto/public/tracing_session.h"
@@ -53,6 +54,10 @@ std::vector<uint8_t> TracingSession::Builder::BuildProtoConfig() {
     perfetto_protos_TraceConfig_begin_buffers(&cfg, &buffers);
 
     perfetto_protos_TraceConfig_BufferConfig_set_size_kb(&buffers, 1024);
+    if (enable_protovm_config_) {
+      perfetto_protos_TraceConfig_BufferConfig_set_experimental_mode(
+          &buffers, perfetto_protos_TraceConfig_BufferConfig_TRACE_BUFFER_V2);
+    }
 
     perfetto_protos_TraceConfig_end_buffers(&cfg, &buffers);
   }
@@ -68,6 +73,14 @@ std::vector<uint8_t> TracingSession::Builder::BuildProtoConfig() {
 
       perfetto_protos_DataSourceConfig_set_cstr_name(&ds_cfg,
                                                      data_source_name_.c_str());
+      if (enable_protovm_config_) {
+        struct perfetto_protos_ProtoVmConfig protovm_cfg;
+        perfetto_protos_DataSourceConfig_begin_protovm_config(&ds_cfg,
+                                                              &protovm_cfg);
+        perfetto_protos_ProtoVmConfig_set_memory_limit_kb(&protovm_cfg, 1024);
+        perfetto_protos_DataSourceConfig_end_protovm_config(&ds_cfg,
+                                                            &protovm_cfg);
+      }
       if (!enabled_categories_.empty() || !disabled_categories_.empty()) {
         perfetto_protos_TrackEventConfig te_cfg;
         perfetto_protos_DataSourceConfig_begin_track_event_config(&ds_cfg,
@@ -89,6 +102,15 @@ std::vector<uint8_t> TracingSession::Builder::BuildProtoConfig() {
 
     perfetto_protos_TraceConfig_end_data_sources(&cfg, &data_sources);
   }
+
+  if (clear_period_ms_ > 0) {
+    struct perfetto_protos_TraceConfig_IncrementalStateConfig is_cfg;
+    perfetto_protos_TraceConfig_begin_incremental_state_config(&cfg, &is_cfg);
+    perfetto_protos_TraceConfig_IncrementalStateConfig_set_clear_period_ms(
+        &is_cfg, clear_period_ms_);
+    perfetto_protos_TraceConfig_end_incremental_state_config(&cfg, &is_cfg);
+  }
+
   size_t cfg_size = PerfettoStreamWriterGetWrittenSize(&writer.writer);
   std::vector<uint8_t> cfg_buf(cfg_size);
   PerfettoHeapBufferCopyInto(hb, &writer.writer, cfg_buf.data(), cfg_size);

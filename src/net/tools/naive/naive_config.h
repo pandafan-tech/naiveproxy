@@ -12,7 +12,9 @@
 
 #include "base/files/file_path.h"
 #include "base/logging.h"
+#include "base/logging/logging_settings.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "net/base/auth.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/ip_address.h"
@@ -41,6 +43,14 @@ struct NaiveConfig {
 
   int insecure_concurrency = 1;
 
+#if BUILDFLAG(IS_ANDROID)
+  int tunnel_timeout = 600;
+  int idle_timeout = 300;
+#else
+  int tunnel_timeout = 1800;
+  int idle_timeout = 600;
+#endif
+
   HttpRequestHeaders extra_headers;
 
   // The last server is assumed to be Naive.
@@ -65,7 +75,7 @@ struct NaiveConfig {
   NaiveConfig();
   NaiveConfig(const NaiveConfig&);
   ~NaiveConfig();
-  bool Parse(const base::Value::Dict& value);
+  bool Parse(const base::DictValue& value);
 };
 
 }  // namespace net

@@ -4,7 +4,6 @@
 
 #include "net/quic/quic_context.h"
 
-#include "base/containers/contains.h"
 #include "net/base/features.h"
 #include "net/quic/platform/impl/quic_chromium_clock.h"
 #include "net/quic/quic_chromium_connection_helper.h"
@@ -17,6 +16,10 @@
 namespace net {
 
 namespace {
+
+// The maximum receive window sizes for QUIC sessions and streams.
+const int32_t kQuicSessionMaxRecvWindowSize = 15 * 1024 * 1024;  // 15 MB
+const int32_t kQuicStreamMaxRecvWindowSize = 6 * 1024 * 1024;    // 6 MB
 
 // Set the maximum number of undecryptable packets the connection will store.
 const int32_t kMaxUndecryptablePackets = 100;
@@ -90,9 +93,8 @@ quic::QuicConfig InitializeQuicConfig(const QuicParams& params) {
   config.SetClientConnectionOptions(params.client_connection_options);
   config.set_max_undecryptable_packets(kMaxUndecryptablePackets);
   config.SetInitialSessionFlowControlWindowToSend(
-      params.initial_session_recv_window_size);
-  config.SetInitialStreamFlowControlWindowToSend(
-      params.initial_stream_recv_window_size);
+      kQuicSessionMaxRecvWindowSize);
+  config.SetInitialStreamFlowControlWindowToSend(kQuicStreamMaxRecvWindowSize);
   config.SetBytesForConnectionIdToSend(0);
   return config;
 }

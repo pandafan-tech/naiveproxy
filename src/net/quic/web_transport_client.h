@@ -12,6 +12,8 @@
 #include "base/memory/scoped_refptr.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
+#include "net/log/net_log_with_source.h"
 #include "net/quic/web_transport_error.h"
 #include "net/third_party/quiche/src/quiche/quic/core/crypto/web_transport_fingerprint_proof_verifier.h"
 #include "net/third_party/quiche/src/quiche/quic/core/quic_types.h"
@@ -79,6 +81,7 @@ class NET_EXPORT WebTransportClientVisitor {
   //
   // See https://wicg.github.io/local-network-access/
   virtual void OnLocalNetworkAccessCheck(const IPEndPoint& server_address,
+                                         const NetLogWithSource& net_log,
                                          CompletionOnceCallback callback) = 0;
 
   // State change notifiers.
@@ -110,6 +113,16 @@ struct NET_EXPORT WebTransportParameters {
   WebTransportParameters(const WebTransportParameters&);
   WebTransportParameters(WebTransportParameters&&);
 
+  // A hint for what kind of congestion control algorithm the application
+  // prefers. Corresponds to the WebTransportCongestionControl enum in the
+  // W3C WebTransport specification.
+  // https://w3c.github.io/webtransport/#enumdef-webtransportcongestioncontrol
+  enum class CongestionControlHint {
+    kDefault,
+    kThroughput,
+    kLowLatency,
+  };
+
   bool allow_pooling = false;
 
   bool enable_web_transport_http3 = false;
@@ -122,6 +135,10 @@ struct NET_EXPORT WebTransportParameters {
   // A vector of strings offered by client as a list of potential subprotocols.
   // https://w3c.github.io/webtransport/#dom-webtransportoptions-protocols
   std::vector<std::string> application_protocols;
+
+  // Defaults to kDefault (no algorithm change).
+  CongestionControlHint congestion_control_hint =
+      CongestionControlHint::kDefault;
 };
 
 // An abstract base for a WebTransport client.  Most of the useful operations
@@ -157,6 +174,7 @@ std::unique_ptr<WebTransportClient> CreateWebTransportClient(
     const url::Origin& origin,
     WebTransportClientVisitor* visitor,
     const NetworkAnonymizationKey& anonymization_key,
+    handles::NetworkHandle target_network,
     URLRequestContext* context,
     const WebTransportParameters& parameters);
 

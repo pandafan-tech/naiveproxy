@@ -60,12 +60,6 @@ void GetOsVersionStringAndNumbers(std::string* version_string,
                                          *minor_version, *bugfix_version);
 }
 
-std::string HardwareManufacturerName() {
-  char device_model_str[PROP_VALUE_MAX];
-  __system_property_get("ro.product.manufacturer", device_model_str);
-  return std::string(device_model_str);
-}
-
 }  // anonymous namespace
 
 namespace base {
@@ -131,10 +125,23 @@ std::string SysInfo::GetAndroidHardwareClass() {
   return std::string(os_hardware_id_str);
 }
 
+std::string SysInfo::GetAndroidFirstApiLevel() {
+  char os_first_api_level[PROP_VALUE_MAX];
+  __system_property_get("ro.product.first_api_level", os_first_api_level);
+  return std::string(os_first_api_level);
+}
+
+// static
+std::string SysInfo::HardwareManufacturer() {
+  char device_model_str[PROP_VALUE_MAX];
+  __system_property_get("ro.product.manufacturer", device_model_str);
+  return std::string(device_model_str);
+}
+
 // static
 SysInfo::HardwareInfo SysInfo::GetHardwareInfoSync() {
   HardwareInfo info;
-  info.manufacturer = HardwareManufacturerName();
+  info.manufacturer = HardwareManufacturer();
   info.model = HardwareModelName();
   DCHECK(IsStringUTF8(info.manufacturer));
   DCHECK(IsStringUTF8(info.model));

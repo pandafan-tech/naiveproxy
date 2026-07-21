@@ -16,6 +16,7 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/observer_list.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_tokenizer.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -30,11 +31,11 @@
 #include "net/net_jni_headers/ProxyChangeListener_jni.h"
 
 using base::android::AttachCurrentThread;
-using base::android::ConvertUTF8ToJavaString;
-using base::android::ConvertJavaStringToUTF8;
 using base::android::CheckException;
 using base::android::ClearException;
-using base::android::JavaParamRef;
+using base::android::ConvertJavaStringToUTF8;
+using base::android::ConvertUTF8ToJavaString;
+using base::android::JavaRef;
 using base::android::ScopedJavaGlobalRef;
 using base::android::ScopedJavaLocalRef;
 
@@ -45,9 +46,8 @@ namespace {
 typedef ProxyConfigServiceAndroid::GetPropertyCallback GetPropertyCallback;
 
 // Returns whether the provided string was successfully converted to a port.
-bool ConvertStringToPort(const std::string& port, int* output) {
-  url::Component component(0, port.size());
-  int result = url::ParsePort(port.c_str(), component);
+bool ConvertStringToPort(std::string_view port, int* output) {
+  int result = url::ParsePort(port, url::Component(port));
   if (result == url::PORT_INVALID || result == url::PORT_UNSPECIFIED)
     return false;
   *output = result;
@@ -98,7 +98,7 @@ ProxyServer LookupSocksProxy(const GetPropertyCallback& get_property) {
 
 void AddBypassRules(const std::string& scheme,
                     const GetPropertyCallback& get_property,
-                    ProxyBypassRules* bypass_rules) {
+                    ProxyHostMatchingRules* bypass_rules) {
   // The format of a hostname pattern is a list of hostnames that are separated
   // by | and that use * as a wildcard. For example, setting the
   // http.nonProxyHosts property to *.android.com|*.kernel.org will cause
@@ -117,7 +117,7 @@ void AddBypassRules(const std::string& scheme,
       continue;
     // '?' is not one of the specified pattern characters above.
     DCHECK_EQ(std::string::npos, pattern.find('?'));
-    bypass_rules->AddRuleFromString(scheme + "://" + pattern);
+    bypass_rules->AddRuleFromString(base::StrCat({scheme, "://", pattern}));
   }
 }
 
@@ -431,10 +431,10 @@ class ProxyConfigServiceAndroid::Delegate
     // ProxyConfigServiceAndroid::JNIDelegate overrides.
     void ProxySettingsChangedTo(
         JNIEnv* env,
-        const JavaParamRef<jstring>& jhost,
-        jint jport,
-        const JavaParamRef<jstring>& jpac_url,
-        const JavaParamRef<jobjectArray>& jexclusion_list) override {
+        const JavaRef<jstring>& jhost,
+        int32_t jport,
+        const JavaRef<jstring>& jpac_url,
+        const JavaRef<jobjectArray>& jexclusion_list) override {
       std::string host = ConvertJavaStringToUTF8(env, jhost);
       std::string pac_url;
       if (jpac_url)
@@ -564,3 +564,5 @@ void ProxyConfigServiceAndroid::ClearProxyOverride(base::OnceClosure callback) {
 }
 
 } // namespace net
+
+DEFINE_JNI(ProxyChangeListener)

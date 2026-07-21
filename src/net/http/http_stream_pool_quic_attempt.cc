@@ -52,7 +52,7 @@ HttpStreamPool::QuicAttempt::QuicAttempt(AttemptManager* manager,
 
   net_log_.BeginEvent(
       NetLogEventType::HTTP_STREAM_POOL_QUIC_ATTEMPT_ALIVE, [&] {
-        base::Value::Dict dict;
+        base::DictValue dict;
         dict.Set("quic_version",
                  quic::ParsedQuicVersionToString(quic_endpoint_.quic_version));
         dict.Set("ip_endpoint", quic_endpoint_.ip_endpoint.ToString());
@@ -102,7 +102,9 @@ void HttpStreamPool::QuicAttempt::Start() {
       manager_->service_endpoint_request()->GetDnsAliasResults();
   int rv = request_->RequestSession(
       quic_endpoint_, cert_verify_flags, dns_resolution_start_time,
-      dns_resolution_end_time, /*use_dns_aliases=*/true, std::move(dns_aliases),
+      dns_resolution_end_time,
+      manager_->service_endpoint_request()->GetResolutionDetails(),
+      /*use_dns_aliases=*/true, std::move(dns_aliases),
       manager_->CalculateMultiplexedSessionCreationInitiator(),
       /*connection_management_config=*/std::nullopt, net_log_,
       base::BindOnce(&QuicAttempt::OnSessionAttemptComplete,
@@ -117,8 +119,8 @@ void HttpStreamPool::QuicAttempt::Start() {
   }
 }
 
-base::Value::Dict HttpStreamPool::QuicAttempt::GetInfoAsValue() const {
-  base::Value::Dict dict;
+base::DictValue HttpStreamPool::QuicAttempt::GetInfoAsValue() const {
+  base::DictValue dict;
   dict.Set("quic_version",
            quic::ParsedQuicVersionToString(quic_endpoint_.quic_version));
   dict.Set("ip_endpoint", quic_endpoint_.ip_endpoint.ToString());

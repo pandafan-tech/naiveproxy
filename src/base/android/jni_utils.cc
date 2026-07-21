@@ -11,7 +11,7 @@
 #include "base/synchronization/lock.h"
 
 // Must come after all headers that specialize FromJniType() / ToJniType().
-#include "base/base_minimal_jni/JNIUtils_jni.h"
+#include "base/jni_utils_jni/JNIUtils_jni.h"
 
 namespace base {
 namespace android {
@@ -19,7 +19,8 @@ namespace android {
 namespace {
 struct LockAndMap {
   base::Lock lock;
-  base::flat_map<const char*, ScopedJavaGlobalRef<jobject>> map;
+  base::flat_map<const char*, ScopedJavaGlobalRef<jobject>> map
+      GUARDED_BY(lock);
 };
 LockAndMap* GetLockAndMap() {
   static base::NoDestructor<LockAndMap> lock_and_map;
@@ -38,11 +39,11 @@ jobject GetSplitClassLoader(JNIEnv* env, const char* split_name) {
   ScopedJavaGlobalRef<jobject> class_loader(
       env, Java_JNIUtils_getSplitClassLoader(env, split_name));
   jobject class_loader_obj = class_loader.obj();
-  lock_and_map->map.insert({split_name, std::move(class_loader)});
+  lock_and_map->map.try_emplace(split_name, std::move(class_loader));
   return class_loader_obj;
 }
 
 }  // namespace android
 }  // namespace base
 
-DEFINE_JNI_FOR_JNIUtils()
+DEFINE_JNI(JNIUtils)

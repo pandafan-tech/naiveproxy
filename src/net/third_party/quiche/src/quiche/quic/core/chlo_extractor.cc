@@ -4,6 +4,7 @@
 
 #include "quiche/quic/core/chlo_extractor.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -88,10 +89,10 @@ class ChloFramerVisitor : public QuicFramerVisitorInterface,
   void OnPacketComplete() override {}
   bool IsValidStatelessResetToken(
       const StatelessResetToken& token) const override;
-  void OnAuthenticatedIetfStatelessResetPacket(
-      const QuicIetfStatelessResetPacket& /*packet*/) override {}
+  void OnAuthenticatedIetfStatelessResetPacket() override {}
   void OnKeyUpdate(KeyUpdateReason /*reason*/) override;
   void OnDecryptedFirstPacketInKeyPhase() override;
+  void OnSconePacket(uint8_t /*signal*/) override {}
   std::unique_ptr<QuicDecrypter> AdvanceKeysAndCreateCurrentOneRttDecrypter()
       override;
   std::unique_ptr<QuicEncrypter> CreateCurrentOneRttEncrypter() override;
@@ -159,7 +160,7 @@ void ChloFramerVisitor::OnUndecryptablePacket(
     bool /*has_decryption_key*/) {}
 
 bool ChloFramerVisitor::OnStreamFrame(const QuicStreamFrame& frame) {
-  if (QuicVersionUsesCryptoFrames(framer_->transport_version())) {
+  if (VersionIsIetfQuic(framer_->transport_version())) {
     // CHLO will be sent in CRYPTO frames in v47 and above.
     return false;
   }
@@ -173,7 +174,7 @@ bool ChloFramerVisitor::OnStreamFrame(const QuicStreamFrame& frame) {
 }
 
 bool ChloFramerVisitor::OnCryptoFrame(const QuicCryptoFrame& frame) {
-  if (!QuicVersionUsesCryptoFrames(framer_->transport_version())) {
+  if (!VersionIsIetfQuic(framer_->transport_version())) {
     // CHLO will be in stream frames before v47.
     return false;
   }

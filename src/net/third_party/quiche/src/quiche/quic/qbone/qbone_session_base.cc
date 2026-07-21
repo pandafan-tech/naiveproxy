@@ -44,7 +44,7 @@ QboneSessionBase::QboneSessionBase(
       (std::numeric_limits<uint32_t>::max() / kMaxAvailableStreamsMultiplier) -
       1;
   this->config()->SetMaxBidirectionalStreamsToSend(max_streams);
-  if (VersionHasIetfQuicFrames(transport_version())) {
+  if (VersionIsIetfQuic(transport_version())) {
     this->config()->SetMaxUnidirectionalStreamsToSend(max_streams);
   }
 }
@@ -92,11 +92,6 @@ void QboneSessionBase::OnDatagramReceived(absl::string_view datagram) {
 
 QuicStream* QboneSessionBase::CreateIncomingStream(QuicStreamId id) {
   return ActivateDataStream(CreateDataStream(id));
-}
-
-QuicStream* QboneSessionBase::CreateIncomingStream(PendingStream* /*pending*/) {
-  QUICHE_NOTREACHED();
-  return nullptr;
 }
 
 bool QboneSessionBase::ShouldKeepConnectionAlive() const {

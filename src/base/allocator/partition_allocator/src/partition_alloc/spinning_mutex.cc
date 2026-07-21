@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "partition_alloc/spinning_mutex.h"
 
 #include <atomic>
@@ -41,14 +36,13 @@
 #include <sched.h>
 #define PA_YIELD_THREAD sched_yield()
 #else  // Other OS
-#warning "Thread yield not supported on this OS."
+#error "Thread yield not supported on this OS."
 #define PA_YIELD_THREAD ((void)0)
 #endif
 
 #endif
 
 namespace partition_alloc::internal {
-
 namespace {
 
 // Pointer to the `LockMetricsRecorder` that all spinning mutexes record into.
@@ -117,6 +111,7 @@ void SpinningMutex::Reinit() {
 void SpinningMutex::AcquireSpinThenBlock() {
   int tries = 0;
   int backoff = 1;
+
   do {
     if (Try()) [[likely]] {
       return;
@@ -159,10 +154,11 @@ PA_ALWAYS_INLINE long FutexSyscall(volatile void* ftx, int op, int value) {
                         nullptr, 0);
   if (retval == -1) {
     // These are programming errors, check them.
-    PA_DCHECK((errno != EPERM) || (errno != EACCES) || (errno != EINVAL) ||
-              (errno != ENOSYS))
+    [[maybe_unused]] const int futex_errno = errno;
+    PA_DCHECK((futex_errno != EPERM) && (futex_errno != EACCES) &&
+              (futex_errno != EINVAL) && (futex_errno != ENOSYS))
         << "FutexSyscall(" << reinterpret_cast<uintptr_t>(ftx) << ", " << op
-        << ", " << value << ")  failed with errno " << errno;
+        << ", " << value << ")  failed with errno " << futex_errno;
   }
 
   errno = saved_errno;

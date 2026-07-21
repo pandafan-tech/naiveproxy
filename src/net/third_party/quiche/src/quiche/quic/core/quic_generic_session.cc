@@ -31,6 +31,10 @@ class NoOpProofHandler : public QuicCryptoClientStream::ProofHandler {
  public:
   void OnProofValid(const QuicCryptoClientConfig::CachedState&) override {}
   void OnProofVerifyDetailsAvailable(const ProofVerifyDetails&) override {}
+  bool OnCertificateRequested(
+      const std::vector<std::string>& cert_authorities) override {
+    return false;
+  }
 };
 
 class NoOpServerCryptoHelper : public QuicCryptoServerStreamBase::Helper {
@@ -60,6 +64,7 @@ class QUICHE_EXPORT QuicGenericStream : public QuicStream {
                        id, session->connection()->perspective(),
                        session->IsIncomingStream(id), session->version())),
         adapter_(session, this, sequencer(), std::nullopt) {
+    sequencer()->set_level_triggered(true);
     adapter_.SetPriority(webtransport::StreamPriority{0, 0});
   }
 

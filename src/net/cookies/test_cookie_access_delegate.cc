@@ -11,7 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/callback.h"
@@ -51,7 +50,8 @@ CookieScopeSemantics TestCookieAccessDelegate::GetScopeSemantics(
 
 bool TestCookieAccessDelegate::ShouldIgnoreSameSiteRestrictions(
     const GURL& url,
-    const SiteForCookies& site_for_cookies) const {
+    const SiteForCookies& site_for_cookies,
+    const url::Origin& top_level_origin) const {
   auto it =
       ignore_samesite_restrictions_schemes_.find(site_for_cookies.scheme());
   if (it == ignore_samesite_restrictions_schemes_.end())
@@ -97,22 +97,6 @@ TestCookieAccessDelegate::FindFirstPartySetEntry(
 
   return entry != first_party_sets_.end() ? std::make_optional(entry->second)
                                           : std::nullopt;
-}
-
-std::optional<base::flat_map<SchemefulSite, FirstPartySetEntry>>
-TestCookieAccessDelegate::FindFirstPartySetEntries(
-    const base::flat_set<SchemefulSite>& sites,
-    base::OnceCallback<void(base::flat_map<SchemefulSite, FirstPartySetEntry>)>
-        callback) const {
-  std::vector<std::pair<SchemefulSite, FirstPartySetEntry>> mapping;
-  for (const SchemefulSite& site : sites) {
-    std::optional<FirstPartySetEntry> entry = FindFirstPartySetEntry(site);
-    if (entry)
-      mapping.emplace_back(site, *entry);
-  }
-
-  return RunMaybeAsync<base::flat_map<SchemefulSite, FirstPartySetEntry>>(
-      mapping, std::move(callback));
 }
 
 template <class T>

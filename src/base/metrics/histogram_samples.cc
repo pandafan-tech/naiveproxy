@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/390223051): Remove C-library calls to fix the errors.
-#pragma allow_unsafe_libc_calls
-#endif
-
 #include "base/metrics/histogram_samples.h"
 
 #include <limits>
@@ -15,6 +10,7 @@
 
 #include "base/compiler_specific.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/stack_allocated.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/numerics/clamped_math.h"
@@ -40,6 +36,8 @@ constexpr size_t kSizeMax = std::numeric_limits<size_t>::max();
 constexpr int32_t kDisabledSingleSample = -1;
 
 class SampleCountPickleIterator : public SampleCountIterator {
+  STACK_ALLOCATED();
+
  public:
   explicit SampleCountPickleIterator(PickleIterator* iter);
 
@@ -226,7 +224,7 @@ bool HistogramSamples::AtomicSingleSample::IsDisabled() const {
 HistogramSamples::LocalMetadata::LocalMetadata() {
   // This is the same way it's done for persistent metadata since no ctor
   // is called for the data members in that case.
-  memset(this, 0, sizeof(*this));
+  UNSAFE_TODO(memset(this, 0, sizeof(*this)));
 }
 
 HistogramSamples::HistogramSamples(uint64_t id, Metadata* meta) : meta_(meta) {
@@ -358,9 +356,9 @@ void HistogramSamples::RecordNegativeSample(NegativeSampleReason reason,
                      static_cast<int32_t>(id()));
 }
 
-base::Value::Dict HistogramSamples::ToGraphDict(std::string_view histogram_name,
-                                                int32_t flags) const {
-  base::Value::Dict dict;
+base::DictValue HistogramSamples::ToGraphDict(std::string_view histogram_name,
+                                              int32_t flags) const {
+  base::DictValue dict;
   dict.Set("name", histogram_name);
   dict.Set("header", GetAsciiHeader(histogram_name, flags));
   dict.Set("body", GetAsciiBody());

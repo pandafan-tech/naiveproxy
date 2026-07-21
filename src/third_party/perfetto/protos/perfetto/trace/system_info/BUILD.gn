@@ -15,5 +15,9 @@
 import("../../../../gn/proto_library.gni")
 
 perfetto_proto_library("@TYPE@") {
-  sources = [ "cpu_info.proto" ]
+  sources = [
+    "cpu_info.proto",
+    "gpu_info.proto",
+    "interrupt_info.proto",
+  ]
 }

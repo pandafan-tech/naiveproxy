@@ -56,20 +56,6 @@ struct NET_EXPORT SSLConfig {
   // configuration.
   int GetCertVerifyFlags() const;
 
-  // Helper function to select TLS Trust Anchor IDs to advertise in the TLS
-  // handshake, so that the server can serve a certificate that the client
-  // trusts. |server_advertised_trust_anchor_ids| is a list of Trust Anchor IDs,
-  // in binary representation, that the server has provided out-of-band (e.g. in
-  // a DNS record). |trusted_trust_anchor_ids| is the set of Trust Anchor IDs,
-  // in binary representation, that the client trusts. The intersection is
-  // returned in wire format (a series of 8-bit length prefixed non-empty
-  // strings) such that it can be passed into BoringSSL.
-  static std::vector<uint8_t> SelectTrustAnchorIDs(
-      const std::vector<std::vector<uint8_t>>&
-          server_advertised_trust_anchor_ids,
-      const absl::flat_hash_set<std::vector<uint8_t>>&
-          trusted_trust_anchor_ids);
-
   // If specified, the minimum and maximum protocol versions that are enabled.
   // (Use the SSL_PROTOCOL_VERSION_xxx enumerators defined above.) If
   // unspecified, values from the SSLConfigService are used.
@@ -188,6 +174,10 @@ struct NET_EXPORT SSLConfig {
   // enough to implement the extension and can process the server's list of
   // available trust anchors.
   std::optional<std::vector<uint8_t>> trust_anchor_ids;
+
+  // If not nullopt, the amount of server padding to request from the server.
+  // Experimental, may be removed at any time.
+  std::optional<uint16_t> server_padding_to_request = std::nullopt;
 };
 
 }  // namespace net

@@ -30,11 +30,14 @@
 #include "src/trace_processor/importers/common/thread_state_tracker.h"
 #include "src/trace_processor/importers/common/track_tracker.h"
 #include "src/trace_processor/importers/common/tracks.h"
+#include "src/trace_processor/importers/etw/disk_io_tracker.h"
+#include "src/trace_processor/importers/etw/file_io_tracker.h"
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
 
 #include "protos/perfetto/trace/etw/etw.pbzero.h"
 #include "protos/perfetto/trace/etw/etw_event.pbzero.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/types/trace_processor_context.h"
 
 namespace perfetto {
@@ -65,12 +68,12 @@ bool IsIoWait(uint8_t reason) {
 EtwParser::EtwParser(TraceProcessorContext* context)
     : context_(context),
       anonymized_process_string_id_(
-          context->storage->InternString("Anonymized Process")) {}
+          context->storage->InternString("Anonymized Process")),
+      disk_io_tracker_(context) {}
 
 base::Status EtwParser::ParseEtwEvent(uint32_t cpu,
                                       int64_t ts,
                                       const TracePacketData& data) {
-  using protos::pbzero::EtwTraceEvent;
   const TraceBlobView& event = data.packet;
   protos::pbzero::EtwTraceEvent::Decoder decoder(event.data(), event.length());
 
@@ -84,6 +87,37 @@ base::Status EtwParser::ParseEtwEvent(uint32_t cpu,
 
   if (decoder.has_mem_info()) {
     ParseMemInfo(ts, decoder.mem_info());
+  }
+
+  const auto& file_io_tracker = context_->file_io_tracker;
+  const UniqueTid utid =
+      context_->process_tracker->GetOrCreateThread(decoder.thread_id());
+  if (decoder.has_file_io_create()) {
+    file_io_tracker->ParseFileIoCreate(ts, utid, decoder.file_io_create());
+  }
+  if (decoder.has_file_io_dir_enum()) {
+    file_io_tracker->ParseFileIoDirEnum(ts, utid, decoder.file_io_dir_enum());
+  }
+  if (decoder.has_file_io_info()) {
+    file_io_tracker->ParseFileIoInfo(ts, utid, decoder.file_io_info());
+  }
+  if (decoder.has_file_io_read_write()) {
+    file_io_tracker->ParseFileIoReadWrite(ts, utid,
+                                          decoder.file_io_read_write());
+  }
+  if (decoder.has_file_io_simple_op()) {
+    file_io_tracker->ParseFileIoSimpleOp(ts, utid, decoder.file_io_simple_op());
+  }
+  if (decoder.has_file_io_op_end()) {
+    file_io_tracker->ParseFileIoOpEnd(ts, utid, decoder.file_io_op_end());
+  }
+  if (decoder.has_file_io_path_operation()) {
+    file_io_tracker->ParseFileIoPathOperation(ts, utid,
+                                              decoder.file_io_path_operation());
+  }
+
+  if (decoder.has_disk_io()) {
+    disk_io_tracker_.ParseDiskIo(ts, utid, decoder.disk_io());
   }
 
   return base::OkStatus();
@@ -245,7 +279,7 @@ void EtwParser::PushSchedSwitch(uint32_t cpu,
   uint32_t pending_slice_idx = pending_sched->pending_slice_storage_idx;
   StringId prev_state_string_id = TaskStateToStringId(prev_state);
   if (prev_state_string_id == kNullStringId) {
-    context_->storage->IncrementStats(stats::task_state_invalid);
+    context_->stats_tracker->IncrementStats(stats::task_state_invalid);
   }
   if (pending_slice_idx < std::numeric_limits<uint32_t>::max()) {
     prev_pid_match_prev_next_pid = prev_tid == pending_sched->last_pid;
@@ -254,7 +288,8 @@ void EtwParser::PushSchedSwitch(uint32_t cpu,
                                                        prev_state_string_id);
     } else {
       // If the pids are not consistent, make a note of this.
-      context_->storage->IncrementStats(stats::mismatched_sched_switch_tids);
+      context_->stats_tracker->IncrementStats(
+          stats::mismatched_sched_switch_tids);
     }
   }
 

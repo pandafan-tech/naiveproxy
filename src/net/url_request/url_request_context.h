@@ -16,21 +16,26 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/weak_ptr.h"
 #include "base/threading/thread_checker.h"
 #include "base/types/pass_key.h"
 #include "build/build_config.h"
 #include "net/base/net_export.h"
 #include "net/base/network_handle.h"
 #include "net/base/request_priority.h"
+#include "net/disk_cache/cache_encryption_delegate.h"
 #include "net/log/net_log_source.h"
 #include "net/net_buildflags.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "net/url_request/url_request.h"
 
+namespace unexportable_keys {
+class UnexportableKeyService;
+}
+
 namespace net {
 class CertVerifier;
 class ClientSocketFactory;
+class DnsPlatformAttemptFactory;
 class CookieStore;
 class HostResolver;
 class HttpAuthHandlerFactory;
@@ -175,6 +180,10 @@ class NET_EXPORT URLRequestContext final {
 
   QuicContext* quic_context() const { return quic_context_.get(); }
 
+  DnsPlatformAttemptFactory* dns_platform_attempt_factory() const {
+    return dns_platform_attempt_factory_.get();
+  }
+
   // Gets the URLRequest objects that hold a reference to this
   // URLRequestContext.
   std::set<raw_ptr<const URLRequest, SetExperimental>>* url_requests() const {
@@ -217,6 +226,15 @@ class NET_EXPORT URLRequestContext final {
 #endif
   }
   // May return nullptr if the feature is disabled.
+  unexportable_keys::UnexportableKeyService* unexportable_key_service() const {
+#if BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
+    return unexportable_key_service_.get();
+#else
+    return nullptr;
+#endif
+  }
+
+  // May return nullptr if the feature is disabled.
   device_bound_sessions::SessionService* device_bound_session_service() const {
 #if BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
     return device_bound_session_service_.get();
@@ -238,6 +256,8 @@ class NET_EXPORT URLRequestContext final {
 
   // If != handles::kInvalidNetworkHandle, the network which this
   // context has been bound to.
+  // TODO(crbug.com/495684670): Remove this once multi-network Cronet and CCT
+  // no longer depend on network-bound URLRequestContexts.
   handles::NetworkHandle bound_network() const { return bound_network_; }
 
   void AssertCalledOnValidThread() {
@@ -247,14 +267,6 @@ class NET_EXPORT URLRequestContext final {
   // DEPRECATED: Do not use this even in tests. This is for a legacy use.
   void SetJobFactoryForTesting(const URLRequestJobFactory* job_factory) {
     job_factory_ = job_factory;
-  }
-
-  const std::optional<std::string>& cookie_deprecation_label() const {
-    return cookie_deprecation_label_;
-  }
-
-  void set_cookie_deprecation_label(const std::optional<std::string>& label) {
-    cookie_deprecation_label_ = label;
   }
 
  private:
@@ -292,6 +304,11 @@ class NET_EXPORT URLRequestContext final {
       NetworkQualityEstimator* network_quality_estimator);
   void set_client_socket_factory(
       std::unique_ptr<ClientSocketFactory> client_socket_factory);
+  void set_cache_encryption_delegate(
+      std::unique_ptr<CacheEncryptionDelegate> cache_encryption_delegate);
+  void set_dns_platform_attempt_factory(
+      std::unique_ptr<DnsPlatformAttemptFactory> dns_platform_attempt_factory);
+
 #if BUILDFLAG(ENABLE_REPORTING)
   void set_persistent_reporting_and_nel_store(
       std::unique_ptr<PersistentReportingAndNelStore>
@@ -326,6 +343,9 @@ class NET_EXPORT URLRequestContext final {
   void set_device_bound_session_service(
       std::unique_ptr<device_bound_sessions::SessionService>
           device_bound_session_service);
+  void set_unexportable_key_service(
+      std::unique_ptr<unexportable_keys::UnexportableKeyService>
+          unexportable_key_service);
 #endif  // BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
 
   std::unique_ptr<HostResolver> host_resolver_;
@@ -344,6 +364,8 @@ class NET_EXPORT URLRequestContext final {
   std::unique_ptr<SCTAuditingDelegate> sct_auditing_delegate_;
   std::unique_ptr<QuicContext> quic_context_;
   std::unique_ptr<ClientSocketFactory> client_socket_factory_;
+  std::unique_ptr<CacheEncryptionDelegate> cache_encryption_delegate_;
+  std::unique_ptr<DnsPlatformAttemptFactory> dns_platform_attempt_factory_;
 
   // The storage duplication for URLRequestJobFactory is needed because of
   // SetJobFactoryForTesting. Once this method is removable, we can only store a
@@ -375,6 +397,8 @@ class NET_EXPORT URLRequestContext final {
       url_requests_;
 
 #if BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
+  std::unique_ptr<unexportable_keys::UnexportableKeyService>
+      unexportable_key_service_;
   std::unique_ptr<device_bound_sessions::SessionStore>
       device_bound_session_store_;
   std::unique_ptr<device_bound_sessions::SessionService>
@@ -392,8 +416,6 @@ class NET_EXPORT URLRequestContext final {
   // Triggers a DCHECK if a NetworkAnonymizationKey/IsolationInfo is not
   // provided to a request when true.
   bool require_network_anonymization_key_ = false;
-
-  std::optional<std::string> cookie_deprecation_label_;
 
   handles::NetworkHandle bound_network_;
 

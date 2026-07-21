@@ -27,6 +27,7 @@
 #include "base/win/scoped_bstr.h"
 #include "base/win/scoped_process_information.h"
 #include "base/win/scoped_variant.h"
+#include "base/win/shell_util.h"
 #include "base/win/startup_information.h"
 #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 
@@ -43,23 +44,50 @@ bool IsProcessRunningAtMediumOrLower(ProcessId process_id) {
   return level != INTEGRITY_UNKNOWN && level <= MEDIUM_INTEGRITY;
 }
 
+bool IsProcessRunningSplitToken(ProcessId process_id) {
+  auto process =
+      Process::OpenWithAccess(process_id, PROCESS_QUERY_LIMITED_INFORMATION);
+  if (!process.IsValid()) {
+    return false;
+  }
+  std::optional<win::AccessToken> token =
+      AccessToken::FromProcess(process.Handle());
+  return token && token->IsSplitToken();
+}
+
+expected<Process, DWORD> LaunchProcessDirectly(
+    const CommandLine& command_line) {
+  LaunchOptions options;
+  options.grant_foreground_privilege = true;
+  if (auto process = LaunchProcess(command_line, options); process.IsValid()) {
+    return ok(std::move(process));
+  }
+  return unexpected(::GetLastError());
+}
+
 // Based on
 // https://learn.microsoft.com/en-us/archive/blogs/aaron_margosis/faq-how-do-i-start-a-program-as-the-desktop-user-from-an-elevated-app.
-expected<Process, DWORD> RunDeElevated(const CommandLine& command_line) {
+expected<Process, DWORD> RunDeElevated(
+    const CommandLine& command_line,
+    std::optional<ProcessId> medium_process_id) {
   if (!::IsUserAnAdmin()) {
-    if (auto process = LaunchProcess(command_line, {}); process.IsValid()) {
-      return ok(std::move(process));
-    }
-    return unexpected(::GetLastError());
+    return LaunchProcessDirectly(command_line);
   }
 
-  ProcessId explorer_pid = GetExplorerPid();
-  if (!explorer_pid || !IsProcessRunningAtMediumOrLower(explorer_pid)) {
+  const ProcessId medium_pid =
+      medium_process_id ? *medium_process_id : GetExplorerPid();
+  if (!medium_pid) {
+    return unexpected(static_cast<DWORD>(ERROR_ACCESS_DENIED));
+  }
+  if (!IsProcessRunningSplitToken(medium_pid)) {
+    return LaunchProcessDirectly(command_line);
+  }
+  if (!IsProcessRunningAtMediumOrLower(medium_pid)) {
     return unexpected(static_cast<DWORD>(ERROR_ACCESS_DENIED));
   }
 
   auto shell_process =
-      Process::OpenWithAccess(explorer_pid, PROCESS_QUERY_LIMITED_INFORMATION);
+      Process::OpenWithAccess(medium_pid, PROCESS_QUERY_LIMITED_INFORMATION);
   if (!shell_process.IsValid()) {
     return unexpected(::GetLastError());
   }
@@ -113,81 +141,18 @@ expected<Process, DWORD> RunDeElevated(const CommandLine& command_line) {
 }
 
 HRESULT RunDeElevatedNoWait(const CommandLine& command_line) {
-  return RunDeElevatedNoWait(command_line.GetProgram().value(),
-                             command_line.GetArgumentsString());
+  return RunShellExecuteViaExplorer(command_line.GetProgram().value(),
+                                    command_line.GetArgumentsString());
 }
 
 HRESULT RunDeElevatedNoWait(const std::wstring& path,
                             const std::wstring& parameters,
                             std::optional<std::wstring_view> current_directory,
                             bool start_hidden) {
-  Microsoft::WRL::ComPtr<IShellWindows> shell;
-  HRESULT hr = ::CoCreateInstance(CLSID_ShellWindows, nullptr,
-                                  CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&shell));
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  LONG hwnd = 0;
-  Microsoft::WRL::ComPtr<IDispatch> dispatch;
-  hr = shell->FindWindowSW(ScopedVariant(CSIDL_DESKTOP).AsInput(),
-                           ScopedVariant().AsInput(), SWC_DESKTOP, &hwnd,
-                           SWFO_NEEDDISPATCH, &dispatch);
-  if (hr == S_FALSE || FAILED(hr)) {
-    return hr == S_FALSE ? E_FAIL : hr;
-  }
-
-  Microsoft::WRL::ComPtr<IServiceProvider> service;
-  hr = dispatch.As(&service);
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  Microsoft::WRL::ComPtr<IShellBrowser> browser;
-  hr = service->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser));
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  Microsoft::WRL::ComPtr<IShellView> view;
-  hr = browser->QueryActiveShellView(&view);
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  hr = view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(&dispatch));
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  Microsoft::WRL::ComPtr<IShellFolderViewDual> folder;
-  hr = dispatch.As(&folder);
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  hr = folder->get_Application(&dispatch);
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  Microsoft::WRL::ComPtr<IShellDispatch2> shell_dispatch;
-  hr = dispatch.As(&shell_dispatch);
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  std::optional<base::FilePath> current_dir;
-  if (!current_directory) {
-    current_dir = base::PathService::CheckedGet(base::DIR_CURRENT);
-    current_directory = current_dir->value();
-  }
-
-  return shell_dispatch->ShellExecute(
-      ScopedBstr(path.c_str()).Get(), ScopedVariant(parameters.c_str()),
-      ScopedVariant(current_directory->data()),
-      /*vOperation=*/ScopedVariant::kEmptyVariant,
-      ScopedVariant(start_hidden ? SW_HIDE : SW_SHOWDEFAULT));
+  ShellExecuteOptions options{.current_directory = std::wstring(
+                                  current_directory.value_or(std::wstring())),
+                              .start_hidden = start_hidden};
+  return RunShellExecuteViaExplorer(path, parameters, options);
 }
 
 }  // namespace base::win

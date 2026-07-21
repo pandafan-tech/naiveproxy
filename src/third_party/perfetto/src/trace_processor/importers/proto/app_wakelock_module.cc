@@ -21,17 +21,18 @@
 #include <memory>
 #include <utility>
 
-#include "perfetto/ext/base/fnv_hash.h"
+#include "perfetto/ext/base/murmur_hash.h"
 #include "perfetto/protozero/field.h"
 #include "perfetto/trace_processor/ref_counted.h"
-#include "perfetto/trace_processor/trace_blob.h"
-#include "protos/perfetto/trace/android/app_wakelock_data.pbzero.h"
-#include "protos/perfetto/trace/interned_data/interned_data.pbzero.h"
 #include "protos/perfetto/trace/trace_packet.pbzero.h"
+#include "protos/third_party/android/frameworks/base/proto/tracing/frameworks_base_interned_data.pbzero.h"
+#include "protos/third_party/android/frameworks/base/proto/tracing/frameworks_base_trace_packet.pbzero.h"
 #include "src/trace_processor/importers/common/parser_types.h"
 #include "src/trace_processor/importers/common/slice_tracker.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/importers/common/track_compressor.h"
 #include "src/trace_processor/importers/common/tracks.h"
+#include "src/trace_processor/importers/proto/blob_packet_writer.h"
 #include "src/trace_processor/importers/proto/packet_sequence_state_generation.h"
 #include "src/trace_processor/importers/proto/proto_importer_module.h"
 #include "src/trace_processor/sorter/trace_sorter.h"
@@ -41,8 +42,10 @@
 
 namespace perfetto::trace_processor {
 
-using ::perfetto::protos::pbzero::AppWakelockBundle;
-using ::perfetto::protos::pbzero::AppWakelockInfo;
+using ::com::android::internal::pbzero::AppWakelockBundle;
+using ::com::android::internal::pbzero::AppWakelockInfo;
+using ::com::android::internal::pbzero::FrameworksBaseInternedData;
+using ::com::android::internal::pbzero::FrameworksBaseTracePacket;
 using ::perfetto::protos::pbzero::TracePacket;
 using ::protozero::ConstBytes;
 
@@ -54,7 +57,7 @@ AppWakelockModule::AppWakelockModule(ProtoImporterModuleContext* module_context,
       arg_owner_pid_(context->storage->InternString("owner_pid")),
       arg_owner_uid_(context->storage->InternString("owner_uid")),
       arg_work_uid_(context->storage->InternString("work_uid")) {
-  RegisterForField(TracePacket::kAppWakelockBundleFieldNumber);
+  RegisterForField(FrameworksBaseTracePacket::kAppWakelockBundleFieldNumber);
 }
 
 ModuleResult AppWakelockModule::TokenizePacket(
@@ -63,17 +66,21 @@ ModuleResult AppWakelockModule::TokenizePacket(
     int64_t ts,
     RefPtr<PacketSequenceStateGeneration> state,
     uint32_t field_id) {
-  if (field_id != TracePacket::kAppWakelockBundleFieldNumber) {
+  if (field_id != FrameworksBaseTracePacket::kAppWakelockBundleFieldNumber) {
     return ModuleResult::Ignored();
   }
 
-  AppWakelockBundle::Decoder evt(decoder.app_wakelock_bundle());
+  AppWakelockBundle::Decoder evt(
+      decoder
+          .GetExtensionSlowly<
+              FrameworksBaseTracePacket::kAppWakelockBundleFieldNumber>()
+          .as_bytes());
 
   bool parse_error = false;
   auto iid_iter = evt.intern_id(&parse_error);
   auto timestamp_iter = evt.encoded_ts(&parse_error);
   if (parse_error) {
-    context_->storage->IncrementStats(stats::app_wakelock_parse_error);
+    context_->stats_tracker->IncrementStats(stats::app_wakelock_parse_error);
     return ModuleResult::Handled();
   }
 
@@ -85,19 +92,24 @@ ModuleResult AppWakelockModule::TokenizePacket(
     bool acquired = encoded_ts & 0x1;
 
     auto* interned = state->LookupInternedMessage<
-        protos::pbzero::InternedData::kAppWakelockInfoFieldNumber,
-        protos::pbzero::AppWakelockInfo>(intern_id);
+        FrameworksBaseInternedData::kAppWakelockInfoFieldNumber,
+        AppWakelockInfo>(intern_id);
     if (interned == nullptr) {
-      context_->storage->IncrementStats(stats::app_wakelock_unknown_id);
+      context_->stats_tracker->IncrementStats(stats::app_wakelock_unknown_id);
       continue;
     }
 
-    packet_buffer_->set_timestamp(static_cast<uint64_t>(real_ts));
-    auto* event = packet_buffer_->set_app_wakelock_bundle();
-    size_t length = static_cast<size_t>(interned->end() - interned->begin());
-    event->set_info()->AppendRawProtoBytes(interned->begin(), length);
-    event->set_acquired(acquired);
-    PushPacketBufferForSort(real_ts, state);
+    TraceBlobView tbv = context_->blob_packet_writer->WritePacket(
+        [&](protos::pbzero::TracePacket* pkt) {
+          pkt->set_timestamp(static_cast<uint64_t>(real_ts));
+          auto* event = pkt->BeginNestedMessage<AppWakelockBundle>(
+              FrameworksBaseTracePacket::kAppWakelockBundleFieldNumber);
+          auto length =
+              static_cast<size_t>(interned->end() - interned->begin());
+          event->set_info()->AppendRawProtoBytes(interned->begin(), length);
+          event->set_acquired(acquired);
+        });
+    PushPacketBufferForSort(real_ts, std::move(tbv), state);
   }
 
   return ModuleResult::Handled();
@@ -109,8 +121,13 @@ void AppWakelockModule::ParseTracePacketData(
     const TracePacketData&,
     uint32_t field_id) {
   switch (field_id) {
-    case TracePacket::kAppWakelockBundleFieldNumber:
-      ParseWakelockBundle(ts, decoder.app_wakelock_bundle());
+    case FrameworksBaseTracePacket::kAppWakelockBundleFieldNumber:
+      ParseWakelockBundle(
+          ts,
+          decoder
+              .GetExtensionSlowly<
+                  FrameworksBaseTracePacket::kAppWakelockBundleFieldNumber>()
+              .as_bytes());
       return;
   }
 }
@@ -126,7 +143,7 @@ void AppWakelockModule::ParseWakelockBundle(int64_t ts, ConstBytes blob) {
 
   // The data source doesn't specify a cookie, packets should instead be matched
   // by their corresponding attributes. Use these to form a cookie for pairing.
-  std::size_t cookie = base::FnvHasher::Combine(
+  std::size_t cookie = base::MurmurHashCombine(
       info.tag().ToStdStringView(), info.flags(), info.owner_pid(),
       info.owner_uid(), info.work_uid());
 
@@ -158,12 +175,10 @@ void AppWakelockModule::ParseWakelockBundle(int64_t ts, ConstBytes blob) {
 
 void AppWakelockModule::PushPacketBufferForSort(
     int64_t timestamp,
+    TraceBlobView tbv,
     RefPtr<PacketSequenceStateGeneration> state) {
-  auto [vec, size] = packet_buffer_.SerializeAsUniquePtr();
-  TraceBlobView tbv(TraceBlob::TakeOwnership(std::move(vec), size));
   module_context_->trace_packet_stream->Push(
       timestamp, TracePacketData{std::move(tbv), std::move(state)});
-  packet_buffer_.Reset();
 }
 
 }  // namespace perfetto::trace_processor

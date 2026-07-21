@@ -28,6 +28,7 @@
 #include "perfetto/ext/base/status_or.h"
 #include "perfetto/trace_processor/trace_blob_view.h"
 #include "src/trace_processor/importers/common/clock_tracker.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/importers/perf/aux_data_tokenizer.h"
 #include "src/trace_processor/importers/perf/aux_record.h"
 #include "src/trace_processor/importers/perf/itrace_start_record.h"
@@ -140,7 +141,7 @@ class SpeStream : public AuxDataStream {
     if (cycles.has_value()) {
       perf_time = stream_.ConvertTscToPerfTime(*cycles);
     } else {
-      context_->storage->IncrementStats(stats::spe_no_timestamp);
+      context_->stats_tracker->IncrementStats(stats::spe_no_timestamp);
     }
 
     if (!perf_time && last_aux_record_->sample_id.has_value()) {
@@ -153,13 +154,11 @@ class SpeStream : public AuxDataStream {
       return;
     }
 
-    base::StatusOr<int64_t> trace_time = context_->clock_tracker->ToTraceTime(
+    std::optional<int64_t> trace_time = context_->clock_tracker->ToTraceTime(
         last_aux_record_->attr->clock_id(), static_cast<int64_t>(*perf_time));
-    if (!trace_time.ok()) {
-      context_->storage->IncrementStats(stats::spe_record_dropped);
-      return;
+    if (trace_time) {
+      record_stream_->Push(*trace_time, std::move(record));
     }
-    record_stream_->Push(*trace_time, std::move(record));
   }
 
   TraceProcessorContext* const context_;
@@ -172,6 +171,7 @@ class SpeStream : public AuxDataStream {
 }  // namespace
 
 SpeTokenizer::~SpeTokenizer() = default;
+void SpeTokenizer::OnEventsFullyExtracted() {}
 base::StatusOr<AuxDataStream*> SpeTokenizer::InitializeAuxDataStream(
     AuxStream* stream) {
   streams_.push_back(std::make_unique<SpeStream>(context_, stream));

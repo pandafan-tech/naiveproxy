@@ -44,7 +44,6 @@ class IPEndPoint;
 class IsolationInfo;
 class NetLogWithSource;
 class SSLInfo;
-class SiteForCookies;
 class URLRequest;
 class URLRequestContext;
 class WebSocketBasicHandshakeStream;
@@ -55,6 +54,11 @@ struct TransportInfo;
 struct WebSocketFrame;
 struct WebSocketHandshakeRequestInfo;
 struct WebSocketHandshakeResponseInfo;
+
+enum class WebSocketPriorityHint {
+  kDefault,
+  kMaximum,
+};
 
 // WebSocketStreamRequest is the caller's handle to the process of creation of a
 // WebSocketStream. Deleting the object before the ConnectDelegate OnSuccess or
@@ -169,12 +173,12 @@ class NET_EXPORT_PRIVATE WebSocketStream {
       const GURL& socket_url,
       const std::vector<std::string>& requested_subprotocols,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
       StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
       URLRequestContext* url_request_context,
       const NetLogWithSource& net_log,
+      WebSocketPriorityHint priority_hint,
       NetworkTrafficAnnotationTag traffic_annotation,
       std::unique_ptr<ConnectDelegate> connect_delegate);
 
@@ -187,12 +191,12 @@ class NET_EXPORT_PRIVATE WebSocketStream {
       const GURL& socket_url,
       const std::vector<std::string>& requested_subprotocols,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
       StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
       URLRequestContext* url_request_context,
       const NetLogWithSource& net_log,
+      WebSocketPriorityHint priority_hint,
       NetworkTrafficAnnotationTag traffic_annotation,
       std::unique_ptr<ConnectDelegate> connect_delegate,
       std::unique_ptr<base::OneShotTimer> timer,

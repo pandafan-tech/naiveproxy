@@ -25,8 +25,8 @@ def _add_io_args(parser, *, is_final=False, is_javap=False):
     inputs.add_argument(
         '--java-sources-file',
         required=True,
-        help='Newline-separated file containing paths to .java or .jni.pickle '
-        'files, taken from Java dependency tree.')
+        help='JSON file containing paths to .java or .jni.pickle files '
+        'and their module names, taken from Java dependency tree.')
     inputs.add_argument(
         '--priority-java-sources-file',
         help='Same format as java-sources-file, only used by multiplexing to '
@@ -38,8 +38,8 @@ def _add_io_args(parser, *, is_final=False, is_javap=False):
         'omitting switch_num for unique signatures.')
     inputs.add_argument(
         '--native-sources-file',
-        help='Newline-separated file containing paths to .java or .jni.pickle '
-        'files, taken from Native dependency tree.')
+        help='JSON file containing paths to .java or .jni.pickle files '
+        'and their module names, taken from Native dependency tree.')
   else:
     if is_javap:
       inputs.add_argument(
@@ -55,11 +55,18 @@ def _add_io_args(parser, *, is_final=False, is_javap=False):
                         required=True,
                         dest='input_files',
                         help=help_text)
-    outputs.add_argument('--output-name',
-                         action='append',
-                         required=True,
-                         dest='output_names',
-                         help='Output filenames within output directory.')
+    outputs.add_argument(
+        '--shared-header-name',
+        action='append',
+        required=True,
+        dest='shared_header_names',
+        help='Output filenames of shared headers within output directory.')
+    outputs.add_argument(
+        '--unshared-header-name',
+        action='append',
+        required=True,
+        dest='unshared_header_names',
+        help='Output filenames of unshared headers within output directory.')
     outputs.add_argument('--output-dir',
                          required=True,
                          help='Output directory. '
@@ -90,6 +97,7 @@ def _add_codegen_args(parser, *, is_final=False, is_javap=False):
   mode_group = parser.add_mutually_exclusive_group()
   group.add_argument(
       '--module-name',
+      default='',
       help='Only look at natives annotated with a specific module name.')
   this_dir = posixpath.abspath(posixpath.dirname(__file__))
   root_dir = posixpath.dirname(posixpath.dirname(this_dir))
@@ -137,10 +145,14 @@ def _add_codegen_args(parser, *, is_final=False, is_javap=False):
         action='store_true',
         help='Generate .srcjar and .h such that a final generate-final '
         'step is not necessary')
-    group.add_argument(
-        '--enable-definition-macros',
-        action='store_true',
-        help='Generate JNI glue code in DEFINE_JNI_FOR_MyClass() macros')
+    group.add_argument('--use-std-primitive-types',
+                       action='store_true',
+                       help='Use e.g.: int32_t rather than jint in codegen')
+    if not is_javap:
+      group.add_argument(
+          '--enable-definition-macros',
+          action='store_true',
+          help='Generate JNI glue code in DEFINE_JNI_FOR_MyClass() macros')
     group.add_argument('--allow-private-called-by-natives',
                        action='store_true',
                        help='Whether to allow private @CalledByNative symbols.')

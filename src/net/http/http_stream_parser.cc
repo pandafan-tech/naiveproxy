@@ -18,7 +18,6 @@
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_span.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/numerics/checked_math.h"
 #include "base/numerics/clamped_math.h"
 #include "base/numerics/safe_conversions.h"
@@ -26,6 +25,7 @@
 #include "base/strings/string_util.h"
 #include "base/strings/string_view_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/time/time.h"
 #include "base/values.h"
 #include "net/base/features.h"
 #include "net/base/io_buffer.h"
@@ -63,10 +63,10 @@ std::string GetResponseHeaderLines(const HttpResponseHeaders& headers) {
   return cr_separated_headers;
 }
 
-base::Value::Dict NetLogSendRequestBodyParams(uint64_t length,
-                                              bool is_chunked,
-                                              bool did_merge) {
-  base::Value::Dict dict;
+base::DictValue NetLogSendRequestBodyParams(uint64_t length,
+                                            bool is_chunked,
+                                            bool did_merge) {
+  base::DictValue dict;
   dict.Set("length", static_cast<int>(length));
   dict.Set("is_chunked", is_chunked);
   dict.Set("did_merge", did_merge);
@@ -269,14 +269,16 @@ int HttpStreamParser::SendRequest(
     // within an int, the above copy_prefix_from() would have triggered a CHECK.
     request_headers_->DidConsume(static_cast<int>(request.size()));
 
-    while (int remaining = request_headers_->BytesRemaining() > 0) {
+    while (!upload_data_stream_->IsEOF()) {
+      int remaining = request_headers_->BytesRemaining();
+      CHECK_GT(remaining, 0);
       int consumed = upload_data_stream_->Read(
           request_headers_.get(), remaining, CompletionOnceCallback());
       // Read() must succeed synchronously if not chunked and in memory.
       CHECK_GT(consumed, 0);
       request_headers_->DidConsume(consumed);
     }
-    DCHECK(upload_data_stream_->IsEOF());
+    CHECK_EQ(request_headers_->BytesRemaining(), 0);
     // Reset the offset, so the buffer can be read from the beginning.
     request_headers_->SetOffset(0);
     did_merge = true;
@@ -466,7 +468,8 @@ int HttpStreamParser::DoSendHeadersComplete(int result) {
     return result;
   }
 
-  sent_bytes_ += result;
+  DCHECK_GE(result, 0);
+  sent_bytes_ += base::ByteSize(base::as_unsigned(result));
   request_headers_->DidConsume(result);
   if (request_headers_->BytesRemaining() > 0) {
     io_state_ = STATE_SEND_HEADERS;
@@ -523,7 +526,8 @@ int HttpStreamParser::DoSendBodyComplete(int result) {
     return result;
   }
 
-  sent_bytes_ += result;
+  DCHECK_GE(result, 0);
+  sent_bytes_ += base::ByteSize(base::as_unsigned(result));
   request_body_send_buf_->DidConsume(result);
 
   io_state_ = STATE_SEND_BODY;
@@ -545,7 +549,8 @@ int HttpStreamParser::DoSendRequestReadBodyComplete(int result) {
       sent_last_chunk_ = true;
     }
     // Encode the buffer as 1 chunk.
-    const std::string_view payload(request_body_read_buf_->data(), result);
+    const std::string_view payload =
+        base::as_string_view(request_body_read_buf_->first(result));
     request_body_send_buf_->Clear();
     result = EncodeChunk(payload, request_body_send_buf_->span());
   }
@@ -768,8 +773,9 @@ int HttpStreamParser::DoReadBodyComplete(int result) {
       result = ERR_CONTENT_LENGTH_MISMATCH;
   }
 
-  if (result > 0)
-    received_bytes_ += result;
+  if (result > 0) {
+    received_bytes_ += base::ByteSize(base::as_unsigned(result));
+  }
 
   // Filter incoming data if appropriate.  FilterBuf may return an error.
   if (result > 0 && chunked_decoder_.get()) {
@@ -818,10 +824,10 @@ int HttpStreamParser::DoReadBodyComplete(int result) {
     }
 
     if (save_amount) {
-      received_bytes_ -= save_amount;
+      size_t save_size = base::checked_cast<size_t>(save_amount);
+      received_bytes_ -= base::ByteSize(save_size);
       read_buf_->everything().copy_prefix_from(user_read_buf_->span().subspan(
-          base::checked_cast<size_t>(result),
-          base::checked_cast<size_t>(save_amount)));
+          base::checked_cast<size_t>(result), save_size));
     }
     read_buf_->set_offset(save_amount);
     if (additional_save_amount) {
@@ -1046,7 +1052,7 @@ int HttpStreamParser::ParseResponseHeaders(size_t end_offset) {
   DCHECK_EQ(0u, read_buf_unused_offset_);
 
   if (response_header_start_offset_ != std::string::npos) {
-    received_bytes_ += end_offset;
+    received_bytes_ += base::ByteSize(end_offset);
     headers = HttpResponseHeaders::TryToCreate(
         base::as_string_view(read_buf_->everything().first(end_offset)));
     if (!headers)

@@ -4,15 +4,16 @@
 
 #include "net/http/http_no_vary_search_data.h"
 
+#include <algorithm>
 #include <optional>
 #include <string_view>
 
-#include "base/containers/contains.h"
 #include "base/containers/flat_set.h"
 #include "base/debug/crash_logging.h"
 #include "base/debug/dump_without_crashing.h"
 #include "base/feature_list.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/strings/string_util.h"
 #include "base/types/expected.h"
 #include "net/base/features.h"
 #include "net/base/pickle.h"
@@ -39,30 +40,6 @@ std::optional<std::vector<std::string>> ParseStringList(
     keys.push_back(UnescapePercentEncodedUrl(item.item.GetString()));
   }
   return keys;
-}
-
-template <typename ParamsType>
-void ApplyNoVarySearchRulesToParams(const HttpNoVarySearchData& rules,
-                                    ParamsType& params) {
-  // Ignore all the query search params that the URL is not varying on.
-  if (rules.vary_by_default()) {
-    params.DeleteAllWithNames(rules.affected_params());
-  } else {
-    params.DeleteAllExceptWithNames(rules.affected_params());
-  }
-  // Sort the params if the order of the search params in the query
-  // is ignored.
-  if (!rules.vary_on_key_order()) {
-    params.Sort();
-  }
-}
-
-template <typename ParamsType>
-void ApplyNoVarySearchRulesToBothParams(const HttpNoVarySearchData& rules,
-                                        ParamsType& params_a,
-                                        ParamsType& params_b) {
-  ApplyNoVarySearchRulesToParams(rules, params_a);
-  ApplyNoVarySearchRulesToParams(rules, params_b);
 }
 
 // Extracts the "base URL" (everything before the query or fragment) from `url`.
@@ -116,6 +93,23 @@ HttpNoVarySearchData& HttpNoVarySearchData::operator=(
 HttpNoVarySearchData& HttpNoVarySearchData::operator=(HttpNoVarySearchData&&) =
     default;
 
+std::vector<std::string> HttpNoVarySearchData::GetAffectedParams() const {
+  return std::vector<std::string>(affected_params_.begin(),
+                                  affected_params_.end());
+}
+
+template <typename ParamsType>
+void HttpNoVarySearchData::ApplyRulesToParams(ParamsType& params) const {
+  if (vary_by_default_) {
+    params.DeleteAllWithNames(affected_params_);
+  } else {
+    params.DeleteAllExceptWithNames(affected_params_);
+  }
+  if (!vary_on_key_order_) {
+    params.Sort();
+  }
+}
+
 bool HttpNoVarySearchData::AreEquivalent(const GURL& a, const GURL& b) const {
   CHECK(a.is_valid());
   CHECK(b.is_valid());
@@ -128,7 +122,7 @@ bool HttpNoVarySearchData::AreEquivalent(const GURL& a, const GURL& b) const {
 
 std::string HttpNoVarySearchData::CanonicalizeQuery(const GURL& url) const {
   UrlSearchParamsView search_params(url);
-  ApplyNoVarySearchRulesToParams(*this, search_params);
+  ApplyRulesToParams(search_params);
 
   return search_params.SerializeAsUtf8();
 }
@@ -161,6 +155,19 @@ HttpNoVarySearchData HttpNoVarySearchData::CreateFromVaryParams(
 
 // static
 base::expected<HttpNoVarySearchData, HttpNoVarySearchData::ParseErrorEnum>
+HttpNoVarySearchData::ParseFromHeaderValue(std::string_view value) {
+  // The no-vary-search header is a dictionary type structured field.
+  const auto dict = structured_headers::ParseDictionary(value);
+  if (!dict.has_value()) {
+    // We don't recognize anything else. So this is an authoring error.
+    return base::unexpected(ParseErrorEnum::kNotDictionary);
+  }
+
+  return ParseNoVarySearchDictionary(dict.value());
+}
+
+// static
+base::expected<HttpNoVarySearchData, HttpNoVarySearchData::ParseErrorEnum>
 HttpNoVarySearchData::ParseFromHeaders(
     const HttpResponseHeaders& response_headers) {
   std::optional<std::string> normalized_header =
@@ -170,14 +177,27 @@ HttpNoVarySearchData::ParseFromHeaders(
     return base::unexpected(ParseErrorEnum::kOk);
   }
 
-  // The no-vary-search header is a dictionary type structured field.
-  const auto dict = structured_headers::ParseDictionary(*normalized_header);
-  if (!dict.has_value()) {
-    // We don't recognize anything else. So this is an authoring error.
-    return base::unexpected(ParseErrorEnum::kNotDictionary);
-  }
+  return ParseFromHeaderValue(*normalized_header);
+}
 
-  return ParseNoVarySearchDictionary(dict.value());
+// static
+bool HttpNoVarySearchData::HasBooleanParamsMember(
+    std::string_view header_value) {
+  const auto dict = structured_headers::ParseDictionary(header_value);
+  if (!dict.has_value()) {
+    return false;
+  }
+  auto it = dict->find("params");
+  if (it == dict->end()) {
+    return false;
+  }
+  const auto& member = it->second;
+  if (member.member_is_inner_list) {
+    return false;
+  }
+  // This is guaranteed by the structured headers parser API.
+  CHECK_EQ(member.member.size(), 1u);
+  return member.member[0].item.is_boolean();
 }
 
 bool HttpNoVarySearchData::operator==(const HttpNoVarySearchData& rhs) const =
@@ -209,9 +229,10 @@ HttpNoVarySearchData::ParseNoVarySearchDictionary(
   bool vary_by_default = true;
 
   // If the dictionary contains unknown keys, maybe fail parsing.
-  const bool has_unrecognized_keys = !std::ranges::all_of(
-      dict,
-      [&](const auto& pair) { return base::Contains(kValidKeys, pair.first); });
+  const bool has_unrecognized_keys =
+      !std::ranges::all_of(dict, [&](const auto& pair) {
+        return std::ranges::contains(kValidKeys, pair.first);
+      });
 
   UMA_HISTOGRAM_BOOLEAN("Net.HttpNoVarySearch.HasUnrecognizedKeys",
                         has_unrecognized_keys);
@@ -293,7 +314,8 @@ bool HttpNoVarySearchData::AreEquivalentOldImpl(const GURL& a,
   // search params variance.
   UrlSearchParams a_search_params(a);
   UrlSearchParams b_search_params(b);
-  ApplyNoVarySearchRulesToBothParams(*this, a_search_params, b_search_params);
+  ApplyRulesToParams(a_search_params);
+  ApplyRulesToParams(b_search_params);
 
   // Check Search Params for equality
   // All search params, in order, need to have the same keys and the same
@@ -311,7 +333,8 @@ bool HttpNoVarySearchData::AreEquivalentNewImpl(const GURL& a,
   // search params variance.
   UrlSearchParamsView a_search_params(a);
   UrlSearchParamsView b_search_params(b);
-  ApplyNoVarySearchRulesToBothParams(*this, a_search_params, b_search_params);
+  ApplyRulesToParams(a_search_params);
+  ApplyRulesToParams(b_search_params);
 
   return a_search_params == b_search_params;
 }
@@ -355,5 +378,21 @@ size_t PickleTraits<HttpNoVarySearchData>::PickleSize(
                             value.vary_by_default_);
 }
 // LINT.ThenChange(//net/http/http_no_vary_search_data.h:MagicNumber)
+
+std::ostream& operator<<(std::ostream& ostream,
+                         const HttpNoVarySearchData& no_vary_search_data) {
+  no_vary_search_data.DescribeForLog(ostream);
+  return ostream;
+}
+
+void HttpNoVarySearchData::DescribeForLog(std::ostream& ostream) const {
+  ostream << std::boolalpha;
+  ostream << "HttpNoVarySearchData{";
+  ostream << "vary_on_key_order: " << vary_on_key_order_ << ", ";
+  ostream << "vary_by_default: " << vary_by_default_ << ", ";
+  ostream << R"(affected_params: [")"
+          << base::JoinString(affected_params_, R"(", ")") << R"("])";
+  ostream << "}";
+}
 
 }  // namespace net

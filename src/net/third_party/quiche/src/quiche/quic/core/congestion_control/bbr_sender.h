@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2026 The Chromium Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,12 +16,15 @@
 #include "quiche/quic/core/congestion_control/windowed_filter.h"
 #include "quiche/quic/core/crypto/quic_random.h"
 #include "quiche/quic/core/quic_bandwidth.h"
+#include "quiche/quic/core/quic_config.h"
+#include "quiche/quic/core/quic_connection_stats.h"
 #include "quiche/quic/core/quic_packet_number.h"
-#include "quiche/quic/core/quic_packets.h"
+#include "quiche/quic/core/quic_tag.h"
 #include "quiche/quic/core/quic_time.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_unacked_packet_map.h"
-#include "quiche/quic/platform/api/quic_export.h"
-#include "quiche/quic/platform/api/quic_flags.h"
+#include "quiche/common/platform/api/quiche_export.h"
+#include "quiche/common/platform/api/quiche_logging.h"
 
 namespace quic {
 
@@ -86,6 +89,8 @@ class QUICHE_EXPORT BbrSender : public SendAlgorithmInterface {
 
     bool last_sample_is_app_limited;
     QuicPacketNumber end_of_app_limited_phase;
+
+    bool exit_startup_on_loss_even_if_app_limited;
   };
 
   BbrSender(QuicTime now, const RttStats* rtt_stats,
@@ -136,6 +141,7 @@ class QUICHE_EXPORT BbrSender : public SendAlgorithmInterface {
   void PopulateConnectionStats(QuicConnectionStats* stats) const override;
   bool EnableECT0() override { return false; }
   bool EnableECT1() override { return false; }
+  void ReduceMemoryUsage() override { sampler_.ReduceMemoryUsage(); }
   // End implementation of SendAlgorithmInterface.
 
   // Gets the number of RTTs BBR remains in STARTUP phase.
@@ -177,6 +183,7 @@ class QUICHE_EXPORT BbrSender : public SendAlgorithmInterface {
  private:
   // For switching send algorithm mid connection.
   friend class Bbr2Sender;
+  friend class Bbr3Sender;
 
   using MaxBandwidthFilter =
       WindowedFilter<QuicBandwidth, MaxFilter<QuicBandwidth>,
@@ -381,6 +388,10 @@ class QUICHE_EXPORT BbrSender : public SendAlgorithmInterface {
 
   // Max congestion window when adjusting network parameters.
   QuicByteCount max_congestion_window_with_network_parameters_adjusted_;
+
+  // If true, exceeding loss limits will cause BBRv1 to exit STARTUP even if
+  // there are no app-limited samples.
+  bool exit_startup_on_loss_even_if_app_limited_;
 };
 
 QUICHE_EXPORT std::ostream& operator<<(std::ostream& os,

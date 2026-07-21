@@ -31,10 +31,12 @@
 #include "src/trace_processor/importers/common/args_tracker.h"
 #include "src/trace_processor/importers/common/clock_tracker.h"
 #include "src/trace_processor/importers/common/event_tracker.h"
+#include "src/trace_processor/importers/common/import_logs_tracker.h"
 #include "src/trace_processor/importers/common/metadata_tracker.h"
 #include "src/trace_processor/importers/common/parser_types.h"
 #include "src/trace_processor/importers/common/process_tracker.h"
 #include "src/trace_processor/importers/common/slice_tracker.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/importers/common/track_tracker.h"
 #include "src/trace_processor/importers/common/tracks.h"
 #include "src/trace_processor/importers/common/tracks_common.h"
@@ -42,12 +44,15 @@
 #include "src/trace_processor/storage/metadata.h"
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
+#include "src/trace_processor/tables/android_tables_py.h"
+#include "src/trace_processor/tables/log_tables_py.h"
 #include "src/trace_processor/types/trace_processor_context.h"
 #include "src/trace_processor/types/variadic.h"
 
 #include "protos/perfetto/common/android_log_constants.pbzero.h"
 #include "protos/perfetto/common/builtin_clock.pbzero.h"
 #include "protos/perfetto/config/trace_config.pbzero.h"
+#include "protos/perfetto/trace/android/android_aflags.pbzero.h"
 #include "protos/perfetto/trace/android/android_game_intervention_list.pbzero.h"
 #include "protos/perfetto/trace/android/android_log.pbzero.h"
 #include "protos/perfetto/trace/android/android_system_property.pbzero.h"
@@ -151,7 +156,19 @@ AndroidProbesParser::AndroidProbesParser(TraceProcessorContext* context,
       power_rail_raw_name_id_(context->storage->InternString("raw_name")),
       power_rail_subsys_name_arg_id_(
           context->storage->InternString("subsystem_name")),
-      rail_packet_timestamp_id_(context->storage->InternString("packet_ts")) {}
+      rail_packet_timestamp_id_(context->storage->InternString("packet_ts")),
+      aflags_read_only_id_(context->storage->InternString("read-only")),
+      aflags_read_write_id_(context->storage->InternString("read-write")),
+      aflags_default_id_(context->storage->InternString("default")),
+      aflags_server_id_(context->storage->InternString("server")),
+      aflags_local_id_(context->storage->InternString("local")),
+      aflags_none_id_(context->storage->InternString("none")),
+      aflags_aconfigd_id_(context->storage->InternString("aconfigd")),
+      aflags_device_config_id_(context->storage->InternString("device_config")),
+      aflags_boolean_id_(context->storage->InternString("boolean")),
+      aflags_integer_id_(context->storage->InternString("integer")),
+      aflags_unspecified_id_(context->storage->InternString("unspecified")),
+      android_logcat_(context->storage->InternString("android_logcat")) {}
 
 void AndroidProbesParser::ParseRailDescriptor(
     const protos::pbzero::PowerRails_Decoder& evt) {
@@ -295,7 +312,7 @@ void AndroidProbesParser::ParsePowerRails(int64_t ts,
       power_rails_args_tracker_->Flush();
     }
   } else {
-    context_->storage->IncrementStats(stats::power_rail_unknown_index);
+    context_->stats_tracker->IncrementStats(stats::power_rail_unknown_index);
   }
 
   // DCHECK that we only got one message.
@@ -305,14 +322,16 @@ void AndroidProbesParser::ParsePowerRails(int64_t ts,
 void AndroidProbesParser::ParseEnergyBreakdown(int64_t ts, ConstBytes blob) {
   protos::pbzero::AndroidEnergyEstimationBreakdown::Decoder event(blob);
   if (!event.has_energy_consumer_id() || !event.has_energy_uws()) {
-    context_->storage->IncrementStats(stats::energy_breakdown_missing_values);
+    context_->stats_tracker->IncrementStats(
+        stats::energy_breakdown_missing_values);
     return;
   }
 
   auto consumer_id = event.energy_consumer_id();
   auto descriptor = tracker_->GetEnergyBreakdownDescriptor(consumer_id);
   if (!descriptor) {
-    context_->storage->IncrementStats(stats::energy_breakdown_missing_values);
+    context_->stats_tracker->IncrementStats(
+        stats::energy_breakdown_missing_values);
     return;
   }
 
@@ -338,7 +357,7 @@ void AndroidProbesParser::ParseEnergyBreakdown(int64_t ts, ConstBytes blob) {
         breakdown(*it);
 
     if (!breakdown.has_uid() || !breakdown.has_energy_uws()) {
-      context_->storage->IncrementStats(
+      context_->stats_tracker->IncrementStats(
           stats::energy_uid_breakdown_missing_values);
       continue;
     }
@@ -362,7 +381,8 @@ void AndroidProbesParser::ParseEntityStateResidency(int64_t ts,
                                                     ConstBytes blob) {
   protos::pbzero::EntityStateResidency::Decoder event(blob);
   if (!event.has_residency()) {
-    context_->storage->IncrementStats(stats::entity_state_residency_invalid);
+    context_->stats_tracker->IncrementStats(
+        stats::entity_state_residency_invalid);
     return;
   }
   static constexpr auto kBlueprint = tracks::CounterBlueprint(
@@ -377,7 +397,7 @@ void AndroidProbesParser::ParseEntityStateResidency(int64_t ts,
     auto entity_state = tracker_->GetEntityStateDescriptor(
         residency.entity_index(), residency.state_index());
     if (!entity_state) {
-      context_->storage->IncrementStats(
+      context_->stats_tracker->IncrementStats(
           stats::entity_state_residency_lookup_failed);
       return;
     }
@@ -456,29 +476,34 @@ void AndroidProbesParser::ParseAndroidLogEvent(int64_t ts,
       msg_id = context_->storage->InternString(base::StringView(new_msg));
     }
   }
-  UniquePid utid = tid ? context_->process_tracker->UpdateThread(tid, pid) : 0;
-
   // Log events are NOT required to be sorted by trace_time. The virtual table
   // will take care of sorting on-demand.
-  context_->storage->mutable_android_log_table()->Insert(
-      {ts, utid, prio, tag_id, msg_id});
+  tables::LogTable::Row row;
+  row.ts = ts;
+  row.utid =
+      std::make_optional(context_->process_tracker->UpdateThread(tid, pid));
+  row.prio = static_cast<uint32_t>(prio);
+  row.log_source = android_logcat_;
+  row.tag = evt.has_tag() ? std::make_optional(tag_id) : std::nullopt;
+  row.msg = msg_id;
+  context_->storage->mutable_log_table()->Insert(row);
 }
 
 void AndroidProbesParser::ParseAndroidLogStats(protozero::ConstBytes blob) {
   protos::pbzero::AndroidLogPacket::Stats::Decoder evt(blob);
   if (evt.has_num_failed()) {
-    context_->storage->SetStats(stats::android_log_num_failed,
-                                static_cast<int64_t>(evt.num_failed()));
+    context_->stats_tracker->SetStats(stats::android_log_num_failed,
+                                      static_cast<int64_t>(evt.num_failed()));
   }
 
   if (evt.has_num_skipped()) {
-    context_->storage->SetStats(stats::android_log_num_skipped,
-                                static_cast<int64_t>(evt.num_skipped()));
+    context_->stats_tracker->SetStats(stats::android_log_num_skipped,
+                                      static_cast<int64_t>(evt.num_skipped()));
   }
 
   if (evt.has_num_total()) {
-    context_->storage->SetStats(stats::android_log_num_total,
-                                static_cast<int64_t>(evt.num_total()));
+    context_->stats_tracker->SetStats(stats::android_log_num_total,
+                                      static_cast<int64_t>(evt.num_total()));
   }
 }
 
@@ -498,10 +523,10 @@ void AndroidProbesParser::ParseAndroidGameIntervention(
   constexpr static int kGameModePerformance = 2;
   constexpr static int kGameModeBattery = 3;
 
-  context_->storage->SetStats(stats::game_intervention_has_read_errors,
-                              intervention_list.read_error());
-  context_->storage->SetStats(stats::game_intervention_has_parse_errors,
-                              intervention_list.parse_error());
+  context_->stats_tracker->SetStats(stats::game_intervention_has_read_errors,
+                                    intervention_list.read_error());
+  context_->stats_tracker->SetStats(stats::game_intervention_has_parse_errors,
+                                    intervention_list.parse_error());
 
   for (auto pkg_it = intervention_list.game_packages(); pkg_it; ++pkg_it) {
     protos::pbzero::AndroidGameInterventionList_GamePackageInfo::Decoder
@@ -694,6 +719,93 @@ void AndroidProbesParser::ParseBtTraceEvent(int64_t ts, ConstBytes blob) {
                            Variadic::UnsignedInteger(evt.connection_handle()));
         }
       });
+}
+
+StringId AndroidProbesParser::ToPermissionId(int32_t permission) {
+  switch (permission) {
+    case protos::pbzero::AndroidAflags::FLAG_PERMISSION_READ_ONLY:
+      return aflags_read_only_id_;
+    case protos::pbzero::AndroidAflags::FLAG_PERMISSION_READ_WRITE:
+      return aflags_read_write_id_;
+    case protos::pbzero::AndroidAflags::FLAG_PERMISSION_UNSPECIFIED:
+    default:
+      return aflags_unspecified_id_;
+  }
+}
+
+StringId AndroidProbesParser::ToValuePickedFromId(int32_t picked_from) {
+  switch (picked_from) {
+    case protos::pbzero::AndroidAflags::VALUE_PICKED_FROM_DEFAULT:
+      return aflags_default_id_;
+    case protos::pbzero::AndroidAflags::VALUE_PICKED_FROM_SERVER:
+      return aflags_server_id_;
+    case protos::pbzero::AndroidAflags::VALUE_PICKED_FROM_LOCAL:
+      return aflags_local_id_;
+    case protos::pbzero::AndroidAflags::VALUE_PICKED_FROM_UNSPECIFIED:
+    default:
+      return aflags_unspecified_id_;
+  }
+}
+
+StringId AndroidProbesParser::ToStorageBackendId(int32_t backend) {
+  switch (backend) {
+    case protos::pbzero::AndroidAflags::FLAG_STORAGE_BACKEND_NONE:
+      return aflags_none_id_;
+    case protos::pbzero::AndroidAflags::FLAG_STORAGE_BACKEND_ACONFIGD:
+      return aflags_aconfigd_id_;
+    case protos::pbzero::AndroidAflags::FLAG_STORAGE_BACKEND_DEVICE_CONFIG:
+      return aflags_device_config_id_;
+    case protos::pbzero::AndroidAflags::FLAG_STORAGE_BACKEND_UNSPECIFIED:
+    default:
+      return aflags_unspecified_id_;
+  }
+}
+
+StringId AndroidProbesParser::ToFlagTypeId(int32_t type) {
+  switch (type) {
+    case protos::pbzero::AndroidAflags::FLAG_TYPE_BOOLEAN:
+      return aflags_boolean_id_;
+    case protos::pbzero::AndroidAflags::FLAG_TYPE_INTEGER:
+      return aflags_integer_id_;
+    case protos::pbzero::AndroidAflags::FLAG_TYPE_UNSPECIFIED:
+    default:
+      return aflags_unspecified_id_;
+  }
+}
+
+void AndroidProbesParser::ParseAndroidAflags(int64_t ts, ConstBytes blob) {
+  protos::pbzero::AndroidAflags::Decoder decoder(blob.data, blob.size);
+  if (decoder.has_error()) {
+    context_->import_logs_tracker->RecordCollectionError(
+        stats::android_aflags_errors, ts,
+        [&](ArgsTracker::BoundInserter& inserter) {
+          inserter.AddArg(context_->storage->InternString("error"),
+                          Variadic::String(context_->storage->InternString(
+                              decoder.error())));
+        });
+    return;
+  }
+
+  for (auto it = decoder.flags(); it; ++it) {
+    protos::pbzero::AndroidAflags::Flag::Decoder flag(*it);
+
+    tables::AndroidAflagsTable::Row row;
+    row.ts = ts;
+    row.package = context_->storage->InternString(flag.pkg());
+    row.name = context_->storage->InternString(flag.name());
+    row.flag_namespace = context_->storage->InternString(flag.flag_namespace());
+    row.container = context_->storage->InternString(flag.container());
+    row.value = context_->storage->InternString(flag.value());
+    if (flag.has_staged_value()) {
+      row.staged_value = context_->storage->InternString(flag.staged_value());
+    }
+    row.permission = ToPermissionId(flag.permission());
+    row.value_picked_from = ToValuePickedFromId(flag.value_picked_from());
+    row.storage_backend = ToStorageBackendId(flag.storage_backend());
+    row.type = ToFlagTypeId(flag.type());
+
+    context_->storage->mutable_android_aflags_table()->Insert(row);
+  }
 }
 
 }  // namespace perfetto::trace_processor

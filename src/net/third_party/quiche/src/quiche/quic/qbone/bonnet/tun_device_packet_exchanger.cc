@@ -7,11 +7,14 @@
 #include <netinet/icmp6.h>
 #include <netinet/ip6.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
 
 #include "absl/strings/str_cat.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "quiche/quic/qbone/platform/icmp_packet.h"
 #include "quiche/quic/qbone/platform/netlink_interface.h"
 #include "quiche/quic/qbone/qbone_constants.h"
@@ -20,9 +23,9 @@ namespace quic {
 
 TunDevicePacketExchanger::TunDevicePacketExchanger(
     size_t mtu, KernelInterface* kernel, NetlinkInterface* netlink,
-    QbonePacketExchanger::Visitor* visitor, size_t max_pending_packets,
-    bool is_tap, StatsInterface* stats, absl::string_view ifname)
-    : QbonePacketExchanger(visitor, max_pending_packets),
+    QbonePacketExchanger::Visitor* visitor, bool is_tap, StatsInterface* stats,
+    absl::string_view ifname)
+    : QbonePacketExchanger(visitor),
       mtu_(mtu),
       kernel_(kernel),
       netlink_(netlink),
@@ -35,11 +38,11 @@ TunDevicePacketExchanger::TunDevicePacketExchanger(
 }
 
 bool TunDevicePacketExchanger::WritePacket(const char* packet, size_t size,
-                                           bool* blocked, std::string* error) {
-  *blocked = false;
-  if (fd_ < 0) {
-    *error = absl::StrCat("Invalid file descriptor of the TUN device: ", fd_);
-    stats_->OnWriteError(error);
+                                           std::string* error) {
+  if (write_fd_ < 0) {
+    *error =
+        absl::StrCat("Invalid file descriptor of the TUN device: ", write_fd_);
+    stats_->OnWriteError(*error);
     return false;
   }
 
@@ -47,37 +50,45 @@ bool TunDevicePacketExchanger::WritePacket(const char* packet, size_t size,
   if (is_tap_) {
     buffer = ApplyL2Headers(*buffer);
   }
-  int result = kernel_->write(fd_, buffer->data(), buffer->length());
+
+  absl::Time start = absl::Now();
+  int result = kernel_->write(write_fd_, buffer->data(), buffer->length());
+  absl::Duration latency = std::max(absl::Now() - start, absl::ZeroDuration());
+
   if (result == -1) {
     if (errno == EWOULDBLOCK || errno == EAGAIN) {
-      // The tunnel is blocked. Note that this does not mean the receive buffer
-      // of a TCP connection is filled. This simply means the TUN device itself
-      // is blocked on handing packets to the rest of the kernel.
+      // The tunnel is blocked. Note that this does not mean the receive
+      // buffer of a TCP connection is filled. This simply means the TUN
+      // device itself is blocked on handing packets to the rest of the
+      // kernel.
       *error =
           absl::ErrnoToStatus(errno, "Write to the TUN device was blocked.")
               .message();
-      *blocked = true;
-      stats_->OnWriteError(error);
+      stats_->OnWriteError(*error);
     }
     return false;
   }
-  stats_->OnPacketWritten(result);
+  stats_->OnPacketWritten(result, latency);
 
   return true;
 }
 
 std::unique_ptr<QuicData> TunDevicePacketExchanger::ReadPacket(
-    bool* blocked, std::string* error) {
-  *blocked = false;
-  if (fd_ < 0) {
-    *error = absl::StrCat("Invalid file descriptor of the TUN device: ", fd_);
-    stats_->OnReadError(error);
+    std::string* error) {
+  if (read_fd_ < 0) {
+    *error =
+        absl::StrCat("Invalid file descriptor of the TUN device: ", read_fd_);
+    stats_->OnReadError(*error);
     return nullptr;
   }
+
   // Reading on a TUN device returns a packet at a time. If the packet is longer
   // than the buffer, it's truncated.
   auto read_buffer = std::make_unique<char[]>(mtu_);
-  int result = kernel_->read(fd_, read_buffer.get(), mtu_);
+  absl::Time start = absl::Now();
+  int result = kernel_->read(read_fd_, read_buffer.get(), mtu_);
+  absl::Duration latency = std::max(absl::Now() - start, absl::ZeroDuration());
+
   // Note that 0 means end of file, but we're talking about a TUN device - there
   // is no end of file. Therefore 0 also indicates error.
   if (result <= 0) {
@@ -85,8 +96,7 @@ std::unique_ptr<QuicData> TunDevicePacketExchanger::ReadPacket(
       *error =
           absl::ErrnoToStatus(errno, "Read from the TUN device was blocked.")
               .message();
-      *blocked = true;
-      stats_->OnReadError(error);
+      stats_->OnReadError(*error);
     }
     return nullptr;
   }
@@ -96,12 +106,17 @@ std::unique_ptr<QuicData> TunDevicePacketExchanger::ReadPacket(
     buffer = ConsumeL2Headers(*buffer);
   }
   if (buffer) {
-    stats_->OnPacketRead(buffer->length());
+    stats_->OnPacketRead(buffer->length(), latency);
   }
   return buffer;
 }
 
-void TunDevicePacketExchanger::set_file_descriptor(int fd) { fd_ = fd; }
+void TunDevicePacketExchanger::set_read_file_descriptor(int fd) {
+  read_fd_ = fd;
+}
+void TunDevicePacketExchanger::set_write_file_descriptor(int fd) {
+  write_fd_ = fd;
+}
 
 const TunDevicePacketExchanger::StatsInterface*
 TunDevicePacketExchanger::stats_interface() const {
@@ -213,10 +228,8 @@ std::unique_ptr<QuicData> TunDevicePacketExchanger::ConsumeL2Headers(
     CreateIcmpPacket(ip_hdr->ip6_src, ip_hdr->ip6_src, response_hdr,
                      absl::string_view(payload.get(), payload_size),
                      [this](absl::string_view packet) {
-                       bool blocked;
                        std::string error;
-                       WritePacket(packet.data(), packet.size(), &blocked,
-                                   &error);
+                       WritePacket(packet.data(), packet.size(), &error);
                      });
     // Do not forward the neighbor solicitation through the tunnel since it's
     // link-local.

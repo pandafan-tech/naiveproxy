@@ -81,7 +81,7 @@ void JavaHandlerThread::Stop() {
   Java_JavaHandlerThread_joinThread(env, java_thread_);
 }
 
-void JavaHandlerThread::InitializeThread(JNIEnv* env, jlong event) {
+void JavaHandlerThread::InitializeThread(JNIEnv* env, int64_t event) {
   base::ThreadIdNameManager::GetInstance()->RegisterThread(
       base::PlatformThread::CurrentHandle().platform_handle(),
       base::PlatformThread::CurrentId());
@@ -168,11 +168,9 @@ JavaHandlerThread::State::State()
       MessagePump::Create(base::MessagePumpType::JAVA);
   pump = static_cast<MessagePumpForUI*>(message_pump.get());
 
-  // We must set SetTaskRunner before binding because the Android UI pump
+  // We must set SetDefaultTaskQueue before binding because the Android UI pump
   // creates a RunLoop which samples SingleThreadTaskRunner::GetCurrentDefault.
-  static_cast<sequence_manager::internal::SequenceManagerImpl*>(
-      sequence_manager.get())
-      ->SetTaskRunner(default_task_queue->task_runner());
+  sequence_manager->SetDefaultTaskQueue(default_task_queue.get());
   sequence_manager->BindToMessagePump(std::move(message_pump));
 }
 
@@ -180,3 +178,5 @@ JavaHandlerThread::State::~State() = default;
 
 }  // namespace android
 }  // namespace base
+
+DEFINE_JNI(JavaHandlerThread)

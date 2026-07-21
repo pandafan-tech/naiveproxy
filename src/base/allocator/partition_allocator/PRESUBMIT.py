@@ -129,35 +129,128 @@ def CheckNoExternalImportInGn(input_api, output_api):
                 (f.LocalPath(), line_number + 1, import_path)))
     return errors;
 
-# partition_alloc still supports C++17, because Skia still uses C++17.
-def CheckCpp17CompatibleHeaders(input_api, output_api):
-    CPP_20_HEADERS = [
-        "barrier",
-        "bit",
-        #"compare",  Three-way comparison may be used under appropriate guards.
-        "format",
-        "numbers",
-        "ranges",
-        "semaphore",
-        "source_location",
-        "span",
-        "stop_token",
-        "syncstream",
-        "version",
+def CheckNoCpp23(input_api, output_api):
+    """Checks that no C++23 features are used."""
+
+    # 1. RAW_PATTERNS: (Regex Pattern, Feature Name).
+    # These are for syntax features or complex matching needs.
+    RAW_PATTERNS = [
+        # C++23 consteval if statement
+        (r'\bif\s+consteval\b', 'if consteval'),
+
+        # C++23 preprocessor directives
+        (r'^\s*#\s*elifdef\b', '#elifdef'),
+        (r'^\s*#\s*elifndef\b', '#elifndef'),
+        (r'^\s*#\s*warning\b', '#warning'),
+
+        # C++23 standard library modules
+        (r'\bimport\s+std\b', 'Standard Library Modules'),
+        (r'\bimport\s+std\.compat\b', 'Standard Library Modules'),
+
+        # C++23 deducing this
+        (r'\bthis\s+auto\b', 'Deducing this (explicit object parameter)'),
+
+        # C++23 size_t literal suffix
+        (r'\b\d+(?:u|U)?(?:z|Z)(?:u|U)?\b', 'size_t literal suffix (z/Z)'),
+
+        # C++23 [[assume(...)]] attribute
+        (r'\[\[assume\(.*\)\]\]', '[[assume(...)]] attribute'),
     ]
 
-    CPP_23_HEADERS = [
-        "expected",
-        "flat_map",
-        "flat_set",
-        "generator",
-        "mdspan",
-        "print",
-        "spanstream",
-        "stacktrace",
-        "stdatomic.h",
-        "stdfloat",
+    # 2. LIBRARY_SYMBOLS: Sequence[Symbol Name].
+    # Those are only for library symbols added in C++23 accessible from
+    # pre-c++23 headers.
+    LIBRARY_SYMBOLS = [
+        # <utility>, <bit>, <functional> additions
+        'std::unreachable',
+        'std::to_underlying',
+        'std::byteswap',
+        'std::forward_like',
+        'std::move_only_function',
+        'std::invoke_r',
+
+        # <memory> additions:
+        'std::start_lifetime_as',
+        'std::start_lifetime_as_array',
+        'std::out_ptr',
+        'std::inout_ptr',
+        'std::allocate_at_least',
+
+        # <algorithm> or <ranges> additions:
+        'std::ranges::to',
+        'std::ranges::fold_left',
+        'std::ranges::fold_right',
+        'std::ranges::fold_left_first',
+        'std::ranges::fold_right_last',
+        'std::ranges::fold_left_with_iter',
+        'std::ranges::contains',
+        'views::zip',
+        'views::zip_transform',
+        'views::enumerate',
+        'views::chunk',
+        'views::chunk_by',
+        'views::slide',
+        'views::stride',
+        'views::join_with',
+        'views::adjacent',
+        'views::adjacent_transform',
+        'views::cartesian_product',
+        'views::as_rvalue',
+        'views::as_const',
+        'views::repeat',
     ]
+
+    compiled_checks = []
+
+    for pattern, feature_name in RAW_PATTERNS:
+        compiled_checks.append((input_api.re.compile(pattern), feature_name))
+
+    for symbol in LIBRARY_SYMBOLS:
+        pattern = r'\b' + input_api.re.escape(symbol) + r'\b'
+        description = f'C++23 library symbol: {symbol}'
+        compiled_checks.append((input_api.re.compile(pattern), description))
+
+    sources = lambda affected_file: input_api.FilterSourceFile(
+        affected_file,
+        files_to_skip=[],
+        files_to_check=[_SOURCE_FILE_PATTERN])
+
+    errors = []
+    for f in input_api.AffectedSourceFiles(sources):
+        for line_number, line in enumerate(f.NewContents()):
+            # Rudimentary comment stripping to check code only.
+            line_no_comment = line.split('//')[0]
+
+            for matcher, error_desc in compiled_checks:
+                if matcher.search(line_no_comment):
+                    errors.append(
+                        output_api.PresubmitError(
+                            '%s:%d\nPartitionAlloc disallows C++23 feature: %s'
+                            % (f.LocalPath(), line_number + 1, error_desc)))
+
+    return errors
+
+# partition_alloc uses C++20.
+def CheckNoCpp23Features(input_api, output_api):
+    CPP_23_PATTERNS = (
+        r'#include <(expected|flat_map|flat_set|generator|mdspan|print|'
+        r'spanstream|stacktrace|stdatomic.h|stdfloat)>',
+        r'if !?consteval',
+        r'^#elifn?def',
+        r'std::byteswap',
+        r'#warning',
+        r'static.*operator(\(\)|\[\])',
+        r'std::from_range',
+        r'\[\[assume[^[]*\]\]',
+        r'std::move_only_function',
+        r'std::unreachable',
+        r'std::(in)?out_ptr',
+        r'std::start_lifetime_as',
+        r'std::ranges::(contains|contains_subrange|starts_with|ends_with|'
+        r'find_last|find_last_if|find_last_if_not|iota|shift_left|'
+        r'shift_right|fold_left|fold_left_first|fold_right|fold_right_last|'
+        r'fold_left_with_iter|fold_left_first_with_iter)',
+    )
 
     sources = lambda affected_file: input_api.FilterSourceFile(
         affected_file,
@@ -171,64 +264,14 @@ def CheckCpp17CompatibleHeaders(input_api, output_api):
     for f in input_api.AffectedSourceFiles(sources):
         # for line_number, line in f.ChangedContents():
         for line_number, line in enumerate(f.NewContents()):
-            for header in CPP_20_HEADERS:
-                if not "#include <%s>" % header in line:
+            for pattern in CPP_23_PATTERNS:
+                match = input_api.re.search(pattern, line)
+                if not match:
                     continue
                 errors.append(
                     output_api.PresubmitError(
-                        '%s:%d\nPartitionAlloc disallows C++20 headers: <%s>'
-                        % (f.LocalPath(), line_number + 1, header)))
-            for header in CPP_23_HEADERS:
-                if not "#include <%s>" % header in line:
-                    continue
-                errors.append(
-                    output_api.PresubmitError(
-                        '%s:%d\nPartitionAlloc disallows C++23 headers: <%s>'
-                        % (f.LocalPath(), line_number + 1, header)))
-    return errors
-
-def CheckCpp17CompatibleKeywords(input_api, output_api):
-    CPP_20_KEYWORDS = [
-        "concept",
-        "consteval",
-        "constinit",
-        "co_await",
-        "co_return",
-        "co_yield",
-        "requires",
-        "std::hardware_",
-        "std::is_constant_evaluated",
-        "std::bit_cast",
-        "std::midpoint",
-        "std::to_array",
-    ]
-    # Note: C++23 doesn't introduce new keywords.
-
-    sources = lambda affected_file: input_api.FilterSourceFile(
-        affected_file,
-        # compiler_specific.h may use these keywords in guarded macros.
-        files_to_skip=[r'.*partition_alloc_base/compiler_specific\.h'],
-        files_to_check=[_SOURCE_FILE_PATTERN])
-
-    errors = []
-    for f in input_api.AffectedSourceFiles(sources):
-        for line_number, line in f.ChangedContents():
-            for keyword in CPP_20_KEYWORDS:
-                if not keyword in line:
-                    continue
-                # Skip if part of a comment
-                if '//' in line and line.index('//') < line.index(keyword):
-                    continue
-
-                # Make sure there are word separators around the keyword:
-                regex = r'\b%s\b' % keyword
-                if not input_api.re.search(regex, line):
-                    continue
-
-                errors.append(
-                    output_api.PresubmitError(
-                        '%s:%d\nPartitionAlloc disallows C++20 keywords: %s'
-                        % (f.LocalPath(), line_number + 1, keyword)))
+                        '%s:%d\nPartitionAlloc disallows C++23 features: `%s`'
+                        % (f.LocalPath(), line_number + 1, match.group(0))))
     return errors
 
 # Check `NDEBUG` is not used inside partition_alloc. We prefer to use the
@@ -246,4 +289,135 @@ def CheckNoNDebug(input_api, output_api):
                 errors.append(output_api.PresubmitError('%s:%d\nPartitionAlloc'
                   % (f.LocalPath(), line_number + 1)
                   + 'disallows NDEBUG, use PA_BUILDFLAG(IS_DEBUG) instead'))
+    return errors
+
+
+def CheckUnexpectedPreprocessorDefines(input_api, output_api):
+    """
+    Checks partition_alloc doesn't depend on chrome's specific definitions.
+    """
+
+    # Macros that are allowed to be used with defined(...)
+    ALLOWED_DEFINITIONS = {
+        # Compiler built-ins
+        'ADDRESS_SANITIZER',
+        'MEMORY_SANITIZER',
+        'THREAD_SANITIZER',
+        'WIN32',
+        '_CPPUNWIND',
+        '_MSC_VER',
+        '_WIN32',
+        '_WIN64',
+        '__AIX',
+        '__APPLE__',
+        '__ARMEL__',
+        '__ARM_FEATURE_BTI_DEFAULT',
+        '__ARM_FEATURE_MEMORY_TAGGING',
+        '__EXCEPTIONS',
+        '__GNUC__',
+        '__LP64__',
+        '__OBJC__',
+        '__arm__',
+        '__clang__',
+        '__clang_analyzer__',
+        '__cpp_constexpr',
+        '__cpp_lib_atomic_value_initialization',
+        '__cpp_lib_three_way_comparison',
+        '__has_attribute',
+        '__has_builtin',
+        '__has_cpp_attribute',
+        '__has_extension',
+        '__has_feature',
+        '__has_warning',
+        '__i386__',
+        '__pic__',
+
+        # System/Library macros
+        'RTLD_DEEPBIND',
+        '_GNU_SOURCE',
+        '_POSIX_MONOTONIC_CLOCK',
+        '_POSIX_THREAD_CPUTIME',
+        '_SC_PAGESIZE',
+        'PR_SET_VMA',
+        'PR_SET_VMA_ANON_NAME',
+        '__BIONIC__',
+        '__GLIBC_PREREQ',
+        '__GLIBC__',
+        '__MALLOC_HOOK_VOLATILE',
+        '__NR_mseal',
+        '__UCLIBC__',
+        '_MIPS_ARCH_LOONGSON',
+
+        # Gtest
+        'GTEST_HAS_DEATH_TEST',
+
+        # TODO - The following macros are defined outside of partition_alloc and
+        # should be removed/replaced with PA_BUILDFLAG or PA_CONFIG at some
+        # point.
+        'BASE_ALLOCATOR_PARTITION_ALLOCATOR_SRC_PARTITION_ALLOC_PARTITION_ALLOC_BASE_CHECK_H_',
+        'BASE_ALLOCATOR_PARTITION_ALLOCATOR_SRC_PARTITION_ALLOC_PARTITION_ALLOC_CHECK_H_',
+        'BASE_CHECK_H_',
+        'HAS_HW_CAPS',
+        'HAVE_BACKTRACE',
+        'LINUX_NAME_REGION',
+        'MEMORY_TOOL_REPLACES_ALLOCATOR',
+        'NDEBUG',
+        'NEEDS_HANDLING_OF_HW_CAPABILITIES',
+    }
+
+    target_path_prefix = (
+        'base/allocator/partition_allocator/src/partition_alloc/')
+
+    def is_relevant_file(f):
+        path = f.LocalPath().replace('\\', '/')
+        if path.endswith('/build_config.h'):
+            return False
+        # Exclude tests
+        if any(x in path for x in
+               ('unittest', 'perftest', '/test/', '_unittest')):
+            return False
+        return (path.startswith(target_path_prefix) and
+                path.endswith(('.h', '.cc', '.S', '.mm')))
+
+    defined_regex = input_api.re.compile(r'defined\(\s*(\w+)\s*\)')
+
+    errors = []
+
+    for f in input_api.AffectedSourceFiles(is_relevant_file):
+        for line_number, line in f.ChangedContents():
+            matches = defined_regex.findall(line)
+            for macro in matches:
+                # Automatically allow any PartitionAlloc internal macros
+                if macro.startswith((
+                        'PA_',
+                        'PARTITION_ALLOC_',
+                        'PARTITION_ALLOCATOR_',
+                        'PAGE_ALLOCATOR_',
+                )):
+                    continue
+
+                # Ignore header guards
+                file_name = input_api.os_path.basename(f.LocalPath())
+                file_guard_part = file_name.upper().replace('.', '_') + '_'
+                if macro.endswith('_H_') and (
+                        file_guard_part in macro or
+                        macro.startswith('PARTITION_ALLOC_')):
+                    continue
+
+                if macro in ALLOWED_DEFINITIONS:
+                    continue
+
+                errors.append(
+                    output_api.PresubmitError(
+                        f'Unexpected macro `{macro}` in `defined()` in '
+                        f'{f.LocalPath()}:{line_number}.\n'
+                        f'If this is a new macro, please add it to the '
+                        f'allowed list in PRESUBMIT.py if it is a '
+                        f'compiler/system built-in.\n'
+                        f'Otherwise, use PA_BUILDFLAG or PA_CONFIG '
+                        f'instead.',
+                        items=[f'{f.LocalPath()}:{line_number}: {line}']
+                    )
+                )
+
     return errors

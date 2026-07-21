@@ -12,6 +12,7 @@
 #include "base/values.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_export.h"
+#include "net/base/network_handle.h"
 #include "net/socket/stream_attempt.h"
 
 namespace net {
@@ -27,6 +28,7 @@ class NET_EXPORT_PRIVATE TcpStreamAttempt final : public StreamAttempt {
 
   TcpStreamAttempt(const StreamAttemptParams* params,
                    IPEndPoint ip_endpoint,
+                   handles::NetworkHandle target_network,
                    perfetto::Track track,
                    const NetLogWithSource* = nullptr);
 
@@ -37,7 +39,7 @@ class NET_EXPORT_PRIVATE TcpStreamAttempt final : public StreamAttempt {
 
   LoadState GetLoadState() const override;
 
-  base::Value::Dict GetInfoAsValue() const override;
+  base::DictValue GetInfoAsValue() const override;
 
  private:
   enum class State {
@@ -49,7 +51,7 @@ class NET_EXPORT_PRIVATE TcpStreamAttempt final : public StreamAttempt {
 
   // StreamAttempt methods:
   int StartInternal() override;
-  base::Value::Dict GetNetLogStartParams() override;
+  base::DictValue GetNetLogStartParams() override;
 
   void HandleCompletion(int rv);
 

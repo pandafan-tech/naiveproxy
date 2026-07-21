@@ -28,19 +28,19 @@ using DelegationType = HttpAuth::DelegationType;
 
 namespace {
 
-base::Value::Dict SecurityStatusToValue(Error mapped_error,
-                                        SECURITY_STATUS status) {
-  base::Value::Dict params;
+base::DictValue SecurityStatusToValue(Error mapped_error,
+                                      SECURITY_STATUS status) {
+  base::DictValue params;
   params.Set("net_error", mapped_error);
   params.Set("security_status", static_cast<int>(status));
   return params;
 }
 
-base::Value::Dict AcquireCredentialsHandleParams(const std::u16string* domain,
-                                                 const std::u16string* user,
-                                                 Error result,
-                                                 SECURITY_STATUS status) {
-  base::Value::Dict params;
+base::DictValue AcquireCredentialsHandleParams(const std::u16string* domain,
+                                               const std::u16string* user,
+                                               Error result,
+                                               SECURITY_STATUS status) {
+  base::DictValue params;
   if (domain && user) {
     params.Set("domain", base::UTF16ToUTF8(*domain));
     params.Set("user", base::UTF16ToUTF8(*user));
@@ -49,18 +49,18 @@ base::Value::Dict AcquireCredentialsHandleParams(const std::u16string* domain,
   return params;
 }
 
-base::Value::Dict ContextFlagsToValue(DWORD flags) {
-  base::Value::Dict params;
+base::DictValue ContextFlagsToValue(DWORD flags) {
+  base::DictValue params;
   params.Set("value", base::StringPrintf("0x%08lx", flags));
   params.Set("delegated", (flags & ISC_RET_DELEGATE) == ISC_RET_DELEGATE);
   params.Set("mutual", (flags & ISC_RET_MUTUAL_AUTH) == ISC_RET_MUTUAL_AUTH);
   return params;
 }
 
-base::Value::Dict ContextAttributesToValue(SSPILibrary* library,
-                                           PCtxtHandle handle,
-                                           DWORD attributes) {
-  base::Value::Dict params;
+base::DictValue ContextAttributesToValue(SSPILibrary* library,
+                                         PCtxtHandle handle,
+                                         DWORD attributes) {
+  base::DictValue params;
 
   SecPkgContext_NativeNames native_names = {0};
   auto qc_result = library->QueryContextAttributesEx(
@@ -94,12 +94,12 @@ base::Value::Dict ContextAttributesToValue(SSPILibrary* library,
   return params;
 }
 
-base::Value::Dict InitializeSecurityContextParams(SSPILibrary* library,
-                                                  PCtxtHandle handle,
-                                                  Error result,
-                                                  SECURITY_STATUS status,
-                                                  DWORD attributes) {
-  base::Value::Dict params;
+base::DictValue InitializeSecurityContextParams(SSPILibrary* library,
+                                                PCtxtHandle handle,
+                                                Error result,
+                                                SECURITY_STATUS status,
+                                                DWORD attributes) {
+  base::DictValue params;
   params.Set("status", SecurityStatusToValue(result, status));
   if (result == OK) {
     params.Set("context",
@@ -212,10 +212,10 @@ Error MapInitializeSecurityContextStatusToError(SECURITY_STATUS status) {
     case SEC_E_INSUFFICIENT_MEMORY:
       return ERR_OUT_OF_MEMORY;
     case SEC_E_UNSUPPORTED_FUNCTION:
-      DUMP_WILL_BE_NOTREACHED();
+      DLOG(DFATAL);
       return ERR_UNEXPECTED;
     case SEC_E_INVALID_HANDLE:
-      DUMP_WILL_BE_NOTREACHED();
+      DLOG(DFATAL);
       return ERR_INVALID_HANDLE;
     case SEC_E_INVALID_TOKEN:
       return ERR_INVALID_RESPONSE;
@@ -545,11 +545,13 @@ int HttpAuthSSPI::GetNextSecurityToken(const std::string& spn,
   // Firefox only sets ISC_REQ_DELEGATE, but MSDN documentation indicates that
   // ISC_REQ_MUTUAL_AUTH must also be set. On Windows delegation by KDC policy
   // is always respected.
-  if (delegation_type_ != DelegationType::kNone)
+  if (scheme_ == HttpAuth::AUTH_SCHEME_NEGOTIATE &&
+      delegation_type_ != DelegationType::kNone) {
     context_flags |= (ISC_REQ_DELEGATE | ISC_REQ_MUTUAL_AUTH);
+  }
 
   net_log.BeginEvent(NetLogEventType::AUTH_LIBRARY_INIT_SEC_CTX, [&] {
-    base::Value::Dict params;
+    base::DictValue params;
     params.Set("spn", spn);
     params.Set("flags", ContextFlagsToValue(context_flags));
     return params;

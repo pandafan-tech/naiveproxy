@@ -9,7 +9,9 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <variant>
 
+#include "base/containers/span.h"
 #include "base/functional/callback_forward.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
@@ -18,10 +20,10 @@
 #include "base/timer/timer.h"
 #include "net/base/load_states.h"
 #include "net/base/load_timing_info.h"
-#include "net/base/net_errors.h"
 #include "net/base/net_export.h"
 #include "net/base/request_priority.h"
 #include "net/dns/public/host_resolver_results.h"
+#include "net/dns/public/resolution_details.h"
 #include "net/dns/public/resolve_error_info.h"
 #include "net/http/http_server_properties.h"
 #include "net/log/net_log_with_source.h"
@@ -124,6 +126,15 @@ enum class OnHostResolutionCallbackResult {
   kMayBeDeletedAsync,
 };
 
+// The output of a DNS lookup. Allows both the legacy format, and the new
+// format.
+//
+// TODO(https://crbug.com/484073410): Get rid of this and use base::span<const
+// ServiceEndpoint> directly, once TransportConnectJob has been removed.
+using HostResolverEndpointsOrServiceEndpoints =
+    std::variant<base::span<const HostResolverEndpointResult>,
+                 base::span<const ServiceEndpoint>>;
+
 // If non-null, invoked when host resolution completes. May not destroy the
 // ConnectJob synchronously, but may signal the ConnectJob may be destroyed
 // asynchronously. See OnHostResolutionCallbackResult above.
@@ -133,8 +144,10 @@ enum class OnHostResolutionCallbackResult {
 using OnHostResolutionCallback =
     base::RepeatingCallback<OnHostResolutionCallbackResult(
         const HostPortPair& host_port_pair,
-        const std::vector<HostResolverEndpointResult>& endpoint_results,
+        const HostResolverEndpointsOrServiceEndpoints& endpoint_results,
         const std::set<std::string>& aliases)>;
+
+using OnConnectJobCompleteCallback = base::OnceCallback<void(int)>;
 
 // ConnectJob provides an abstract interface for "connecting" a socket.
 // The connection may involve host resolution, tcp connection, ssl connection,
@@ -172,19 +185,6 @@ class NET_EXPORT_PRIVATE ConnectJob {
                                   HttpAuthController* auth_controller,
                                   base::OnceClosure restart_with_auth_callback,
                                   ConnectJob* job) = 0;
-
-    // Invoked when DNS aliases are resolved for the final endpoint during host
-    // resolution. This allows the delegate to associate aliases with the job
-    // and query higher layers to check if further action is needed for the DNS
-    // aliases. If no host is resolved for the endpoint, this will not be
-    // called.
-    //
-    // A return value of OK causes the ConnectJob to continue. An error value
-    // causes the ConnectJob to fail with that error. ERR_IO_PENDING may not be
-    // returned.
-    virtual Error OnDestinationDnsAliasesResolved(
-        const std::set<std::string>& aliases,
-        ConnectJob* job) = 0;
   };
 
   // A |timeout_duration| of 0 corresponds to no timeout.
@@ -249,6 +249,10 @@ class NET_EXPORT_PRIVATE ConnectJob {
   // Returns an empty list if connecting to a proxy.
   virtual ConnectionAttempts GetConnectionAttempts() const;
 
+  // Returns the details of the host resolution if available. Can be nullopt
+  // if resolution failed.
+  virtual std::optional<ResolutionDetails> GetResolutionDetails() const;
+
   // Returns error information about any host resolution attempt.
   virtual ResolveErrorInfo GetResolveErrorInfo() const = 0;
 
@@ -274,7 +278,7 @@ class NET_EXPORT_PRIVATE ConnectJob {
   }
 
   // Sets |done_closure_| which will be called when |this| is deleted.
-  void set_done_closure(base::OnceClosure done_closure);
+  void set_done_closure(OnConnectJobCompleteCallback done_closure);
 
   const NetLogWithSource& net_log() const { return net_log_; }
 
@@ -314,10 +318,6 @@ class NET_EXPORT_PRIVATE ConnectJob {
   void NotifyDelegateOfProxyAuth(const HttpResponseInfo& response,
                                  HttpAuthController* auth_controller,
                                  base::OnceClosure restart_with_auth_callback);
-
-  // Calls `Delegate::OnDestinationDnsAliasesResolved()` and returns the result.
-  // See documentation of that function for return value meaning.
-  Error HandleDnsAliasesResolved(const std::set<std::string>& aliases);
 
   // If |remaining_time| is base::TimeDelta(), stops the timeout timer, if it's
   // running. Otherwise, Starts / restarts the timeout timer to trigger in the
@@ -359,6 +359,10 @@ class NET_EXPORT_PRIVATE ConnectJob {
   // ConnectJob has started / after it has completed.
   const bool top_level_job_;
   NetLogWithSource net_log_;
+
+  // The final net error code of the `ConnectJob`. Set when the `ConnectJob`
+  // completes.
+  std::optional<int> net_error_;
   // This is called when |this| is deleted.
   base::ScopedClosureRunner done_closure_;
   const NetLogEventType net_log_connect_event_type_;

@@ -14,10 +14,10 @@ namespace net {
 
 namespace {
 
-base::Value::Dict NetLogInitEndInfoParams(int result,
-                                          int total_size,
-                                          bool is_chunked) {
-  base::Value::Dict dict;
+base::DictValue NetLogInitEndInfoParams(int result,
+                                        int total_size,
+                                        bool is_chunked) {
+  base::DictValue dict;
 
   dict.Set("net_error", result);
   dict.Set("total_size", total_size);
@@ -25,8 +25,8 @@ base::Value::Dict NetLogInitEndInfoParams(int result,
   return dict;
 }
 
-base::Value::Dict CreateReadInfoParams(int current_position) {
-  base::Value::Dict dict;
+base::DictValue CreateReadInfoParams(int current_position) {
+  base::DictValue dict;
 
   dict.Set("current_position", current_position);
   return dict;
@@ -173,9 +173,10 @@ void UploadDataStream::OnReadCompleted(int result) {
   if (result > 0) {
     current_position_ += result;
     if (!is_chunked_) {
-      DCHECK_LE(current_position_, total_size_);
-      if (current_position_ == total_size_)
+      CHECK_LE(current_position_, total_size_);
+      if (current_position_ == total_size_) {
         is_eof_ = true;
+      }
     }
   }
 

@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "net/quic/quic_chromium_client_session.h"
 
 #include <algorithm>
@@ -15,20 +10,23 @@
 #include <string_view>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/compiler_specific.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/metrics/sparse_histogram.h"
 #include "base/no_destructor.h"
 #include "base/numerics/checked_math.h"
 #include "base/observer_list.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
@@ -45,12 +43,16 @@
 #include "net/base/privacy_mode.h"
 #include "net/base/session_usage.h"
 #include "net/base/url_util.h"
+#include "net/cert/cert_status_flags.h"
 #include "net/cert/signed_certificate_timestamp_and_status.h"
+#include "net/cert/x509_certificate.h"
+#include "net/cert/x509_util.h"
 #include "net/dns/public/secure_dns_policy.h"
 #include "net/http/transport_security_state.h"
 #include "net/log/net_log_event_type.h"
 #include "net/log/net_log_source_type.h"
 #include "net/log/net_log_values.h"
+#include "net/net_buildflags.h"
 #include "net/quic/address_utils.h"
 #include "net/quic/crypto/proof_verifier_chromium.h"
 #include "net/quic/quic_chromium_connection_helper.h"
@@ -74,6 +76,7 @@
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "net/websockets/websocket_quic_spdy_stream.h"
 #include "third_party/boringssl/src/include/openssl/ssl.h"
+#include "third_party/boringssl/src/pki/signature_algorithm.h"
 #include "url/origin.h"
 #include "url/scheme_host_port.h"
 
@@ -85,8 +88,11 @@ BASE_FEATURE(kQuicMigrationIgnoreDisconnectSignalDuringProbing,
              "kQuicMigrationIgnoreDisconnectSignalDuringProbing",
              base::FEATURE_DISABLED_BY_DEFAULT);
 
+// This feature caused an issue that was fixed by https://crrev.com/c/7071963.
+// It's suffixed with V2 to ensure that code without the fix cannot enable
+// the feature.
 BASE_FEATURE(kQuicRegisterConnectionClosePayload,
-             "kQuicRegisterConnectionClosePayload",
+             "kQuicRegisterConnectionClosePayloadV2",
              base::FEATURE_DISABLED_BY_DEFAULT);
 
 }  // namespace features
@@ -269,43 +275,43 @@ void LogConnectionDurationMetrics(
   }
 }
 
-base::Value::Dict NetLogQuicMigrationFailureParams(
+base::DictValue NetLogQuicMigrationFailureParams(
     quic::QuicConnectionId connection_id,
     std::string_view reason) {
-  return base::Value::Dict()
+  return base::DictValue()
       .Set("connection_id", connection_id.ToString())
       .Set("reason", reason);
 }
 
-base::Value::Dict NetLogQuicMigrationSuccessParams(
+base::DictValue NetLogQuicMigrationSuccessParams(
     quic::QuicConnectionId connection_id) {
-  return base::Value::Dict().Set("connection_id", connection_id.ToString());
+  return base::DictValue().Set("connection_id", connection_id.ToString());
 }
 
-base::Value::Dict NetLogProbingResultParams(
+base::DictValue NetLogProbingResultParams(
     handles::NetworkHandle network,
     const quic::QuicSocketAddress* peer_address,
     bool is_success) {
-  return base::Value::Dict()
+  return base::DictValue()
       .Set("network", base::NumberToString(network))
       .Set("peer address", peer_address->ToString())
       .Set("is_success", is_success);
 }
 
-base::Value::Dict NetLogAcceptChFrameReceivedParams(
+base::DictValue NetLogAcceptChFrameReceivedParams(
     spdy::AcceptChOriginValuePair entry) {
-  return base::Value::Dict()
+  return base::DictValue()
       .Set("origin", entry.origin)
       .Set("accept_ch", entry.value);
 }
 
-base::Value::Dict NetLogReceivedOrigins(
+base::DictValue NetLogReceivedOrigins(
     const std::set<url::SchemeHostPort>& received_origins) {
-  base::Value::List origins;
+  base::ListValue origins;
   for (const auto& origin : received_origins) {
     origins.Append(origin.Serialize());
   }
-  return base::Value::Dict().Set("origins", std::move(origins));
+  return base::DictValue().Set("origins", std::move(origins));
 }
 
 // Histogram for recording the different reasons that a QUIC session is unable
@@ -324,7 +330,7 @@ void RecordHandshakeFailureReason(HandshakeFailureReason reason) {
 }
 
 // Note: these values must be kept in sync with the corresponding values in:
-// tools/metrics/histograms/histograms.xml
+// tools/metrics/histograms/metadata/net/histograms.xml
 enum HandshakeState {
   STATE_STARTED = 0,
   STATE_ENCRYPTION_ESTABLISHED = 1,
@@ -385,7 +391,7 @@ std::string MigrationCauseToString(MigrationCause cause) {
   return "InvalidCause";
 }
 
-base::Value::Dict NetLogQuicClientSessionParams(
+base::DictValue NetLogQuicClientSessionParams(
     const NetLogWithSource& net_log,
     const QuicSessionKey* session_key,
     const quic::QuicConnectionId& connection_id,
@@ -393,9 +399,11 @@ base::Value::Dict NetLogQuicClientSessionParams(
     const quic::ParsedQuicVersionVector& supported_versions,
     int cert_verify_flags,
     bool require_confirmation,
-    base::span<const uint8_t> ech_config_list) {
+    base::span<const uint8_t> ech_config_list,
+    const std::vector<std::vector<uint8_t>>& server_trust_anchor_ids,
+    const quic::QuicSSLConfig& ssl_config) {
   auto dict =
-      base::Value::Dict()
+      base::DictValue()
           .Set("host", session_key->server_id().host())
           .Set("port", session_key->server_id().port())
           .Set("connection_id", connection_id.ToString())
@@ -419,6 +427,16 @@ base::Value::Dict NetLogQuicClientSessionParams(
   }
   if (!ech_config_list.empty()) {
     dict.Set("ech_config_list", NetLogBinaryValue(ech_config_list));
+  }
+  if (!server_trust_anchor_ids.empty()) {
+    dict.Set("trust_anchor_ids_from_dns",
+             x509_util::TrustAnchorIDsToString(server_trust_anchor_ids));
+  }
+  if (ssl_config.trust_anchor_ids.has_value()) {
+    dict.Set(
+        "selected_trust_anchor_ids",
+        x509_util::TrustAnchorIDsToString(x509_util::ParseTlsTrustAnchorIDs(
+            base::as_byte_span(*ssl_config.trust_anchor_ids))));
   }
   net_log.source().AddToEventParameters(dict);
   return dict;
@@ -518,6 +536,15 @@ QuicChromiumClientSession::Handle::GetConnectTiming() {
   }
 
   return session_->GetConnectTiming();
+}
+
+std::optional<ResolutionDetails>
+QuicChromiumClientSession::Handle::GetResolutionDetails() const {
+  if (!session_) {
+    return std::nullopt;
+  }
+
+  return session_->GetResolutionDetails();
 }
 
 void QuicChromiumClientSession::Handle::PopulateNetErrorDetails(
@@ -1004,6 +1031,7 @@ QuicChromiumClientSession::QuicChromiumClientSession(
     const char* const connection_description,
     base::TimeTicks dns_resolution_start_time,
     base::TimeTicks dns_resolution_end_time,
+    std::optional<ResolutionDetails> resolution_details,
     const base::TickClock* tick_clock,
     base::SequencedTaskRunner* task_runner,
     std::unique_ptr<SocketPerformanceWatcher> socket_performance_watcher,
@@ -1047,6 +1075,7 @@ QuicChromiumClientSession::QuicChromiumClientSession(
       task_runner_(task_runner),
       net_log_(NetLogWithSource::Make(net_log.net_log(),
                                       NetLogSourceType::QUIC_SESSION)),
+      resolution_details_(std::move(resolution_details)),
       logger_(std::make_unique<QuicConnectionLogger>(
           this,
           connection_description,
@@ -1075,7 +1104,8 @@ QuicChromiumClientSession::QuicChromiumClientSession(
     return NetLogQuicClientSessionParams(
         net_log, &session_key_, connection_id(),
         connection->client_connection_id(), supported_versions(),
-        cert_verify_flags, require_confirmation_, ech_config_list_);
+        cert_verify_flags, require_confirmation_, ech_config_list_,
+        trust_anchor_ids_, GetSSLConfig());
   });
   // Associate the owned NetLog with the parent NetLog.
   net_log.AddEventReferencingSource(NetLogEventType::QUIC_SESSION_CREATED,
@@ -1145,21 +1175,6 @@ QuicChromiumClientSession::~QuicChromiumClientSession() {
     return;
   }
 
-  // Sending one client_hello means we had zero handshake-round-trips.
-  int round_trip_handshakes = crypto_stream_->num_sent_client_hellos() - 1;
-
-  SSLInfo ssl_info;
-  // QUIC supports only secure urls.
-  if (GetSSLInfo(&ssl_info) && ssl_info.cert.get()) {
-    UMA_HISTOGRAM_CUSTOM_COUNTS("Net.QuicSession.ConnectRandomPortForHTTPS",
-                                round_trip_handshakes, 1, 3, 4);
-    if (require_confirmation_) {
-      UMA_HISTOGRAM_CUSTOM_COUNTS(
-          "Net.QuicSession.ConnectRandomPortRequiringConfirmationForHTTPS",
-          round_trip_handshakes, 1, 3, 4);
-    }
-  }
-
   const quic::QuicConnectionStats stats = connection()->GetStats();
 
   // The MTU used by QUIC is limited to a fairly small set of predefined values
@@ -1224,7 +1239,7 @@ void QuicChromiumClientSession::OnHttp3GoAway(uint64_t id) {
 
   PerformActionOnActiveStreams([id](quic::QuicStream* stream) {
     if (stream->id() >= id) {
-      static_cast<QuicChromiumClientStream*>(stream)->OnError(
+      static_cast<QuicChromiumClientStreamBase*>(stream)->OnError(
           ERR_QUIC_GOAWAY_REQUEST_CAN_BE_RETRIED);
     }
     return true;
@@ -1294,12 +1309,12 @@ void QuicChromiumClientSession::AddHandle(Handle* handle) {
     return;
   }
 
-  DCHECK(!base::Contains(handles_, handle));
+  DCHECK(!handles_.contains(handle));
   handles_.insert(handle);
 }
 
 void QuicChromiumClientSession::RemoveHandle(Handle* handle) {
-  DCHECK(base::Contains(handles_, handle));
+  DCHECK(handles_.contains(handle));
   handles_.erase(handle);
 }
 
@@ -1360,9 +1375,10 @@ int QuicChromiumClientSession::TryCreateStream(StreamRequest* request) {
 
   bool can_open_next = CanOpenNextOutgoingBidirectionalStream();
   if (can_open_next) {
-    request->stream_ =
-        CreateOutgoingReliableStreamImpl(request->traffic_annotation())
-            ->CreateHandle();
+    request->stream_ = CreateOutgoingReliableStreamImpl(
+                           request->traffic_annotation(),
+                           /*max_stream_limit_pending_delay=*/base::TimeDelta())
+                           ->CreateHandle();
     return OK;
   }
 
@@ -1414,6 +1430,10 @@ bool QuicChromiumClientSession::WasConnectionEverUsed() {
   return stats.bytes_sent > 0 || stats.bytes_received > 0;
 }
 
+bool QuicChromiumClientSession::was_ever_used_to_create_streams() const {
+  return num_total_streams_ > 0;
+}
+
 QuicChromiumClientStream*
 QuicChromiumClientSession::CreateOutgoingBidirectionalStream() {
   NOTREACHED() << "CreateOutgoingReliableStreamImpl should be called directly";
@@ -1421,11 +1441,13 @@ QuicChromiumClientSession::CreateOutgoingBidirectionalStream() {
 
 QuicChromiumClientStream*
 QuicChromiumClientSession::CreateOutgoingReliableStreamImpl(
-    const NetworkTrafficAnnotationTag& traffic_annotation) {
+    const NetworkTrafficAnnotationTag& traffic_annotation,
+    base::TimeDelta max_stream_limit_pending_delay) {
   DCHECK(connection()->connected());
   QuicChromiumClientStream* stream = new QuicChromiumClientStream(
       GetNextOutgoingBidirectionalStreamId(), this, server_id(),
-      quic::BIDIRECTIONAL, net_log_, traffic_annotation);
+      quic::BIDIRECTIONAL, net_log_, traffic_annotation,
+      max_stream_limit_pending_delay);
   ActivateStream(base::WrapUnique(stream));
   ++num_total_streams_;
   UMA_HISTOGRAM_COUNTS_1M("Net.QuicSession.NumOpenStreams",
@@ -1474,8 +1496,11 @@ bool QuicChromiumClientSession::GetSSLInfo(SSLInfo* ssl_info) const {
 
   ssl_info->signed_certificate_timestamps = cert_verify_result_->scts;
   ssl_info->ct_policy_compliance = cert_verify_result_->policy_compliance;
+#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+  ssl_info->crs_root_id = cert_verify_result_->crs_root_id;
+#endif
 
-  DCHECK(connection()->version().UsesTls());
+  DCHECK(connection()->version().IsIetfQuic());
   const auto& crypto_params = crypto_stream_->crypto_negotiated_params();
   uint16_t cipher_suite = crypto_params.cipher_suite;
   int ssl_connection_status = 0;
@@ -1487,6 +1512,8 @@ bool QuicChromiumClientSession::GetSSLInfo(SSLInfo* ssl_info) const {
   ssl_info->key_exchange_group = crypto_params.key_exchange_group;
   ssl_info->peer_signature_algorithm = crypto_params.peer_signature_algorithm;
   ssl_info->encrypted_client_hello = crypto_params.encrypted_client_hello;
+  ssl_info->early_data_accepted =
+      crypto_stream_->EarlyDataReason() == ssl_early_data_accepted;
   return true;
 }
 
@@ -1604,34 +1631,6 @@ QuicChromiumClientStream* QuicChromiumClientSession::CreateIncomingStream(
   return CreateIncomingReliableStreamImpl(id, traffic_annotation);
 }
 
-QuicChromiumClientStream* QuicChromiumClientSession::CreateIncomingStream(
-    quic::PendingStream* pending) {
-  net::NetworkTrafficAnnotationTag traffic_annotation =
-      net::DefineNetworkTrafficAnnotation(
-          "quic_chromium_incoming_pending_session", R"(
-      semantics {
-        sender: "Quic Chromium Client Session Pending Stream"
-        description:
-          "When a web server needs to push a response to a client, an incoming "
-          "stream is created to reply to the client with pushed message instead "
-          "of a message from the network."
-        trigger:
-          "A request by a server to push a response to the client."
-        data: "This stream is only used to receive data from the server."
-        destination: OTHER
-        destination_other:
-          "The web server pushing the response."
-      }
-      policy {
-        cookies_allowed: NO
-        setting: "This feature cannot be disabled in settings."
-        policy_exception_justification:
-          "Essential for network access."
-      }
-  )");
-  return CreateIncomingReliableStreamImpl(pending, traffic_annotation);
-}
-
 QuicChromiumClientStream*
 QuicChromiumClientSession::CreateIncomingReliableStreamImpl(
     quic::QuicStreamId id,
@@ -1640,20 +1639,7 @@ QuicChromiumClientSession::CreateIncomingReliableStreamImpl(
 
   QuicChromiumClientStream* stream = new QuicChromiumClientStream(
       id, this, server_id(), quic::READ_UNIDIRECTIONAL, net_log_,
-      traffic_annotation);
-  ActivateStream(base::WrapUnique(stream));
-  ++num_total_streams_;
-  return stream;
-}
-
-QuicChromiumClientStream*
-QuicChromiumClientSession::CreateIncomingReliableStreamImpl(
-    quic::PendingStream* pending,
-    const NetworkTrafficAnnotationTag& traffic_annotation) {
-  DCHECK(connection()->connected());
-
-  QuicChromiumClientStream* stream = new QuicChromiumClientStream(
-      pending, this, server_id(), net_log_, traffic_annotation);
+      traffic_annotation, /*max_stream_limit_pending_delay=*/std::nullopt);
   ActivateStream(base::WrapUnique(stream));
   ++num_total_streams_;
   return stream;
@@ -1687,8 +1673,10 @@ void QuicChromiumClientSession::OnCanCreateNewOutgoingStream(
     StreamRequest* request = stream_requests_.front();
     // TODO(ckrasic) - analyze data and then add logic to mark QUIC
     // broken if wait times are excessive.
+    base::TimeDelta pending_wait_time =
+        tick_clock_->NowTicks() - request->pending_start_time_;
     UMA_HISTOGRAM_TIMES("Net.QuicSession.PendingStreamsWaitTime",
-                        tick_clock_->NowTicks() - request->pending_start_time_);
+                        pending_wait_time);
     stream_requests_.pop_front();
 
 #if BUILDFLAG(ENABLE_WEBSOCKETS)
@@ -1696,14 +1684,14 @@ void QuicChromiumClientSession::OnCanCreateNewOutgoingStream(
       std::unique_ptr<WebSocketQuicStreamAdapter> adapter =
           CreateWebSocketQuicStreamAdapterImpl(
               request->websocket_adapter_delegate_);
-      request->websocket_adapter_delegate_ = nullptr;
       std::move(request->start_websocket_callback_).Run(std::move(adapter));
       continue;
     }
 #endif  // BUILDFLAG(ENABLE_WEBSOCKETS)
 
     request->OnRequestCompleteSuccess(
-        CreateOutgoingReliableStreamImpl(request->traffic_annotation())
+        CreateOutgoingReliableStreamImpl(request->traffic_annotation(),
+                                         pending_wait_time)
             ->CreateHandle());
   }
 }
@@ -1717,13 +1705,21 @@ quic::QuicSSLConfig QuicChromiumClientSession::GetSSLConfig() const {
     config.ech_config_list.assign(ech_config_list_.begin(),
                                   ech_config_list_.end());
   }
-  if (!ssl_context_config.trust_anchor_ids.empty() &&
-      base::FeatureList::IsEnabled(features::kTLSTrustAnchorIDs)) {
-    config.trust_anchor_ids =
-        base::as_string_view(SSLConfig::SelectTrustAnchorIDs(
-            trust_anchor_ids_, ssl_context_config.trust_anchor_ids));
+  if (ssl_context_config.ShouldAdvertiseTrustAnchorIDs()) {
+    config.trust_anchor_ids = base::as_string_view(
+        ssl_context_config.SelectTrustAnchorIDs(trust_anchor_ids_));
   }
+  // TODO(crbug.com/515272365) add server padding flag to QUIC config once its
+  // there.
   return config;
+}
+
+void QuicChromiumClientSession::OnConfigNegotiated() {
+  connection_migration_disabled_ = config()->DisableConnectionMigration();
+  if (config()->HasReceivedConnectionOptions()) {
+    received_connection_options_ = config()->ReceivedConnectionOptions();
+  }
+  QuicSession::OnConfigNegotiated();
 }
 
 void QuicChromiumClientSession::SetDefaultEncryptionLevel(
@@ -1774,9 +1770,9 @@ void QuicChromiumClientSession::RegisterQuicConnectionClosePayload() {
       connection()->SerializeLargePacketNumberConnectionClosePacket(
           quic::QUIC_CLIENT_LOST_NETWORK_ACCESS,
           "App loses network access on Android");
-  base::span<uint8_t> payload(
-      (uint8_t*)connection_close_packet->encrypted_buffer,
-      connection_close_packet->encrypted_length);
+  auto payload = UNSAFE_TODO(
+      base::span<uint8_t>((uint8_t*)connection_close_packet->encrypted_buffer,
+                          connection_close_packet->encrypted_length));
   static_cast<QuicChromiumPacketWriter*>(connection()->writer())
       ->RegisterQuicConnectionClosePayload(payload);
 }
@@ -1858,7 +1854,7 @@ void QuicChromiumClientSession::LogZeroRttStats() {
   }
 
   net_log_.AddEvent(NetLogEventType::QUIC_SESSION_ZERO_RTT_STATE, [&] {
-    return base::Value::Dict().Set("state", ZeroRttStateToString(state));
+    return base::DictValue().Set("state", ZeroRttStateToString(state));
   });
 }
 
@@ -2129,7 +2125,7 @@ void QuicChromiumClientSession::OnConnectionClosed(
         session_creation_initiator_);
 
     // KeyUpdates are used in TLS, but we no longer support pre-TLS QUIC.
-    DCHECK(connection()->version().UsesTls());
+    DCHECK(connection()->version().IsIetfQuic());
     base::UmaHistogramCounts100("Net.QuicSession.KeyUpdate.PerConnection2",
                                 connection()->GetStats().key_update_count);
     base::UmaHistogramCounts100(
@@ -2321,7 +2317,7 @@ void QuicChromiumClientSession::MigrateSessionOnWriteError(
   }
 
   // Do not migrate if connection migration is disabled.
-  if (config()->DisableConnectionMigration()) {
+  if (connection_migration_disabled_) {
     HistogramAndLogMigrationFailure(MIGRATION_STATUS_DISABLED_BY_CONFIG,
                                     connection_id(),
                                     "Migration disabled by config");
@@ -2788,6 +2784,11 @@ void QuicChromiumClientSession::OnNetworkDisconnectedV2(
 
 void QuicChromiumClientSession::OnNetworkMadeDefault(
     handles::NetworkHandle new_network) {
+  if (base::FeatureList::IsEnabled(
+          features::kQuicIgnoreRedundantOnNetworkMadeDefault) &&
+      default_network_ == new_network) {
+    return;
+  }
   migration_info_.event_count.default_network_changed_num++;
   migration_info_.event_count.default_network_changed_num =
       base::CheckAdd(migration_info_.event_count.default_network_changed_num, 1)
@@ -2856,7 +2857,7 @@ void QuicChromiumClientSession::MigrateNetworkImmediately(
   }
 
   // Do not migrate if connection migration is disabled.
-  if (config()->DisableConnectionMigration()) {
+  if (connection_migration_disabled_) {
     HistogramAndLogMigrationFailure(MIGRATION_STATUS_DISABLED_BY_CONFIG,
                                     connection_id(),
                                     "Migration disabled by config");
@@ -3017,15 +3018,183 @@ void QuicChromiumClientSession::OnProofValid(
   server_info_->Persist();
 }
 
+static std::vector<std::vector<uint8_t>> ServerTrustAnchorIDs(SSL* ssl) {
+  const uint8_t* peer_trust_anchors;
+  size_t peer_trust_anchors_len;
+  SSL_get0_peer_available_trust_anchors(ssl, &peer_trust_anchors,
+                                        &peer_trust_anchors_len);
+  return x509_util::ParseTlsTrustAnchorIDs(
+      // SAFETY:
+      // SSL_get0_peer_available_trust_anchors sets peer_trust_anchors to point
+      // to peer_trust_anchors_len bytes. See
+      // https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#Trust-Anchor-Identifiers
+      UNSAFE_BUFFERS(base::span(peer_trust_anchors, peer_trust_anchors_len)));
+}
+
+constexpr uint8_t kMtcExperimentBaseId[] = {0x82, 0xda, 0x4b, 0x30, 0x07};
+
+// Generates histogram names for histograms that have variants split by
+// session resumption.
+static std::string HistogramNameForResumptionVariant(std::string_view prefix,
+                                                     bool is_resumption) {
+  return base::StrCat(
+      {prefix, is_resumption ? ".Resumption" : ".NewConnection"});
+}
+
+// Logs the Net.QuicSession.MTCResult and Net.QuicSession.MTCLandmarkDelta
+// histograms.
+static void LogMTCCertVerifyMetrics(
+    const std::vector<std::vector<uint8_t>>& client_mtc_tais,
+    const std::vector<std::vector<uint8_t>>& server_tais,
+    const ProofVerifyDetailsChromium* verify_details,
+    int64_t mtc_update_time_seconds) {
+  std::optional<uint64_t> client_landmark;
+  std::optional<uint64_t> server_landmark;
+  for (const auto& id : client_mtc_tais) {
+    auto landmark =
+        x509_util::LastOidComponentFromBase(id, kMtcExperimentBaseId);
+    if (landmark.has_value()) {
+      client_landmark = landmark;
+      break;
+    }
+  }
+  for (const auto& id : server_tais) {
+    auto landmark =
+        x509_util::LastOidComponentFromBase(id, kMtcExperimentBaseId);
+    if (landmark.has_value()) {
+      server_landmark = landmark;
+      break;
+    }
+  }
+  bool have_landmark_delta = false;
+  bool old_client = false;
+  if (client_landmark.has_value() && server_landmark.has_value()) {
+    have_landmark_delta = true;
+    if (*server_landmark > *client_landmark) {
+      old_client = true;
+      UMA_HISTOGRAM_COUNTS_1000("Net.QuicSession.MTCLandmarkDelta2.OldClient",
+                                *server_landmark - *client_landmark);
+    } else {
+      UMA_HISTOGRAM_COUNTS_1000(
+          "Net.QuicSession.MTCLandmarkDelta2.CurrentClient",
+          *client_landmark - *server_landmark);
+    }
+  }
+  if (mtc_update_time_seconds != 0) {
+    base::TimeDelta landmark_age =
+        base::Time::Now() -
+        base::Time::FromSecondsSinceUnixEpoch(mtc_update_time_seconds);
+    // The MTCMetadata is only useful for a max of 7 days. The histogram logs
+    // thru 10 days so that if clients are out of date, we have somewhat of an
+    // idea of how out of date they are.
+    UMA_HISTOGRAM_CUSTOM_TIMES("Net.QuicSession.MTCMetadataAge2", landmark_age,
+                               base::Seconds(1), base::Days(10), 100);
+    UMA_HISTOGRAM_BOOLEAN("Net.QuicSession.HasMTCMetadata2", true);
+  } else {
+    UMA_HISTOGRAM_BOOLEAN("Net.QuicSession.HasMTCMetadata2", false);
+  }
+
+  bool cert_is_mtc =
+      verify_details->cert_verify_result.verified_cert->signature_algorithm() ==
+      bssl::SignatureAlgorithm::kMtcProofDraftDavidben08;
+
+  MTCResult result;
+  if (cert_is_mtc) {
+    if (!IsCertStatusError(verify_details->cert_verify_result.cert_status)) {
+      result = MTCResult::kValidMTC;
+    } else {
+      result = MTCResult::kInvalidMTC;
+    }
+  } else {
+    // Classical cert
+    if (!have_landmark_delta) {
+      result = MTCResult::kClassicalCertUnknownLandmarkDelta;
+    } else if (old_client) {
+      result = MTCResult::kClassicalCertOldClient;
+    } else {
+      result = MTCResult::kClassicalCertExpectedMTC;
+    }
+  }
+  UMA_HISTOGRAM_ENUMERATION("Net.QuicSession.MTCResult2", result);
+
+  base::UmaHistogramSparse(
+      "Net.QuicSession.CertVerificationResult.MTCAdvertised2",
+      -verify_details->cert_verify_net_error_for_metrics_only);
+  if (cert_is_mtc) {
+    base::UmaHistogramSparse(
+        "Net.QuicSession.CertVerificationResult.MTCReceived2",
+        -verify_details->cert_verify_net_error_for_metrics_only);
+  }
+}
+
 void QuicChromiumClientSession::OnProofVerifyDetailsAvailable(
     const quic::ProofVerifyDetails& verify_details) {
   const ProofVerifyDetailsChromium* verify_details_chromium =
       reinterpret_cast<const ProofVerifyDetailsChromium*>(&verify_details);
   cert_verify_result_ = std::make_unique<CertVerifyResult>(
       verify_details_chromium->cert_verify_result);
-  logger_->OnCertificateVerified(*cert_verify_result_);
+  std::vector<std::vector<uint8_t>> server_tais =
+      ServerTrustAnchorIDs(crypto_stream_->GetSsl());
+  logger_->OnCertificateVerified(*cert_verify_result_, server_tais);
   pkp_bypassed_ = verify_details_chromium->pkp_bypassed;
   is_fatal_cert_error_ = verify_details_chromium->is_fatal_cert_error;
+
+  for (const auto& id : server_tais) {
+    // 44363.48.7 encoded as a relative OID
+    if (x509_util::LastOidComponentFromBase(id, kMtcExperimentBaseId) !=
+        std::nullopt) {
+      server_supports_mtc_tai_ = true;
+    }
+  }
+  if (verify_details_chromium->cert_verify_result.verified_cert
+          ->signature_algorithm() ==
+      bssl::SignatureAlgorithm::kMtcProofDraftDavidben08) {
+    server_supports_mtc_tai_ = true;
+  }
+
+  bool verify_mtcs_enabled = false;
+#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+  verify_mtcs_enabled =
+      base::FeatureList::IsEnabled(net::features::kVerifyMTCs);
+#endif
+  // This function runs as part of the cert verify callback. That callback runs
+  // in 2 conditions: When receiving a Certificate message from the server (as
+  // part of a full handshake), and if we are attempting resumption, it runs (at
+  // some point during the handshake) using the cached cert in the SSL_SESSION.
+  // If no resumption is attempted, or if resumption is attempted and accepted,
+  // it runs once per handshake. However, if resumption is attempted and
+  // rejected, it runs twice.
+  //
+  // To ensure that metrics reflect what we observe in a certificate from a
+  // server (and that they're only logged once per connection), the following
+  // detects whether this function is running as part of a reverify_on_resume.
+  // If it is part of a reverification, then the cert is cached rather than sent
+  // from the server on this connection and we shouldn't log metrics.
+
+  // Reverifies only happen on resumption attempts.
+  bool is_resumption_attempt = crypto_stream_->ResumptionAttempted();
+  // If SSL_session_reused says this connection is a resumption handshake, then
+  // we're definitely in a reverify call.
+  bool is_resumption = SSL_session_reused(crypto_stream_->GetSsl());
+  // If we're in a 0-RTT resumption attempt, the reverify runs before sending
+  // any early data, so ssl->s3->session_reused hasn't been set yet.
+  // SSL_session_reused will return true if that is true or SSL_in_early_data
+  // returns true, but due to the ordering of calls in BoringSSL, cert
+  // reverification happens before in_early_data is set. We can exploit the
+  // nature of this timing difference by looking at the ssl_early_data_reason_t,
+  // which also doesn't get set until after the early cert reverify call.
+  bool early_data_reason_unknown =
+      crypto_stream_->EarlyDataReason() == ssl_early_data_unknown;
+  bool is_reverify =
+      is_resumption_attempt && (is_resumption || early_data_reason_unknown);
+  if (!is_reverify && server_supports_mtc_tai_ && verify_mtcs_enabled) {
+    auto client_mtc_tais =
+        ssl_config_service_->GetSSLContextConfig().mtc_trust_anchor_ids;
+    int64_t mtc_update_time_seconds =
+        ssl_config_service_->GetSSLContextConfig().mtc_update_time_seconds;
+    LogMTCCertVerifyMetrics(client_mtc_tais, server_tais,
+                            verify_details_chromium, mtc_update_time_seconds);
+  }
 }
 
 void QuicChromiumClientSession::StartReading() {
@@ -3082,7 +3251,7 @@ void QuicChromiumClientSession::CloseSessionOnErrorLater(
 
 void QuicChromiumClientSession::NotifyAllStreamsOfError(int net_error) {
   PerformActionOnActiveStreams([net_error](quic::QuicStream* stream) {
-    static_cast<QuicChromiumClientStream*>(stream)->OnError(net_error);
+    static_cast<QuicChromiumClientStreamBase*>(stream)->OnError(net_error);
     return true;
   });
 }
@@ -3133,7 +3302,7 @@ void QuicChromiumClientSession::MaybeMigrateToDifferentPortOnPathDegrading() {
     return;
   }
 
-  if (config()->DisableConnectionMigration()) {
+  if (connection_migration_disabled_) {
     HistogramAndLogMigrationFailure(MIGRATION_STATUS_DISABLED_BY_CONFIG,
                                     connection_id(),
                                     "Migration disabled by config");
@@ -3240,7 +3409,7 @@ void QuicChromiumClientSession::MaybeStartProbing(
     return;
   }
 
-  if (config()->DisableConnectionMigration()) {
+  if (connection_migration_disabled_) {
     DVLOG(1) << "Client disables probing network with connection migration "
              << "disabled by config";
     HistogramAndLogMigrationFailure(MIGRATION_STATUS_DISABLED_BY_CONFIG,
@@ -3528,7 +3697,7 @@ bool QuicChromiumClientSession::CheckIdleTimeExceedsIdleMigrationPeriod() {
 
   HistogramAndLogMigrationFailure(MIGRATION_STATUS_IDLE_MIGRATION_TIMEOUT,
                                   connection_id(),
-                                  "Ilde migration period exceeded");
+                                  "Idle migration period exceeded");
   CloseSessionOnErrorLater(ERR_NETWORK_CHANGED, quic::QUIC_NETWORK_IDLE_TIMEOUT,
                            quic::ConnectionCloseBehavior::SILENT_CLOSE);
   return true;
@@ -3538,13 +3707,12 @@ void QuicChromiumClientSession::ResetNonMigratableStreams() {
   // TODO(zhongyi): may close non-migratable draining streams as well to avoid
   // sending additional data on alternate networks.
   PerformActionOnActiveStreams([](quic::QuicStream* stream) {
-    QuicChromiumClientStream* chrome_stream =
-        static_cast<QuicChromiumClientStream*>(stream);
-    if (!chrome_stream->can_migrate_to_cellular_network()) {
+    if (!static_cast<QuicChromiumClientStreamBase*>(stream)
+             ->CanMigrateToCellularNetwork()) {
       // Close the stream in both direction by resetting the stream.
       // TODO(zhongyi): use a different error code to reset streams for
       // connection migration.
-      chrome_stream->Reset(quic::QUIC_STREAM_CANCELLED);
+      stream->Reset(quic::QUIC_STREAM_CANCELLED);
     }
     return true;
   });
@@ -3694,13 +3862,13 @@ void QuicChromiumClientSession::HistogramAndLogMigrationSuccess(
   LogMigrationResultToHistogram(MIGRATION_STATUS_SUCCESS);
 }
 
-base::Value::Dict QuicChromiumClientSession::GetInfoAsValue(
+base::DictValue QuicChromiumClientSession::GetInfoAsValue(
     const std::set<HostPortPair>& aliases) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("version", ParsedQuicVersionToString(connection()->version()));
   dict.Set("open_streams", static_cast<int>(GetNumActiveStreams()));
 
-  base::Value::List stream_list;
+  base::ListValue stream_list;
   auto* stream_list_ptr = &stream_list;
 
   PerformActionOnActiveStreams([stream_list_ptr](quic::QuicStream* stream) {
@@ -3726,7 +3894,7 @@ base::Value::Dict QuicChromiumClientSession::GetInfoAsValue(
   dict.Set("packets_lost", static_cast<int>(stats.packets_lost));
   SSLInfo ssl_info;
 
-  base::Value::List alias_list;
+  base::ListValue alias_list;
   for (const auto& alias : aliases) {
     alias_list.Append(alias.ToString());
   }
@@ -3838,6 +4006,25 @@ void QuicChromiumClientSession::OnCryptoHandshakeComplete() {
       connect_timing_.connect_end - connect_timing_.connect_start;
   UMA_HISTOGRAM_TIMES("Net.QuicSession.HandshakeConfirmedTime",
                       handshake_confirmed_time);
+  const bool is_resumption = SSL_session_reused(crypto_stream_->GetSsl());
+  if (server_supports_mtc_tai_) {
+    UMA_HISTOGRAM_TIMES("Net.QuicSession.HandshakeConfirmedTime.MTC",
+                        handshake_confirmed_time);
+    base::UmaHistogramTimes(
+        HistogramNameForResumptionVariant(
+            "Net.QuicSession.HandshakeConfirmedTime.MTC", is_resumption),
+        handshake_confirmed_time);
+
+    size_t handshake_bytes = crypto_stream_->crypto_bytes_read() +
+                             crypto_stream_->crypto_bytes_written();
+    base::UmaHistogramCustomCounts("Net.QuicSession.TLSHandshakeBytes.MTC2",
+                                   handshake_bytes, /*min=*/1,
+                                   /*exclusive_max=*/8000, /*buckets=*/100);
+    base::UmaHistogramCustomCounts(
+        HistogramNameForResumptionVariant(
+            "Net.QuicSession.TLSHandshakeBytes.MTC2", is_resumption),
+        handshake_bytes, /*min=*/1, /*exclusive_max=*/8000, /*buckets=*/100);
+  }
 
   // Indicate that the handshake is complete so that we can safely send pings
   // to the peer.
@@ -3862,6 +4049,11 @@ void QuicChromiumClientSession::OnCryptoHandshakeComplete() {
   if (!trust_anchor_ids_.empty()) {
     base::UmaHistogramTimes(
         "Net.QuicSession.HandshakeConfirmedTime.TrustAnchorIDs",
+        handshake_confirmed_time);
+    base::UmaHistogramTimes(
+        HistogramNameForResumptionVariant(
+            "Net.QuicSession.HandshakeConfirmedTime.TrustAnchorIDs",
+            is_resumption),
         handshake_confirmed_time);
   }
 
@@ -4137,6 +4329,11 @@ QuicChromiumClientSession::GetConnectTiming() {
   return connect_timing_;
 }
 
+std::optional<ResolutionDetails>
+QuicChromiumClientSession::GetResolutionDetails() const {
+  return resolution_details_;
+}
+
 quic::ParsedQuicVersion QuicChromiumClientSession::GetQuicVersion() const {
   return connection()->version();
 }
@@ -4175,6 +4372,7 @@ QuicChromiumClientSession::CreateWebSocketQuicStreamAdapterImpl(
     WebSocketQuicStreamAdapter::Delegate* delegate) {
   DCHECK(connection()->connected());
   DCHECK(CanOpenNextOutgoingBidirectionalStream());
+  DCHECK(allow_extended_connect());
   auto websocket_quic_spdy_stream = std::make_unique<WebSocketQuicSpdyStream>(
       GetNextOutgoingBidirectionalStreamId(), this, quic::BIDIRECTIONAL);
 
@@ -4207,6 +4405,7 @@ QuicChromiumClientSession::CreateWebSocketQuicStreamAdapter(
 
   return CreateWebSocketQuicStreamAdapterImpl(delegate);
 }
+
 #endif  // BUILDFLAG(ENABLE_WEBSOCKETS)
 
 }  // namespace net

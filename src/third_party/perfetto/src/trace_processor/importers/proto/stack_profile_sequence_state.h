@@ -22,7 +22,7 @@
 #include <optional>
 
 #include "perfetto/ext/base/flat_hash_map.h"
-#include "perfetto/ext/base/fnv_hash.h"
+#include "perfetto/ext/base/murmur_hash.h"
 #include "perfetto/ext/base/string_view.h"
 #include "src/trace_processor/importers/proto/packet_sequence_state_generation.h"
 #include "src/trace_processor/storage/trace_storage.h"
@@ -44,20 +44,35 @@ class StackProfileSequenceState final
   virtual ~StackProfileSequenceState() override;
 
   // Returns `nullptr`if non could be found.
-  VirtualMemoryMapping* FindOrInsertMapping(uint64_t iid);
-  std::optional<CallsiteId> FindOrInsertCallstack(std::optional<UniquePid> upid,
-                                                  uint64_t iid);
+  VirtualMemoryMapping* FindOrInsertMapping(
+      PacketSequenceStateGeneration* state,
+      uint64_t iid);
+  std::optional<CallsiteId> FindOrInsertCallstack(
+      PacketSequenceStateGeneration* state,
+      std::optional<UniquePid> upid,
+      uint64_t iid);
 
  private:
-  std::optional<base::StringView> LookupInternedBuildId(uint64_t iid);
-  std::optional<base::StringView> LookupInternedMappingPath(uint64_t iid);
-  std::optional<base::StringView> LookupInternedFunctionName(uint64_t iid);
-  std::optional<base::StringView> LookupInternedSourcePath(uint64_t iid);
+  std::optional<base::StringView> LookupInternedBuildId(
+      PacketSequenceStateGeneration* state,
+      uint64_t iid);
+  std::optional<base::StringView> LookupInternedMappingPath(
+      PacketSequenceStateGeneration* state,
+      uint64_t iid);
+  std::optional<base::StringView> LookupInternedFunctionName(
+      PacketSequenceStateGeneration* state,
+      uint64_t iid);
+  std::optional<base::StringView> LookupInternedSourcePath(
+      PacketSequenceStateGeneration* state,
+      uint64_t iid);
 
   // Returns `nullptr`if non could be found.
-  VirtualMemoryMapping* FindOrInsertMappingImpl(std::optional<UniquePid> upid,
-                                                uint64_t iid);
-  std::optional<FrameId> FindOrInsertFrame(std::optional<UniquePid> upid,
+  VirtualMemoryMapping* FindOrInsertMappingImpl(
+      PacketSequenceStateGeneration* state,
+      std::optional<UniquePid> upid,
+      uint64_t iid);
+  std::optional<FrameId> FindOrInsertFrame(PacketSequenceStateGeneration* state,
+                                           std::optional<UniquePid> upid,
                                            uint64_t iid);
 
   TraceProcessorContext* const context_;
@@ -71,29 +86,23 @@ class StackProfileSequenceState final
       return upid == o.upid && iid == o.iid;
     }
 
-    struct Hasher {
-      size_t operator()(const OptionalUniquePidAndIid& o) const {
-        base::FnvHasher h;
-        h.Update(o.iid);
-        if (o.upid) {
-          h.Update(*o.upid);
-        }
-        return static_cast<size_t>(h.digest());
-      }
-    };
+    template <typename H>
+    friend H PerfettoHashValue(H h, const OptionalUniquePidAndIid& o) {
+      return H::Combine(std::move(h), o.iid, o.upid);
+    }
   };
 
   base::FlatHashMap<OptionalUniquePidAndIid,
                     VirtualMemoryMapping*,
-                    OptionalUniquePidAndIid::Hasher>
+                    base::MurmurHash<OptionalUniquePidAndIid>>
       cached_mappings_;
   base::FlatHashMap<OptionalUniquePidAndIid,
                     FrameId,
-                    OptionalUniquePidAndIid::Hasher>
+                    base::MurmurHash<OptionalUniquePidAndIid>>
       cached_frames_;
   base::FlatHashMap<OptionalUniquePidAndIid,
                     CallsiteId,
-                    OptionalUniquePidAndIid::Hasher>
+                    base::MurmurHash<OptionalUniquePidAndIid>>
       cached_callstacks_;
 };
 

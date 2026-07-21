@@ -126,20 +126,31 @@ static constexpr bool IsValidTimestamp() {
 template <typename...>
 using void_t = void;
 
-// Returns true iff `GetStaticString(T)` is defined OR T == DynamicString.
+// Helper to check if T is a pure rvalue (prvalue).
+template <typename T>
+constexpr bool IsPrvalue = !std::is_reference_v<T>;
+
+// Returns true iff `T` is a valid event name type.
+// Valid types are:
+// - Types for which `GetStaticString(T)` is defined.
+// - Temporary `perfetto::DynamicString` objects. `DynamicString` uses a raw
+//   pointer, so to prevent dangling pointers, the underlying string must
+//   outlive the event. Requiring it to be a pure rvalue (prvalue) ensures this
+//   for the duration of the TRACE_EVENT call.
 template <typename T, typename = void>
-struct IsValidEventNameType
-    : std::is_same<perfetto::DynamicString, typename std::decay<T>::type> {};
+constexpr bool IsValidEventNameType =
+    std::is_same_v<perfetto::DynamicString, std::decay_t<T>> && IsPrvalue<T>;
 
 template <typename T>
-struct IsValidEventNameType<
-    T,
-    void_t<decltype(GetStaticString(std::declval<T>()))>> : std::true_type {};
+constexpr bool
+    IsValidEventNameType<T,
+                         void_t<decltype(GetStaticString(std::declval<T>()))>> =
+        true;
 
 template <typename T>
 inline void ValidateEventNameType() {
   static_assert(
-      IsValidEventNameType<T>::value,
+      IsValidEventNameType<T>,
       "Event names must be static strings. To use dynamic event names, see "
       "https://perfetto.dev/docs/instrumentation/"
       "track-events#dynamic-event-names");
@@ -218,6 +229,13 @@ struct TrackEventDataSourceTraits : public perfetto::DefaultDataSourceTraits {
                                                       TracingTLS* root_tls) {
     return &root_tls->track_event_tls;
   }
+
+  // Clear the incremental state without destroying and recreating it. This
+  // allows reusing allocated memory in hash maps.
+  static bool ClearIncrementalState(TrackEventIncrementalState* incr_state) {
+    incr_state->Clear();
+    return true;
+  }
 };
 
 // A generic track event data source.
@@ -227,6 +245,10 @@ class PERFETTO_EXPORT_COMPONENT TrackEventDataSource
 
  public:
   static constexpr bool kRequiresCallbacksUnderLock = false;
+
+  static BufferExhaustedPolicy GetDefaultBufferExhaustedPolicy() {
+    return TrackEventInternal::GetBufferExhaustedPolicy();
+  }
 
   // DataSource implementation.
   void OnSetup(const DataSourceBase::SetupArgs& args) override {
@@ -344,6 +366,8 @@ class PERFETTO_EXPORT_COMPONENT TrackEventDataSource
 
   static void ResetForTesting() {
     TrackEventInternal::GetInstance().ResetRegistriesForTesting();
+    TrackEventInternal::SetBufferExhaustedPolicy(
+        GetDefaultBufferExhaustedPolicy());
   }
 
  private:
@@ -355,6 +379,7 @@ template <const TrackEventCategoryRegistry* Registry>
 class TrackEvent {
  public:
   using TraceContext = TrackEventDataSource::TraceContext;
+
   static bool Register() { return TrackEventDataSource::AddRegistry(Registry); }
 
   // Add or remove a session observer for this track event data source. The
@@ -389,6 +414,31 @@ class TrackEvent {
     bool enabled = false;
     CallIfEnabled([&](uint32_t /*instances*/) { enabled = true; });
     return enabled;
+  }
+
+  // Determine if `config` enables a given static category.
+  static bool IsCategoryEnabledByConfig(
+      const protos::gen::TrackEventConfig& config,
+      size_t category_index) {
+    return TrackEventInternal::IsCategoryEnabled(
+        *Registry, config, *Registry->GetCategory(category_index));
+  }
+
+  // Determine if `config` enables a given dynamic category.
+  static bool IsCategoryEnabledByConfig(
+      const protos::gen::TrackEventConfig& config,
+      const DynamicCategory& category) {
+    return TrackEventInternal::IsCategoryEnabled(
+        *Registry, config, Category::FromDynamicCategory(category));
+  }
+
+  // Determine if tracing for the given static category is enabled in a session
+  // identified by `internal_instance_index`.
+  static bool IsCategoryEnabledBySession(size_t internal_instance_index,
+                                         size_t category_index) {
+    std::atomic<uint8_t>* state = Registry->GetCategoryState(category_index);
+    return state->load(std::memory_order_relaxed) &
+           static_cast<uint8_t>(1u << internal_instance_index);
   }
 
   // Determine if tracing for the given static category is enabled.

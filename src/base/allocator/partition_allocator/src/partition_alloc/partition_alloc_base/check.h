@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_PARTITION_ALLOC_BASE_CHECK_H_
 #define PARTITION_ALLOC_PARTITION_ALLOC_BASE_CHECK_H_
 
@@ -19,9 +14,9 @@
 #include "partition_alloc/partition_alloc_base/log_message.h"
 #include "partition_alloc/partition_alloc_base/strings/cstring_builder.h"
 
-#if PA_BUILDFLAG(IS_WIN) && defined(COMPONENT_BUILD)
+#if PA_BUILDFLAG(IS_WIN) && PA_BUILDFLAG(IS_COMPONENT_BUILD)
 #include "partition_alloc/partition_alloc_base/strings/safe_sprintf.h"
-#endif  // PA_BUILDFLAG(IS_WIN) && defined(COMPONENT_BUILD)
+#endif  // PA_BUILDFLAG(IS_WIN) && PA_BUILDFLAG(IS_COMPONENT_BUILD)
 
 #define PA_STRINGIFY_IMPL(s) #s
 #define PA_STRINGIFY(s) PA_STRINGIFY_IMPL(s)
@@ -151,11 +146,11 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC_BASE) NotImplemented
 
 }  // namespace check_error
 
-#if defined(OFFICIAL_BUILD) && PA_BUILDFLAG(IS_DEBUG)
+#if PA_BUILDFLAG(OFFICIAL) && PA_BUILDFLAG(IS_DEBUG)
 #error "Debug builds are not expected to be optimized as official builds."
-#endif  // defined(OFFICIAL_BUILD) && BUILDFLAG(IS_DEBUG)
+#endif  // PA_BUILDFLAG(OFFICIAL) && PA_BUILDFLAG(IS_DEBUG)
 
-#if defined(OFFICIAL_BUILD) && !PA_BUILDFLAG(DCHECKS_ARE_ON)
+#if PA_BUILDFLAG(OFFICIAL) && !PA_BUILDFLAG(DCHECKS_ARE_ON)
 
 // TODO(crbug.com/357081797): Use `[[unlikely]]` instead when there's a way to
 // switch the expression below to a statement without breaking
@@ -236,7 +231,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC_BASE) NotImplemented
           "Check failed: " #condition "\n");                 \
   } while (0)
 
-#if PA_BUILDFLAG(IS_WIN) && defined(COMPONENT_BUILD)
+#if PA_BUILDFLAG(IS_WIN) && PA_BUILDFLAG(IS_COMPONENT_BUILD)
 template <typename... Args>
 [[noreturn]] void RawCheckFailureFormat(const char* fmt, Args... args) {
   constexpr size_t kRawCheckFailureFormatBufferSize = 256u;
@@ -245,7 +240,7 @@ template <typename... Args>
                                                                 args...);
   ::partition_alloc::internal::logging::RawCheckFailure(buffer);
 }
-#endif  // PA_BUILDFLAG(IS_WIN) && defined(COMPONENT_BUILD)
+#endif  // PA_BUILDFLAG(IS_WIN) && PA_BUILDFLAG(IS_COMPONENT_BUILD)
 
 }  // namespace partition_alloc::internal::logging
 

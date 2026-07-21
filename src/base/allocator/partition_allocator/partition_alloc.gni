@@ -54,6 +54,23 @@ if (!defined(partition_alloc_dcheck_always_on_default)) {
   }
 }
 
+# Some embedders uses `is_official_build`, it can be used to set the default
+# value of `partition_alloc_is_official_build_default`.
+if (!defined(partition_alloc_is_official_build_default)) {
+  if (defined(is_official_build)) {
+    partition_alloc_is_official_build_default = is_official_build
+  } else {
+    partition_alloc_is_official_build_default = false
+  }
+}
+
+# Enables a fallback to the system free() for unmanaged pointers.
+# For example, this is necessary on some Android systems where libraries
+# bypass the allocator shim.
+if (!defined(partition_alloc_enable_system_free_fallback_default)) {
+  partition_alloc_enable_system_free_fallback_default = false
+}
+
 # Allows embedders to optionally disable PartitionAlloc.
 if (!defined(use_partition_alloc_default)) {
   use_partition_alloc_default = true
@@ -101,8 +118,17 @@ has_memory_tagging = current_cpu == "arm64" && is_clang && !is_asan &&
                      !is_hwasan && is_linux && current_os != "openwrt"
 
 declare_args() {
+  # Whether PartitionAlloc is built in official mode.
+  partition_alloc_is_official_build = partition_alloc_is_official_build_default
+
   # Debug configuration.
   partition_alloc_is_debug = partition_alloc_is_debug_default
+
+  # Enables a fallback to the system free() for unmanaged pointers.
+  # For example, this is necessary on some Android systems where libraries
+  # bypass the allocator shim.
+  partition_alloc_enable_system_free_fallback =
+      partition_alloc_enable_system_free_fallback_default
 
   # Enable PA_DCHECKs in PartitionAlloc in release mode.
   partition_alloc_dcheck_always_on = partition_alloc_dcheck_always_on_default
@@ -150,16 +176,23 @@ declare_args() {
 }
 
 declare_args() {
-  # Whether PartitionAlloc dispatch can be replaced with another dispatch with
-  # some more safety checks at runtime or not.  When true, the allocator shim
-  # provides an extended API to swap PartitionAlloc.
-  enable_allocator_shim_partition_alloc_dispatch_with_advanced_checks_support =
-      use_partition_alloc_as_malloc
+  # Whether the allocator shim supports alloc token or not. If true, malloc()
+  # and operator new() families are injected with an alloc token parameter.
+  # shim_supports_alloc_token = use_partition_alloc_as_malloc
+  shim_supports_alloc_token = false
 }
 
-assert(
-    !enable_allocator_shim_partition_alloc_dispatch_with_advanced_checks_support || use_partition_alloc_as_malloc,
-    "PartitionAlloc with advanced checks requires PartitionAlloc itself.")
+assert(!is_component_build || is_linux || !shim_supports_alloc_token,
+       "In the component build, alloc token is only supported on Linux.")
+
+declare_args() {
+  # Whether the allocator shim supports automatic heap partitioning based on
+  # AllocToken or not. If true, shim creates multiple partitions and route
+  # allocations based on AllocToken provided.
+  enable_auto_partitioning = false
+}
+assert(shim_supports_alloc_token || !enable_auto_partitioning,
+       "Auto Partitioning requires AllocToken.")
 
 if (use_allocator_shim && is_win) {
   # It's hard to override CRT's malloc family in every case in the component
@@ -256,6 +289,11 @@ declare_args() {
   # with enable_backup_ref_ptr_support instead.
   use_raw_ptr_backup_ref_impl = enable_backup_ref_ptr_support
 
+  # Enable BRP protection for unprotected-in-release raw_ptrs. If false, these
+  # pointers will use the no-op implementation with no protection.
+  enable_brp_for_unprotected_in_release_raw_ptr =
+      partition_alloc_is_debug || partition_alloc_dcheck_always_on
+
   # Make explicit calls to ASAN at runtime, e.g. to mark quarrantined memory
   # as poisoned. Allows ASAN to tell if a particular memory error is protected
   # by BRP in its reports.
@@ -269,6 +307,15 @@ declare_args() {
 
   # Use probe-on-destruct unowned ptr detection with ASAN.
   use_raw_ptr_asan_unowned_impl = false
+}
+
+declare_args() {
+  # Temporary build flag while we have both ASan BRP and ASan BRPv2 in tree,
+  # until we're ready to remove the original implementation.
+  # ASan BRPv2 depends on sanitizer malloc/free hooks. The hooks depend on
+  # weak symbols. So ASan BRPv2 requires posix. Firstly we will implement
+  # it for linux.
+  use_asan_backup_ref_ptr_v2 = false && use_asan_backup_ref_ptr && is_linux
 }
 
 # Use the version of raw_ptr<T> that allows the embedder to implement custom
@@ -361,10 +408,6 @@ declare_args() {
   use_full_mte = false
 }
 
-stack_scan_supported = current_cpu == "x64" || current_cpu == "x86" ||
-                       current_cpu == "arm" || current_cpu == "arm64" ||
-                       current_cpu == "riscv64" || current_cpu == "loong64"
-
 # We want to provide assertions that guard against inconsistent build
 # args, but there is no point in having them fire if we're not building
 # PartitionAlloc at all. If `use_partition_alloc` is false, we jam all
@@ -390,6 +433,7 @@ if (!use_partition_alloc ||
   enable_backup_ref_ptr_support = false
   use_raw_ptr_backup_ref_impl = false
   use_asan_backup_ref_ptr = false
+  use_asan_backup_ref_ptr_v2 = false
   use_raw_ptr_asan_unowned_impl = false
   use_raw_ptr_hookable_impl = false
   enable_backup_ref_ptr_slow_checks = false
@@ -400,9 +444,12 @@ if (!use_partition_alloc ||
   backup_ref_ptr_extra_oob_checks = false
   enable_backup_ref_ptr_instance_tracer = false
   use_full_mte = false
+  shim_supports_alloc_token = false
+  enable_auto_partitioning = false
 }
 
-# Disable |use_full_mte| if memory tagging is not available. This is for targets that run as part the build process.
+# Disable |use_full_mte| if memory tagging is not available. This is for targets
+# that run as part the build process.
 if (!has_memory_tagging) {
   use_full_mte = false
 }
@@ -411,6 +458,9 @@ if (!has_memory_tagging) {
 # enable_backup_ref_ptr_support is true.
 assert(enable_backup_ref_ptr_support || !use_raw_ptr_backup_ref_impl,
        "Can't use RawPtrBackupRefImpl if BRP isn't enabled at all")
+
+assert(!partition_alloc_enable_system_free_fallback || is_android,
+       "System free fallback is only supported on Android")
 
 # enable_backup_ref_ptr_slow_checks can only be used if
 # enable_backup_ref_ptr_support is true.
@@ -441,6 +491,11 @@ assert(backup_ref_ptr_extra_oob_checks || !backup_ref_ptr_poison_oob_ptr,
            "at all")
 assert(has_64_bit_pointers || !backup_ref_ptr_poison_oob_ptr,
        "Can't enable poisoning for OOB pointers if pointers are only 32-bit")
+
+# AsanBackupRefPtr v2 is an alternative configuration of AsanBackupRefPtr, and
+# relies on the same configuration checks.
+assert(!use_asan_backup_ref_ptr_v2 || use_asan_backup_ref_ptr,
+       "AsanBackupRefPtr v2 prototype requires AsanBackupRefPtr to be enabled.")
 
 # AsanBackupRefPtr and AsanUnownedPtr are mutually exclusive variants of
 # raw_ptr.
@@ -530,12 +585,6 @@ declare_args() {
 }
 
 declare_args() {
-  # Assert that PartitionAlloc and MiraclePtr run on C++20 when set to true.
-  # Embedders may opt-out of using C++ 20 build.
-  assert_cpp20 = assert_cpp20_default
-}
-
-declare_args() {
   # Set to true to enable futex priority inheritance.
   #
   # Enabled only on 64-bit Android. On 32 bit Android, PI futexes require an
@@ -544,3 +593,39 @@ declare_args() {
   enable_partition_lock_priority_inheritance =
       is_android && (current_cpu == "x64" || current_cpu == "arm64")
 }
+
+declare_args() {
+  # Enables the zero segment in user-space in PartitionAlloc. This segment is
+  # similar to Mach-O's __PAGEZERO segment in that it ensures that a certain
+  # range of virtual address space can never be allocated as writable.
+  #
+  # This is a feature required by the V8 Sandbox.
+  #
+  # We can only enable this on 64-bit builds and when PA is used as malloc to
+  # get hooks early enough to reserve the segment.
+  #
+  # TODO(40925855): Enable this on all supported platforms. Android can only
+  # be enabled after switching to native zygote.
+  enable_user_space_zero_segment =
+      has_64_bit_pointers && use_partition_alloc_as_malloc &&
+      (is_mac || (is_linux && !is_chromeos && !is_android))
+
+  # Size of the zero segment in MB. The total size will be at least this value.
+  # This is 4GB + 1MB. The 1MB protects from using certain kinds of objects
+  # at the 4G boundary.
+  user_space_zero_segment_size_mb = 4097
+}
+
+# Activates bounds checks for two-arg constructor of `base::span`.
+#
+# We actively exclude sanitizer builds because they show us a data race
+# between early unsafe constructions of `base::span` and PartitionAlloc
+# address space initialization. In PA-E builds, this is not a concern,
+# because the PA-E partition will have initialized address space earlier
+# than any span. More generally, though, at worst this data race causes
+# `IsManagedByPartitionAlloc()` to report a false negative, which will
+# lose us coverage of that particular span in that exact moment. This is
+# not a big deal, and is probably preferable to sticking
+# `base::unchecked` on all those spans (shutting them out entirely).
+use_checked_span = !(is_asan || is_ubsan || is_tsan) && use_partition_alloc &&
+                   has_64_bit_pointers && is_debug

@@ -13,9 +13,11 @@
 #include <string>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "build/buildflag.h"
@@ -77,9 +79,9 @@ class NET_EXPORT_PRIVATE HttpNetworkTransaction
            int buf_len,
            CompletionOnceCallback callback) override;
   void StopCaching() override;
-  int64_t GetTotalReceivedBytes() const override;
-  int64_t GetTotalSentBytes() const override;
-  int64_t GetReceivedBodyBytes() const override;
+  base::ByteSize GetTotalReceivedBytes() const override;
+  base::ByteSize GetTotalSentBytes() const override;
+  base::ByteSize GetReceivedBodyBytes() const override;
   void DoneReading() override;
   const HttpResponseInfo* GetResponseInfo() const override;
   LoadState GetLoadState() const override;
@@ -101,7 +103,6 @@ class NET_EXPORT_PRIVATE HttpNetworkTransaction
   void SetIsSharedDictionaryReadAllowedCallback(
       base::RepeatingCallback<bool()> callback) override;
   void CloseConnectionOnDestruction() override;
-  bool IsMdlMatchForMetrics() const override;
 
   // HttpStreamRequest::Delegate methods:
   void OnStreamReady(const ProxyInfo& used_proxy_info,
@@ -130,6 +131,8 @@ class NET_EXPORT_PRIVATE HttpNetworkTransaction
   FRIEND_TEST_ALL_PREFIXES(HttpNetworkTransactionTest, ResetStateForRestart);
   FRIEND_TEST_ALL_PREFIXES(HttpNetworkTransactionTest,
                            CreateWebSocketHandshakeStream);
+  FRIEND_TEST_ALL_PREFIXES(HttpNetworkTransactionTest,
+                           WebSocketFallbackResultUsesHttp3ConnectionInfo);
   FRIEND_TEST_ALL_PREFIXES(HttpNetworkTransactionTest,
                            SetProxyInfoInResponse_Direct);
   FRIEND_TEST_ALL_PREFIXES(HttpNetworkTransactionTest,
@@ -442,11 +445,11 @@ class NET_EXPORT_PRIVATE HttpNetworkTransaction
 
   // Total number of bytes received on all destroyed HttpStreams for this
   // transaction.
-  int64_t total_received_bytes_ = 0;
+  base::ByteSize total_received_bytes_;
 
   // Total number of bytes sent on all destroyed HttpStreams for this
   // transaction.
-  int64_t total_sent_bytes_ = 0;
+  base::ByteSize total_sent_bytes_;
 
   // When the transaction started / finished creating a stream.
   base::TimeTicks create_stream_start_time_;
@@ -457,10 +460,6 @@ class NET_EXPORT_PRIVATE HttpNetworkTransaction
   // until |SendRequest()| is called on |stream_|, and reset for auth restarts.
   base::TimeTicks send_start_time_;
   base::TimeTicks send_end_time_;
-
-  // When the connection and request headers are reset, and the request is
-  // resent.
-  base::TimeTicks reset_connection_and_request_for_resend_start_time_;
 
   // The next state in the state machine.
   State next_state_ = STATE_NONE;
@@ -513,6 +512,13 @@ class NET_EXPORT_PRIVATE HttpNetworkTransaction
   // of times we can retry a request on reused sockets is limited.
   size_t retry_attempts_ = 0;
 
+  // Number of retries made for connection errors on reused sockets like
+  // ERR_CONNECTION_RESET, ERR_CONNECTION_CLOSED, ERR_CONNECTION_ABORTED,
+  // ERR_SOCKET_NOT_CONNECTED and ERR_EMPTY_RESPONSE.
+  // If this count reaches kMaxRetryAttemptsOnConnectionErrors, we crash via
+  // NOTREACHED() as it indicates a potential infinite retry loop.
+  size_t retry_attempts_on_connection_errors_ = 0;
+
   // Number of times the transaction was restarted via a RestartWith* call.
   size_t num_restarts_ = 0;
 
@@ -531,15 +537,15 @@ class NET_EXPORT_PRIVATE HttpNetworkTransaction
   base::TimeTicks initialize_stream_end_time_;
 
   base::TimeTicks blocked_initialize_stream_start_time_;
-  base::TimeTicks blocked_generate_proxy_auth_token_start_time_;
-  base::TimeTicks blocked_generate_server_auth_token_start_time_;
 
   // Timing information for the connected callback.
   base::TimeTicks connected_callback_start_time_;
   base::TimeTicks connected_callback_end_time_;
 
   // The number of bytes of the body received from network.
-  int64_t received_body_bytes_ = 0;
+  base::ByteSize received_body_bytes_;
+
+  base::WeakPtrFactory<HttpNetworkTransaction> weak_ptr_factory_{this};
 };
 
 }  // namespace net

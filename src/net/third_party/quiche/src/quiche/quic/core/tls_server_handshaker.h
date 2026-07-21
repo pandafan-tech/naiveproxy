@@ -91,10 +91,17 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   bool ExportKeyingMaterial(absl::string_view label, absl::string_view context,
                             size_t result_len, std::string* result) override;
   SSL* GetSsl() const override;
+  void ResetSsl() override;
   bool IsCryptoFrameExpectedForEncryptionLevel(
       EncryptionLevel level) const override;
   EncryptionLevel GetEncryptionLevelToSendCryptoDataOfSpace(
       PacketNumberSpace space) const override;
+
+  // Overrides to support cached info after ResetSsl is called in QUIC session.
+  absl::string_view Sni() const override;
+  const SSL_CIPHER* Ciphersuite() const override;
+  absl::string_view Alpn() const override;
+  uint16_t TlsGroupId() const override;
 
   // From QuicCryptoServerStreamBase and TlsHandshaker
   ssl_early_data_reason_t EarlyDataReason() const override;
@@ -140,9 +147,11 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
 
   virtual bool ValidateHostname(const std::string& hostname) const;
 
-  const TlsConnection* tls_connection() const override {
-    return &tls_connection_;
+  const TlsConnection& tls_connection() const override {
+    return tls_connection_;
   }
+
+  TlsConnection& tls_connection() override { return tls_connection_; }
 
   // Returns true if the handshake should continue. If false is returned, the
   // caller should fail the handshake.
@@ -218,7 +227,16 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
 
   std::optional<uint16_t> GetCiphersuite() const override;
 
+  uint16_t GetNegotiatedCurve() const override;
+
   void SetIgnoreTicketOpen(bool value) { ignore_ticket_open_ = value; }
+
+  const SSL_CIPHER* GetCipher() const override {
+    if (cached_ssl_info_.has_value()) {
+      return cached_ssl_info_->cipher;
+    }
+    return TlsHandshaker::GetCipher();
+  }
 
  private:
   class QUICHE_EXPORT DecryptCallback : public ProofSource::DecryptCallback {
@@ -250,8 +268,9 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
     // Close the handle. Cancel the pending signature operation, if any.
     void CloseHandle() override;
 
-    // Delegates to proof_source_->GetCertChain.
-    // Returns QUIC_SUCCESS or QUIC_FAILURE. Never returns QUIC_PENDING.
+    // Delegates to `proof_source_->GetCertChains()`.
+    //
+    // Returns `QUIC_SUCCESS` or `QUIC_FAILURE`. Never returns `QUIC_PENDING`.
     QuicAsyncStatus SelectCertificate(
         const QuicSocketAddress& server_address,
         const QuicSocketAddress& client_address,
@@ -261,7 +280,8 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
         std::optional<std::string> alps,
         const std::vector<uint8_t>& quic_transport_params,
         const std::optional<std::vector<uint8_t>>& early_data_context,
-        const QuicSSLConfig& ssl_config) override;
+        const QuicSSLConfig& ssl_config,
+        bool disable_alps_explicit_codepoint) override;
 
     // Delegates to proof_source_->ComputeTlsSignature.
     // Returns QUIC_SUCCESS, QUIC_FAILURE or QUIC_PENDING.
@@ -393,6 +413,20 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   std::optional<QuicTimeAccumulator> async_op_timer_;
 
   std::unique_ptr<ApplicationState> application_state_;
+
+  // Used to cache the state of the SSL object after it is reset.
+  struct CachedSSLInfo {
+    bool is_resumption = false;
+    bool is_zero_rtt = false;
+    uint16_t tls_group_id = 0;
+    ssl_early_data_reason_t early_data_reason = ssl_early_data_unknown;
+    // Note SSL_get_current_cipher returns a static allocated pointer and as a
+    // result it is safe to cache a raw pointer here.
+    const SSL_CIPHER* cipher = nullptr;
+    std::string alpn;
+    std::string sni;
+  };
+  std::optional<CachedSSLInfo> cached_ssl_info_;
 
   // Pre-shared key used during the handshake.
   std::string pre_shared_key_;

@@ -173,11 +173,22 @@ class NET_EXPORT HostResolverManager
   // Creates a service endpoint resolution request.
   std::unique_ptr<HostResolver::ServiceEndpointRequest>
   CreateServiceEndpointRequest(
-      url::SchemeHostPort scheme_host_port,
+      HostResolver::Host host,
       NetworkAnonymizationKey network_anonymization_key,
       NetLogWithSource net_log,
       ResolveHostParameters parameters,
       ResolveContext* resolve_context);
+
+  // Defines the mode of operation of the insecure portion of the built-in
+  // DNS resolver.
+  enum class InsecureDnsMode {
+    // Insecure DNS is disabled.
+    kDisabled,
+    // Insecure DNS is enabled using the built-in DNS client.
+    kEnabledBuiltIn,
+    // Insecure DNS is enabled using the platform DNS APIs.
+    kEnabledPlatform,
+  };
 
   // Enables or disables the built-in asynchronous DnsClient. If enabled, by
   // default (when no |ResolveHostParameters::source| is specified), the
@@ -186,11 +197,11 @@ class NET_EXPORT HostResolverManager
   // HostResolverSystemTask::Params). If the DnsClient is not pre-configured
   // with a valid DnsConfig, a new config is fetched from NetworkChangeNotifier.
   //
-  // Setting to |true| has no effect if |ENABLE_BUILT_IN_DNS| not defined.
-  virtual void SetInsecureDnsClientEnabled(bool enabled,
+  // This has no effect if |ENABLE_BUILT_IN_DNS| not defined.
+  virtual void SetInsecureDnsClientEnabled(InsecureDnsMode mode,
                                            bool additional_dns_types_enabled);
 
-  base::Value::Dict GetDnsConfigAsValue() const;
+  base::DictValue GetDnsConfigAsValue() const;
 
   // Sets overriding configuration that will replace or add to configuration
   // read from the system for DnsClient resolution.
@@ -283,6 +294,10 @@ class NET_EXPORT HostResolverManager
 
   bool InvalidationInProgress() const { return invalidation_in_progress_; }
 
+  void SetInvalidationInProgressForTesting() {
+    invalidation_in_progress_ = true;
+  }
+
  protected:
   // Callback from HaveOnlyLoopbackAddresses probe.
   void SetHaveOnlyLoopbackAddresses(bool result);
@@ -308,8 +323,9 @@ class NET_EXPORT HostResolverManager
     CONFIG_PRESET = 7,
     NAT64 = 8,
     HOSTS = 9,
+    DNS_PLATFORM = 10,
 
-    kMaxValue = HOSTS,
+    kMaxValue = DNS_PLATFORM,
   };
 
   // Returns true if the task is local, synchronous, and instantaneous.
@@ -340,6 +356,10 @@ class NET_EXPORT HostResolverManager
   //
   // If |cache_usage == ResolveHostParameters::CacheUsage::STALE_ALLOWED|, then
   // stale cache entries can be returned.
+  //
+  // WARNING: The task ordering configured here is assumed by
+  // HostResolverManager::Job::CalculateResolvePath() and other methods. If you
+  // modify the task ordering, update them accordingly.
   HostCache::Entry ResolveLocally(
       bool only_ipv6_reachable,
       const JobKey& job_key,
@@ -437,6 +457,10 @@ class NET_EXPORT HostResolverManager
 
   // Initialized the sequence of tasks to run to resolve a request. The sequence
   // may be adjusted later and not all tasks need to be run.
+  //
+  // WARNING: The task ordering configured here is assumed by
+  // HostResolverManager::Job::CalculateResolvePath() and other methods. If you
+  // modify the task ordering, update them accordingly.
   void CreateTaskSequence(const JobKey& job_key,
                           ResolveHostParameters::CacheUsage cache_usage,
                           SecureDnsPolicy secure_dns_policy,
@@ -598,7 +622,7 @@ class NET_EXPORT HostResolverManager
   // For per-context cache invalidation notifications.
   base::ObserverList<ResolveContext,
                      true /* check_empty */,
-                     false /* allow_reentrancy */>
+                     base::ObserverListReentrancyPolicy::kDisallowReentrancy>
       registered_contexts_;
 
   // True while invalidating caches.
@@ -606,6 +630,9 @@ class NET_EXPORT HostResolverManager
 
   // An experimental flag for features::kUseDnsHttpsSvcb.
   HostResolver::HttpsSvcbOptions https_svcb_options_;
+
+  // If true, task type DNS_PLATFORM will be used instead of DNS.
+  bool platform_apis_enabled_;
 
   std::vector<CompletionOnceCallback> ipv6_request_callbacks_;
 

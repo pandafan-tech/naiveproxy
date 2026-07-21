@@ -35,6 +35,7 @@
 #include "src/trace_processor/importers/common/mapping_tracker.h"
 #include "src/trace_processor/importers/common/parser_types.h"
 #include "src/trace_processor/importers/common/process_tracker.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/importers/common/synthetic_tid.h"
 #include "src/trace_processor/importers/common/virtual_memory_mapping.h"
 #include "src/trace_processor/importers/proto/stack_profile_sequence_state.h"
@@ -43,7 +44,6 @@
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/types/variadic.h"
-#include "src/trace_processor/util/debug_annotation_parser.h"
 #include "src/trace_processor/util/proto_to_args_parser.h"
 
 #include "protos/perfetto/trace/interned_data/interned_data.pbzero.h"
@@ -54,6 +54,7 @@
 #include "protos/perfetto/trace/track_event/thread_descriptor.pbzero.h"
 #include "protos/perfetto/trace/track_event/track_descriptor.pbzero.h"
 #include "protos/perfetto/trace/track_event/track_event.pbzero.h"
+#include "protos/third_party/chromium/chrome_enums.pbzero.h"
 
 namespace perfetto::trace_processor {
 
@@ -77,9 +78,10 @@ std::optional<base::Status> MaybeParseUnsymbolizedSourceLocation(
   }
   // Interned mapping_id loses it's meaning when the sequence ends. So we need
   // to get an id from stack_profile_mapping table.
-  auto* mapping = delegate.seq_state()
-                      ->GetCustomState<StackProfileSequenceState>()
-                      ->FindOrInsertMapping(decoder->mapping_id());
+  auto* mapping =
+      delegate.seq_state()
+          ->GetCustomState<StackProfileSequenceState>()
+          ->FindOrInsertMapping(delegate.seq_state(), decoder->mapping_id());
   if (!mapping) {
     return std::nullopt;
   }
@@ -114,6 +116,20 @@ std::optional<base::Status> MaybeParseSourceLocation(
   return base::OkStatus();
 }
 
+std::optional<base::Status> MaybeParseAndroidJobName(
+    const protozero::Field& field,
+    util::ProtoToArgsParser::Delegate& delegate) {
+  auto* decoder = delegate.GetInternedMessage(
+      protos::pbzero::InternedData::kAndroidJobName, field.as_uint64());
+  if (!decoder) {
+    return std::nullopt;
+  }
+
+  delegate.AddString(util::ProtoToArgsParser::Key("job_scheduler_job.job_name"),
+                     decoder->name());
+  return base::OkStatus();
+}
+
 }  // namespace
 
 TrackEventParser::TrackEventParser(TraceProcessorContext* context,
@@ -132,7 +148,7 @@ TrackEventParser::TrackEventParser(TraceProcessorContext* context,
       task_line_number_args_key_id_(
           context->storage->InternString("task.posted_from.line_number")),
       log_message_body_key_id_(
-          context->storage->InternString("track_event.log_message")),
+          context->storage->InternString("track_event.log_message.message")),
       log_message_source_location_function_name_key_id_(
           context->storage->InternString(
               "track_event.log_message.function_name")),
@@ -214,6 +230,13 @@ TrackEventParser::TrackEventParser(TraceProcessorContext* context,
           context_->storage->InternString("end_callsite_id")),
       chrome_string_lookup_(context->storage.get()),
       active_chrome_processes_tracker_(context) {
+  // Opt into DebugAnnotation handling: ParseMessage routes DebugAnnotation
+  // sub-fields and direct DebugAnnotation parses through the iterative
+  // DebugAnnotation work-item path on the same stack as proto-message
+  // reflection, so deeply nested DebugAnnotation -> proto_value cycles do
+  // not consume C++ stack.
+  args_parser_.EnableDebugAnnotationParsing();
+
   args_parser_.AddParsingOverrideForField(
       "chrome_mojo_event_info.mojo_interface_method_iid",
       [](const protozero::Field& field,
@@ -252,17 +275,11 @@ TrackEventParser::TrackEventParser(TraceProcessorContext* context,
         return MaybeParseSourceLocation("chrome_memory_pressure_notification",
                                         field, delegate);
       });
-
-  // Parse DebugAnnotations.
-  args_parser_.AddParsingOverrideForType(
-      ".perfetto.protos.DebugAnnotation",
-      [&](util::ProtoToArgsParser::ScopedNestedKeyContext& key,
-          const protozero::ConstBytes& data,
-          util::ProtoToArgsParser::Delegate& delegate) {
-        // Do not add "debug_annotations" to the final key.
-        key.RemoveFieldSuffix();
-        util::DebugAnnotationParser annotation_parser(args_parser_);
-        return annotation_parser.Parse(data, delegate);
+  args_parser_.AddParsingOverrideForField(
+      "job_scheduler_job.job_name_iid",
+      [](const protozero::Field& field,
+         util::ProtoToArgsParser::Delegate& delegate) {
+        return MaybeParseAndroidJobName(field, delegate);
       });
 
   args_parser_.AddParsingOverrideForField(
@@ -288,7 +305,7 @@ void TrackEventParser::ParseTrackDescriptor(
   // process and/or thread (i.e. new upid/utid).
   auto track = track_event_tracker_->ResolveDescriptorTrack(decoder.uuid());
   if (!track) {
-    context_->storage->IncrementStats(stats::track_event_parser_errors);
+    context_->stats_tracker->IncrementStats(stats::track_event_parser_errors);
     return;
   }
 
@@ -321,19 +338,25 @@ UniquePid TrackEventParser::ParseProcessDescriptor(
   active_chrome_processes_tracker_.AddProcessDescriptor(packet_timestamp, upid);
   if (decoder.has_process_name() && decoder.process_name().size) {
     // Don't override system-provided names.
-    context_->process_tracker->SetProcessNameIfUnset(
-        upid, context_->storage->InternString(decoder.process_name()));
+    context_->process_tracker->UpdateProcessName(
+        upid, context_->storage->InternString(decoder.process_name()),
+        ProcessNamePriority::kTrackDescriptor);
   }
   if (decoder.has_start_timestamp_ns() && decoder.start_timestamp_ns() > 0) {
     context_->process_tracker->SetStartTsIfUnset(upid,
                                                  decoder.start_timestamp_ns());
   }
   // TODO(skyostil): Remove parsing for legacy chrome_process_type field.
+  // TODO(lalitm): this maze of priorities around Chrome process labels is
+  // because of us trying to fix process naming without breaking backcompat.
+  // https://github.com/google/perfetto/issues/4738
   if (decoder.has_chrome_process_type()) {
-    StringId name_id =
-        chrome_string_lookup_.GetProcessName(decoder.chrome_process_type());
-    // Don't override system-provided names.
-    context_->process_tracker->SetProcessNameIfUnset(upid, name_id);
+    auto type = decoder.chrome_process_type();
+    StringId name_id = chrome_string_lookup_.GetProcessName(type);
+    auto priority = type == protos::pbzero::ProcessDescriptor::PROCESS_RENDERER
+                        ? ProcessNamePriority::kChromeProcessLabelRenderer
+                        : ProcessNamePriority::kChromeProcessLabel;
+    context_->process_tracker->UpdateProcessName(upid, name_id, priority);
   }
   int label_index = 0;
   for (auto it = decoder.process_labels(); it; it++) {
@@ -355,10 +378,14 @@ void TrackEventParser::ParseChromeProcessDescriptor(
   protos::pbzero::ChromeProcessDescriptor::Decoder decoder(
       chrome_process_descriptor);
 
-  StringId name_id =
-      chrome_string_lookup_.GetProcessName(decoder.process_type());
-  // Don't override system-provided names.
-  context_->process_tracker->SetProcessNameIfUnset(upid, name_id);
+  auto type = decoder.process_type();
+  StringId name_id = chrome_string_lookup_.GetProcessName(type);
+  namespace ce = protos::chrome_enums::pbzero;
+  auto priority =
+      type == ce::PROCESS_RENDERER || type == ce::PROCESS_RENDERER_EXTENSION
+          ? ProcessNamePriority::kChromeProcessLabelRenderer
+          : ProcessNamePriority::kChromeProcessLabel;
+  context_->process_tracker->UpdateProcessName(upid, name_id, priority);
 
   ArgsTracker::BoundInserter process_args =
       context_->process_tracker->AddArgsToProcess(upid);
@@ -424,7 +451,7 @@ void TrackEventParser::ParseTrackEvent(int64_t ts,
       range_of_interest_start_us && ts < *range_of_interest_start_us * 1000) {
     // The event is outside of the range of interest, and dropping is enabled.
     // So we drop the event.
-    context_->storage->IncrementStats(
+    context_->stats_tracker->IncrementStats(
         stats::track_event_dropped_packets_outside_of_range_of_interest);
     return;
   }
@@ -432,7 +459,7 @@ void TrackEventParser::ParseTrackEvent(int64_t ts,
       TrackEventEventImporter(this, ts, event_data, blob, packet_sequence_id)
           .Import();
   if (!status.ok()) {
-    context_->storage->IncrementStats(stats::track_event_parser_errors);
+    context_->stats_tracker->IncrementStats(stats::track_event_parser_errors);
     PERFETTO_DLOG("ParseTrackEvent error: %s", status.c_message());
   }
 }
@@ -452,8 +479,8 @@ DummyMemoryMapping* TrackEventParser::GetOrCreateInlineCallstackDummyMapping() {
   return inline_callstack_dummy_mapping_;
 }
 
-void TrackEventParser::NotifyEndOfFile() {
-  active_chrome_processes_tracker_.NotifyEndOfFile();
+void TrackEventParser::OnEventsFullyExtracted() {
+  active_chrome_processes_tracker_.OnEventsFullyExtracted();
 }
 
 }  // namespace perfetto::trace_processor

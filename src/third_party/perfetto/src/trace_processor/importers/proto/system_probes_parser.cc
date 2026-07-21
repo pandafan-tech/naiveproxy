@@ -26,7 +26,6 @@
 #include <vector>
 
 #include "perfetto/base/logging.h"
-#include "perfetto/ext/base/status_or.h"
 #include "perfetto/ext/base/string_utils.h"
 #include "perfetto/ext/base/string_view.h"
 #include "perfetto/ext/traced/sys_stats_counters.h"
@@ -39,10 +38,12 @@
 #include "src/trace_processor/importers/common/clock_tracker.h"
 #include "src/trace_processor/importers/common/cpu_tracker.h"
 #include "src/trace_processor/importers/common/event_tracker.h"
+#include "src/trace_processor/importers/common/gpu_tracker.h"
 #include "src/trace_processor/importers/common/import_logs_tracker.h"
 #include "src/trace_processor/importers/common/machine_tracker.h"
 #include "src/trace_processor/importers/common/metadata_tracker.h"
 #include "src/trace_processor/importers/common/process_tracker.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/importers/common/system_info_tracker.h"
 #include "src/trace_processor/importers/common/track_tracker.h"
 #include "src/trace_processor/importers/common/tracks.h"
@@ -55,6 +56,7 @@
 #include "src/trace_processor/tables/metadata_tables_py.h"
 #include "src/trace_processor/types/trace_processor_context.h"
 #include "src/trace_processor/types/variadic.h"
+#include "src/trace_processor/util/clock_synchronizer.h"
 
 #include "protos/perfetto/common/builtin_clock.pbzero.h"
 #include "protos/perfetto/common/system_info.pbzero.h"
@@ -62,6 +64,8 @@
 #include "protos/perfetto/trace/ps/process_tree.pbzero.h"
 #include "protos/perfetto/trace/sys_stats/sys_stats.pbzero.h"
 #include "protos/perfetto/trace/system_info/cpu_info.pbzero.h"
+#include "protos/perfetto/trace/system_info/gpu_info.pbzero.h"
+#include "protos/perfetto/trace/system_info/interrupt_info.pbzero.h"
 
 namespace perfetto::trace_processor {
 
@@ -114,8 +118,16 @@ std::optional<int> VersionStringToSdkVersion(const std::string& version) {
   return std::nullopt;
 }
 
-std::optional<int> FingerprintToSdkVersion(const std::string& fingerprint) {
-  // Try to parse the SDK version from the fingerprint.
+struct FingerprintParts {
+  std::optional<int> version;
+  std::string incremental;
+};
+
+std::optional<FingerprintParts> ParseAndroidFingerprint(
+    const std::string& fingerprint) {
+  // According to Android CDD, the format is:
+  // $(BRAND)/$(PRODUCT)/$(DEVICE):$(VERSION.RELEASE)/$(ID)/$(VERSION.INCREMENTAL):$(TYPE)/$(TAGS)
+  //
   // Examples of fingerprints:
   // google/shamu/shamu:7.0/NBD92F/3753956:userdebug/dev-keys
   // google/coral/coral:12/SP1A.210812.015/7679548:userdebug/dev-keys
@@ -123,12 +135,26 @@ std::optional<int> FingerprintToSdkVersion(const std::string& fingerprint) {
   if (colon == std::string::npos)
     return std::nullopt;
 
-  size_t slash = fingerprint.find('/', colon);
-  if (slash == std::string::npos)
+  size_t release_slash = fingerprint.find('/', colon);
+  if (release_slash == std::string::npos)
     return std::nullopt;
 
-  std::string version = fingerprint.substr(colon + 1, slash - (colon + 1));
-  return VersionStringToSdkVersion(version);
+  std::string version_str =
+      fingerprint.substr(colon + 1, release_slash - (colon + 1));
+
+  size_t id_slash = fingerprint.find('/', release_slash + 1);
+  if (id_slash == std::string::npos)
+    return std::nullopt;
+
+  size_t incremental_colon = fingerprint.find(':', id_slash);
+  if (incremental_colon == std::string::npos)
+    return std::nullopt;
+
+  std::string incremental =
+      fingerprint.substr(id_slash + 1, incremental_colon - (id_slash + 1));
+
+  return FingerprintParts{VersionStringToSdkVersion(version_str),
+                          std::move(incremental)};
 }
 
 struct ArmCpuIdentifier {
@@ -234,6 +260,8 @@ SystemProbesParser::SystemProbesParser(TraceProcessorContext* context)
       arm_cpu_variant(context->storage->InternString("arm_cpu_variant")),
       arm_cpu_part(context->storage->InternString("arm_cpu_part")),
       arm_cpu_revision(context->storage->InternString("arm_cpu_revision")),
+      pages_per_slab_id_(context->storage->InternString("pages_per_slab")),
+      num_slabs_id_(context->storage->InternString("num_slabs")),
       meminfo_strs_(BuildMeminfoCounterNames()),
       vmstat_strs_(BuildVmstatCounterNames()) {}
 
@@ -338,7 +366,7 @@ void SystemProbesParser::ParseSysStats(int64_t ts, ConstBytes blob) {
     auto key = static_cast<size_t>(mi.key());
     if (PERFETTO_UNLIKELY(key >= meminfo_strs_.size())) {
       PERFETTO_ELOG("MemInfo key %zu is not recognized.", key);
-      context_->storage->IncrementStats(stats::meminfo_unknown_keys);
+      context_->stats_tracker->IncrementStats(stats::meminfo_unknown_keys);
       continue;
     }
     // /proc/meminfo counters are in kB, convert to bytes
@@ -376,7 +404,7 @@ void SystemProbesParser::ParseSysStats(int64_t ts, ConstBytes blob) {
     auto key = static_cast<size_t>(vm.key());
     if (PERFETTO_UNLIKELY(key >= vmstat_strs_.size())) {
       PERFETTO_ELOG("VmStat key %zu is not recognized.", key);
-      context_->storage->IncrementStats(stats::vmstat_unknown_keys);
+      context_->stats_tracker->IncrementStats(stats::vmstat_unknown_keys);
       continue;
     }
     TrackId track = context_->track_tracker->InternTrack(
@@ -389,7 +417,7 @@ void SystemProbesParser::ParseSysStats(int64_t ts, ConstBytes blob) {
     protos::pbzero::SysStats::CpuTimes::Decoder ct(*it);
     if (PERFETTO_UNLIKELY(!ct.has_cpu_id())) {
       PERFETTO_ELOG("CPU field not found in CpuTimes");
-      context_->storage->IncrementStats(stats::invalid_cpu_times);
+      context_->stats_tracker->IncrementStats(stats::invalid_cpu_times);
       continue;
     }
 
@@ -524,7 +552,7 @@ void SystemProbesParser::ParseSysStats(int64_t ts, ConstBytes blob) {
     auto resource = static_cast<size_t>(psi.resource());
     const char* resource_key = GetPsiResourceKey(resource);
     if (!resource_key) {
-      context_->storage->IncrementStats(stats::psi_unknown_resource);
+      context_->stats_tracker->IncrementStats(stats::psi_unknown_resource);
       return;
     }
     static constexpr auto kBlueprint = tracks::CounterBlueprint(
@@ -562,9 +590,15 @@ void SystemProbesParser::ParseSysStats(int64_t ts, ConstBytes blob) {
   }
 
   for (auto it = sys_stats.gpufreq_mhz(); it; ++it, ++c) {
+    auto ugpu = context_->gpu_tracker->GetOrCreateGpu(0);
     TrackId track = context_->track_tracker->InternTrack(
-        tracks::kGpuFrequencyBlueprint, tracks::Dimensions(0));
+        tracks::kGpuFrequencyBlueprint,
+        tracks::Dimensions(ugpu.value, uint32_t{0}));
     context_->event_tracker->PushCounter(ts, static_cast<double>(*it), track);
+  }
+
+  for (auto it = sys_stats.slab_info(); it; ++it) {
+    ParseSlabInfo(ts, *it);
   }
 }
 
@@ -590,6 +624,35 @@ void SystemProbesParser::ParseCpuIdleStats(int64_t ts, ConstBytes blob) {
 
     context_->event_tracker->PushCounter(
         ts, static_cast<double>(idle.duration_us()), track);
+  }
+}
+
+void SystemProbesParser::ParseSlabInfo(int64_t ts, ConstBytes blob) {
+  protos::pbzero::SysStats::SlabInfo::Decoder slab(blob);
+
+  static constexpr auto kSlabBlueprint = tracks::CounterBlueprint(
+      "slabinfo", tracks::kBytesUnitBlueprint,
+      tracks::DimensionBlueprints(
+          tracks::StringDimensionBlueprint("slab_name")),
+      tracks::FnNameBlueprint([](base::StringView name) {
+        return base::StackString<1024>("mem.slab.%.*s", int(name.size()),
+                                       name.data());
+      }));
+
+  TrackId track = context_->track_tracker->InternTrack(
+      kSlabBlueprint, tracks::Dimensions(slab.name()));
+
+  double size_bytes = static_cast<double>(slab.pages_per_slab()) *
+                      static_cast<double>(slab.num_slabs()) *
+                      static_cast<double>(page_size_);
+
+  auto id = context_->event_tracker->PushCounter(ts, size_bytes, track);
+  if (id) {
+    ArgsTracker tracker(context_);
+    tracker.AddArgsTo(*id)
+        .AddArg(pages_per_slab_id_,
+                Variadic::UnsignedInteger(slab.pages_per_slab()))
+        .AddArg(num_slabs_id_, Variadic::UnsignedInteger(slab.num_slabs()));
   }
 }
 
@@ -693,10 +756,10 @@ void SystemProbesParser::ParseProcessTree(int64_t ts, ConstBytes blob) {
 
     // note: early kernel threads can have an age of zero (at tick resolution)
     if (proc.has_process_start_from_boot()) {
-      base::StatusOr<int64_t> start_ts = context_->clock_tracker->ToTraceTime(
-          protos::pbzero::BUILTIN_CLOCK_BOOTTIME,
+      std::optional<int64_t> start_ts = context_->clock_tracker->ToTraceTime(
+          ClockId::Machine(protos::pbzero::BUILTIN_CLOCK_BOOTTIME),
           static_cast<int64_t>(proc.process_start_from_boot()));
-      if (start_ts.ok()) {
+      if (start_ts) {
         context_->process_tracker->SetStartTsIfUnset(upid, *start_ts);
       }
     }
@@ -827,7 +890,8 @@ void SystemProbesParser::ParseProcessStats(int64_t ts, ConstBytes blob) {
       }
 
       // No handling for this field, so increment the error counter.
-      context_->storage->IncrementStats(stats::proc_stat_unknown_counters);
+      context_->stats_tracker->IncrementStats(
+          stats::proc_stat_unknown_counters);
     }
   }
 }
@@ -907,6 +971,7 @@ void SystemProbesParser::ParseSystemInfo(ConstBytes blob) {
                                                  kNanosInMinute);
   }
 
+  std::optional<FingerprintParts> fingerprint_parts;
   if (packet.has_android_build_fingerprint()) {
     auto android_build_fingerprint =
         context_->storage->InternString(packet.android_build_fingerprint());
@@ -914,6 +979,15 @@ void SystemProbesParser::ParseSystemInfo(ConstBytes blob) {
         metadata::android_build_fingerprint,
         Variadic::String(android_build_fingerprint));
     machine_tracker->SetAndroidBuildFingerprint(android_build_fingerprint);
+
+    fingerprint_parts = ParseAndroidFingerprint(
+        packet.android_build_fingerprint().ToStdString());
+    if (fingerprint_parts.has_value()) {
+      context_->metadata_tracker->SetMetadata(
+          metadata::android_incremental_build,
+          Variadic::String(context_->storage->InternString(
+              fingerprint_parts.value().incremental)));
+    }
   }
 
   if (packet.has_android_device_manufacturer()) {
@@ -930,15 +1004,22 @@ void SystemProbesParser::ParseSystemInfo(ConstBytes blob) {
   std::optional<int64_t> opt_sdk_version;
   if (packet.has_android_sdk_version()) {
     opt_sdk_version = static_cast<int64_t>(packet.android_sdk_version());
-  } else if (packet.has_android_build_fingerprint()) {
-    opt_sdk_version = FingerprintToSdkVersion(
-        packet.android_build_fingerprint().ToStdString());
+  } else if (fingerprint_parts.has_value() &&
+             fingerprint_parts.value().version.has_value()) {
+    opt_sdk_version = fingerprint_parts.value().version.value();
   }
 
   if (opt_sdk_version) {
     context_->metadata_tracker->SetMetadata(
         metadata::android_sdk_version, Variadic::Integer(*opt_sdk_version));
     machine_tracker->SetAndroidSdkVersion(*opt_sdk_version);
+  }
+
+  if (packet.has_tracing_service_version()) {
+    auto version_id =
+        context_->storage->InternString(packet.tracing_service_version());
+    context_->metadata_tracker->SetMetadata(metadata::tracing_service_version,
+                                            Variadic::String(version_id));
   }
 
   if (packet.has_android_soc_model()) {
@@ -991,6 +1072,17 @@ void SystemProbesParser::ParseSystemInfo(ConstBytes blob) {
   if (packet.has_num_cpus()) {
     machine_tracker->SetNumCpus(packet.num_cpus());
     system_info_tracker->SetNumCpus(packet.num_cpus());
+  }
+
+  if (packet.has_system_ram_bytes()) {
+    const auto system_ram_bytes =
+        static_cast<int64_t>(packet.system_ram_bytes());
+    context_->metadata_tracker->SetMetadata(
+        metadata::system_ram_bytes, Variadic::Integer(system_ram_bytes));
+    context_->metadata_tracker->SetMetadata(
+        metadata::system_ram_gb,
+        Variadic::Integer(MachineTracker::BytesToGB(system_ram_bytes)));
+    machine_tracker->SetSystemRamBytes(system_ram_bytes);
   }
 }
 
@@ -1108,6 +1200,54 @@ void SystemProbesParser::ParseCpuInfo(ConstBytes blob) {
           .AddArg(arm_cpu_part, Variadic::UnsignedInteger(id->part))
           .AddArg(arm_cpu_revision, Variadic::UnsignedInteger(id->revision));
     }
+  }
+}
+
+void SystemProbesParser::ParseGpuInfo(ConstBytes blob) {
+  protos::pbzero::GpuInfo::Decoder gpu_info(blob);
+  uint32_t gpu_index = 0;
+  for (auto it = gpu_info.gpus(); it; ++it, ++gpu_index) {
+    protos::pbzero::GpuInfo::Gpu::Decoder gpu(*it);
+
+    std::string uuid_hex;
+    if (gpu.has_uuid()) {
+      auto uuid_bytes = gpu.uuid();
+      uuid_hex = base::ToHex(reinterpret_cast<const char*>(uuid_bytes.data),
+                             uuid_bytes.size);
+    }
+
+    auto ugpu = context_->gpu_tracker->SetGpuInfo(
+        gpu_index, gpu.name().ToStdStringView(), gpu.vendor().ToStdStringView(),
+        gpu.model().ToStdStringView(), gpu.architecture().ToStdStringView(),
+        std::string_view(uuid_hex), gpu.pci_bdf().ToStdStringView());
+
+    // Store vendor-specific extra_info as args.
+    ArgsTracker args_tracker(context_);
+    auto inserter = args_tracker.AddArgsTo(ugpu);
+    for (auto kv_it = gpu.extra_info(); kv_it; ++kv_it) {
+      protos::pbzero::GpuInfo::Gpu::KeyValue::Decoder kv(*kv_it);
+      if (kv.has_key() && kv.has_value()) {
+        auto key_id = context_->storage->InternString(kv.key());
+        auto val_id = context_->storage->InternString(kv.value());
+        inserter.AddArg(key_id, Variadic::String(val_id));
+      }
+    }
+  }
+}
+
+void SystemProbesParser::ParseInterruptInfo(ConstBytes blob) {
+  protos::pbzero::InterruptInfo::Decoder packet(blob);
+  for (auto it = packet.irq_mapping(); it; ++it) {
+    protos::pbzero::InterruptInfo::InterruptMapping::Decoder mapping(*it);
+    if (!mapping.has_irq_id() || !mapping.has_name())
+      continue;
+    if (!irq_ids_.Insert(mapping.irq_id(), true).second)
+      continue;
+    tables::InterruptMappingTable::Row row;
+    row.irq_id = mapping.irq_id();
+    row.name = context_->storage->InternString(mapping.name());
+    row.machine_id = context_->machine_tracker->machine_id();
+    context_->storage->mutable_interrupt_mapping_table()->Insert(row);
   }
 }
 

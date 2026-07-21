@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include <utility>
 
 #include "partition_alloc/shim/allocator_interception_apple.h"
@@ -16,25 +11,25 @@
 namespace allocator_shim {
 namespace {
 
-void* MallocImpl(size_t size, void* context) {
+void* MallocImpl(size_t size, AllocToken, void* context) {
   MallocZoneFunctions& functions = GetFunctionsForZone(context);
   return functions.malloc(reinterpret_cast<struct _malloc_zone_t*>(context),
                           size);
 }
 
-void* CallocImpl(size_t n, size_t size, void* context) {
+void* CallocImpl(size_t n, size_t size, AllocToken, void* context) {
   MallocZoneFunctions& functions = GetFunctionsForZone(context);
   return functions.calloc(reinterpret_cast<struct _malloc_zone_t*>(context), n,
                           size);
 }
 
-void* MemalignImpl(size_t alignment, size_t size, void* context) {
+void* MemalignImpl(size_t alignment, size_t size, AllocToken, void* context) {
   MallocZoneFunctions& functions = GetFunctionsForZone(context);
   return functions.memalign(reinterpret_cast<struct _malloc_zone_t*>(context),
                             alignment, size);
 }
 
-void* ReallocImpl(void* ptr, size_t size, void* context) {
+void* ReallocImpl(void* ptr, size_t size, AllocToken, void* context) {
   MallocZoneFunctions& functions = GetFunctionsForZone(context);
   return functions.realloc(reinterpret_cast<struct _malloc_zone_t*>(context),
                            ptr, size);

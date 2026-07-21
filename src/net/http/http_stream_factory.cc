@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "base/check.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
@@ -75,13 +74,14 @@ SpdySessionKey HttpStreamFactory::GetSpdySessionKey(
         last_proxy_host_port_pair, PRIVACY_MODE_DISABLED,
         last_proxy_partial_chain, SessionUsage::kProxy, request_info.socket_tag,
         request_info.network_anonymization_key, request_info.secure_dns_policy,
-        /*disable_cert_network_fetches=*/true);
+        /*disable_cert_network_fetches=*/true, request_info.target_network);
   }
   return SpdySessionKey(
       HostPortPair::FromURL(request_info.url), request_info.privacy_mode,
       proxy_chain, SessionUsage::kDestination, request_info.socket_tag,
       request_info.network_anonymization_key, request_info.secure_dns_policy,
-      request_info.load_flags & LOAD_DISABLE_CERT_NETWORK_FETCHES);
+      request_info.load_flags & LOAD_DISABLE_CERT_NETWORK_FETCHES,
+      request_info.target_network);
 }
 
 // static
@@ -107,7 +107,7 @@ HttpStreamFactory::StreamRequestInfo::StreamRequestInfo(
       privacy_mode(http_request_info.privacy_mode),
       secure_dns_policy(http_request_info.secure_dns_policy),
       socket_tag(http_request_info.socket_tag),
-      force_quic(http_request_info.force_quic) {}
+      target_network(http_request_info.target_network) {}
 
 HttpStreamFactory::StreamRequestInfo::StreamRequestInfo(
     const StreamRequestInfo& other) = default;

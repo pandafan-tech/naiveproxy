@@ -110,7 +110,7 @@ constexpr std::array<const char*, 64> kFilteredEventGroupNames = {
     "devtools.timeline",                     // 0x100000
     "mediastream",                           // 0x200000
     "blink_style",                           // 0x400000
-    "unused_bit_23",                         // 0x800000
+    "delegated_ink_trails",                  // 0x800000
     "unused_bit_24",                         // 0x1000000
     "unused_bit_25",                         // 0x2000000
     "unused_bit_26",                         // 0x4000000
@@ -352,9 +352,8 @@ class MultiEtwPayloadHandler final {
     if (!is_enabled_) {
       return 0;
     }
-    ULONG ret =
-        provider_->EventEnd(metadata_, metadata_index_, &descriptors_[0],
-                            descriptors_index_, event_descriptor_);
+    ULONG ret = provider_->EventEnd(metadata_, metadata_index_, descriptors_,
+                                    descriptors_index_, event_descriptor_);
     return ret;
   }
 

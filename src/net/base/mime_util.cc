@@ -19,6 +19,7 @@
 #include "base/memory/raw_ptr_exclusion.h"
 #include "base/no_destructor.h"
 #include "base/rand_util.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
@@ -176,6 +177,7 @@ static const MimeInfo kPrimaryMappings[] = {
     {"application/x-chrome-extension", "crx"},
     {"application/xhtml+xml", "xhtml,xht,xhtm"},
     {"audio/flac", "flac"},
+    {"audio/matroska", "mka"},
     {"audio/mp3", "mp3"},
     {"audio/ogg", "ogg,oga,opus"},
     {"audio/wav", "wav"},
@@ -184,6 +186,7 @@ static const MimeInfo kPrimaryMappings[] = {
     {"image/avif", "avif"},
     {"image/gif", "gif"},
     {"image/jpeg", "jpeg,jpg,jpe"},
+    {"image/jxl", "jxl"},
     {"image/png", "png"},
     {"image/apng", "png,apng"},
     {"image/svg+xml", "svg,svgz"},
@@ -193,6 +196,7 @@ static const MimeInfo kPrimaryMappings[] = {
     {"text/html", "html,htm,shtml,shtm"},
     {"text/javascript", "js,mjs"},
     {"text/xml", "xml"},
+    {"video/matroska", "mkv"},
     {"video/mp4", "mp4,m4v"},
     {"video/ogg", "ogv,ogm"},
 
@@ -250,6 +254,7 @@ static const MimeInfo kSecondaryMappings[] = {
     {"message/rfc822", "eml"},
     {"text/calendar", "ics"},
     {"text/html", "ehtml"},
+    {"text/markdown", "md"},
     {"text/plain", "txt,text"},
     {"text/vtt", "vtt"},
     {"text/x-sh", "sh"},
@@ -720,6 +725,7 @@ static const char* const kStandardImageTypes[] = {"image/avif",
                                                   "image/heif",
                                                   "image/ief",
                                                   "image/jpeg",
+                                                  "image/jxl",
                                                   "image/webp",
                                                   "image/pict",
                                                   "image/pipeg",
@@ -744,6 +750,7 @@ static const char* const kStandardAudioTypes[] = {
   "audio/amr",
   "audio/basic",
   "audio/flac",
+  "audio/matroska",
   "audio/midi",
   "audio/mp3",
   "audio/mp4",
@@ -767,6 +774,7 @@ static const char* const kStandardVideoTypes[] = {
   "video/avi",
   "video/divx",
   "video/flc",
+  "video/matroska",
   "video/mp4",
   "video/mpeg",
   "video/ogg",
@@ -850,19 +858,6 @@ void UnorderedSetToVector(std::unordered_set<T>* source,
     (*target)[old_target_size + i] = *iter;
 }
 
-// Characters to be used for mime multipart boundary.
-//
-// TODO(rsleevi): crbug.com/575779: Follow the spec or fix the spec.
-// The RFC 2046 spec says the alphanumeric characters plus the
-// following characters are legal for boundaries:  '()+_,-./:=?
-// However the following characters, though legal, cause some sites
-// to fail: (),./:=+
-constexpr std::string_view kMimeBoundaryCharacters(
-    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ");
-
-// Size of mime multipart boundary.
-const size_t kMimeBoundarySize = 69;
-
 }  // namespace
 
 void GetExtensionsForMimeType(
@@ -925,13 +920,25 @@ NET_EXPORT std::string GenerateMimeMultipartBoundary() {
   //   bcharsnospace := DIGIT / ALPHA / "'" / "(" / ")" / "+" /
   //            "_" / "," / "-" / "." / "/" / ":" / "=" / "?"
 
+  // Note: this diverges from all the relevant specs. See
+  // https://github.com/whatwg/html/issues/6424 for discussion and
+  // https://issues.chromium.org/issues/40451606 for historical context.
+  //
+  // RFC 2046 and later specs say the alphanumeric characters plus the
+  // following characters are legal for boundaries:  '()+_,-./:=?
+  // However the following characters, though legal, cause some sites
+  // to fail: (),./:=+
+  constexpr std::string_view kMimeBoundaryCharacters(
+      "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ");
+
+  // Size of mime multipart boundary.
+  const size_t kMimeBoundarySize = 69;
+
   std::string result;
   result.reserve(kMimeBoundarySize);
   result.append("----MultipartBoundary--");
   while (result.size() < (kMimeBoundarySize - 4)) {
-    char c = kMimeBoundaryCharacters[base::RandInt(
-        0, kMimeBoundaryCharacters.size() - 1)];
-    result.push_back(c);
+    result.push_back(base::RandomChoice(kMimeBoundaryCharacters));
   }
   result.append("----");
 
@@ -941,23 +948,38 @@ NET_EXPORT std::string GenerateMimeMultipartBoundary() {
   return result;
 }
 
+namespace {
+
+void AddContentTypeAndValue(const std::string& value,
+                            const std::string& content_type,
+                            std::string* post_data) {
+  DCHECK(post_data);
+
+  if (!content_type.empty()) {
+    // If Content-type is specified, the next line is that.
+    base::StrAppend(post_data, {"Content-Type: ", content_type, "\r\n"});
+  }
+  // Leave an empty line and append the value.
+  base::StrAppend(post_data, {"\r\n", value, "\r\n"});
+}
+
+}  // namespace
+
 void AddMultipartValueForUpload(const std::string& value_name,
                                 const std::string& value,
                                 const std::string& mime_boundary,
                                 const std::string& content_type,
                                 std::string* post_data) {
   DCHECK(post_data);
-  // First line is the boundary.
-  post_data->append("--" + mime_boundary + "\r\n");
-  // Next line is the Content-disposition.
-  post_data->append("Content-Disposition: form-data; name=\"" +
-                    value_name + "\"\r\n");
-  if (!content_type.empty()) {
-    // If Content-type is specified, the next line is that.
-    post_data->append("Content-Type: " + content_type + "\r\n");
-  }
-  // Leave an empty line and append the value.
-  post_data->append("\r\n" + value + "\r\n");
+
+  base::StrAppend(
+      post_data,
+      // First line is the boundary.
+      {"--", mime_boundary, "\r\n",
+       // Next line is the Content-disposition.
+       "Content-Disposition: form-data; name=\"", value_name, "\"\r\n"});
+
+  AddContentTypeAndValue(value, content_type, post_data);
 }
 
 void AddMultipartValueForUploadWithFileName(const std::string& value_name,
@@ -967,23 +989,21 @@ void AddMultipartValueForUploadWithFileName(const std::string& value_name,
                                             const std::string& content_type,
                                             std::string* post_data) {
   DCHECK(post_data);
-  // First line is the boundary.
-  post_data->append("--" + mime_boundary + "\r\n");
-  // Next line is the Content-disposition.
-  post_data->append("Content-Disposition: form-data; name=\"" + value_name +
-                    "\"; filename=\"" + file_name + "\"\r\n");
-  if (!content_type.empty()) {
-    // If Content-type is specified, the next line is that.
-    post_data->append("Content-Type: " + content_type + "\r\n");
-  }
-  // Leave an empty line and append the value.
-  post_data->append("\r\n" + value + "\r\n");
+
+  base::StrAppend(post_data,
+                  // First line is the boundary.
+                  {"--", mime_boundary, "\r\n",
+                   // Next line is the Content-disposition.
+                   "Content-Disposition: form-data; name=\"", value_name,
+                   "\"; filename=\"", file_name, "\"\r\n"});
+
+  AddContentTypeAndValue(value, content_type, post_data);
 }
 
 void AddMultipartFinalDelimiterForUpload(const std::string& mime_boundary,
                                          std::string* post_data) {
   DCHECK(post_data);
-  post_data->append("--" + mime_boundary + "--\r\n");
+  base::StrAppend(post_data, {"--", mime_boundary, "--\r\n"});
 }
 
 // TODO(toyoshim): We may prefer to implement a strict RFC2616 media-type
@@ -999,7 +1019,7 @@ std::optional<std::string> ExtractMimeTypeFromMediaType(
   std::string subtype;
   if (ParseMimeTypeWithoutParameter(type_string.substr(0, end), &top_level_type,
                                     &subtype)) {
-    return top_level_type + "/" + subtype;
+    return base::StrCat({top_level_type, "/", subtype});
   }
   return std::nullopt;
 }

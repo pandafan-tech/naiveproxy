@@ -41,7 +41,7 @@ uint64_t RandUint64() {
   return number;
 }
 
-int RandInt(int min, int max) {
+int RandIntInclusive(int min, int max) {
   DCHECK_LE(min, max);
 
   uint64_t range = static_cast<uint64_t>(max) - static_cast<uint64_t>(min) + 1;

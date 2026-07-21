@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -24,6 +25,7 @@
 #include "quiche/quic/core/http/quic_spdy_client_session.h"
 #include "quiche/quic/core/quic_config.h"
 #include "quiche/quic/core/quic_data_writer.h"
+#include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_framer.h"
 #include "quiche/quic/core/quic_packet_creator.h"
 #include "quiche/quic/core/quic_packets.h"
@@ -31,6 +33,7 @@
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_utils.h"
 #include "quiche/quic/core/quic_versions.h"
+#include "quiche/quic/core/scone.h"
 #include "quiche/quic/test_tools/crypto_test_utils.h"
 #include "quiche/quic/test_tools/quic_config_peer.h"
 #include "quiche/quic/test_tools/quic_connection_peer.h"
@@ -96,7 +99,7 @@ QuicAckFrame InitAckFrame(const std::vector<QuicAckBlock>& ack_blocks) {
   QUICHE_DCHECK_GT(ack_blocks.size(), 0u);
 
   QuicAckFrame ack;
-  QuicPacketNumber end_of_previous_block(1);
+  QuicPacketNumber end_of_previous_block(0);
   for (const QuicAckBlock& block : ack_blocks) {
     QUICHE_DCHECK_GE(block.start, end_of_previous_block);
     QUICHE_DCHECK_GT(block.limit, block.start);
@@ -213,6 +216,48 @@ bool ClearControlFrame(const QuicFrame& frame) {
 bool ClearControlFrameWithTransmissionType(const QuicFrame& frame,
                                            TransmissionType /*type*/) {
   return ClearControlFrame(frame);
+}
+
+bool MaybeUpdateSconePacket(const char* old_buffer, char* new_buffer,
+                            size_t length, uint8_t scone_value) {
+  QuicDataReader reader(old_buffer, length);
+  uint8_t first_byte;
+  ParsedQuicVersion unused_version = ParsedQuicVersion::Unsupported();
+  PacketHeaderFormat format;
+  absl::string_view destination_connection_id, source_connection_id;
+  bool unused_flag1, unused_flag2;
+  QuicLongHeaderType unused_type;
+  quiche::QuicheVariableLengthIntegerLength unused_length;
+  QuicVersionLabel version_label;
+  absl::string_view unused_token;
+  std::string unused_error;
+  if (QuicFramer::ParsePublicHeader(
+          &reader, 8, true, &first_byte, &format, &unused_flag1, &unused_flag2,
+          &version_label, &unused_version, &destination_connection_id,
+          &source_connection_id, &unused_type, &unused_length, &unused_token,
+          &unused_error) != QUIC_NO_ERROR) {
+    /* Malformed packet */
+    return false;
+  }
+  if (format != IETF_QUIC_LONG_HEADER_PACKET ||
+      (version_label != kSconeVersionHigh &&
+       version_label != kSconeVersionLow)) {
+    // Not a SCONE packet. Nothing to do, forward.
+    return false;
+  }
+  // There is a SCONE header, modify it. We have to copy it first because it's
+  // const.
+  memcpy(new_buffer, old_buffer, length);
+  new_buffer[0] &= 0xc0;
+  new_buffer[0] |= (scone_value >> 1);
+  if (scone_value & 0x01) {
+    // SconeVersionHigh
+    reinterpret_cast<uint8_t*>(new_buffer)[1] |= 0x80;
+  } else {
+    // SconeVersionLow
+    reinterpret_cast<uint8_t*>(new_buffer)[1] &= 0x7f;
+  }
+  return true;
 }
 
 uint64_t SimpleRandom::RandUint64() {
@@ -772,7 +817,7 @@ TestQuicSpdyClientSession::TestQuicSpdyClientSession(
     std::optional<QuicSSLConfig> ssl_config)
     : QuicSpdyClientSessionBase(connection, nullptr, config,
                                 supported_versions),
-      ssl_config_(std::move(ssl_config)) {
+      ssl_config_(std::move(ssl_config).value_or(crypto_config->ssl_config())) {
   // TODO(b/153726130): Consider adding SetServerApplicationStateForResumption
   // calls in tests and set |has_application_state| to true.
   crypto_stream_ = std::make_unique<QuicCryptoClientStream>(
@@ -922,8 +967,7 @@ QuicEncryptedPacket* ConstructEncryptedPacket(
   }
   EXPECT_FALSE(versions->empty());
   ParsedQuicVersion version = (*versions)[0];
-  if (QuicVersionHasLongHeaderLengths(version.transport_version) &&
-      version_flag) {
+  if (VersionIsIetfQuic(version.transport_version) && version_flag) {
     header.retry_token_length_length = quiche::VARIABLE_LENGTH_INTEGER_LENGTH_1;
     header.length_length = quiche::VARIABLE_LENGTH_INTEGER_LENGTH_2;
   }
@@ -937,7 +981,7 @@ QuicEncryptedPacket* ConstructEncryptedPacket(
   if (level != ENCRYPTION_INITIAL) {
     framer.SetEncrypter(level, std::make_unique<TaggingEncrypter>(level));
   }
-  if (!QuicVersionUsesCryptoFrames(version.transport_version)) {
+  if (!VersionIsIetfQuic(version.transport_version)) {
     QuicFrame frame(
         QuicStreamFrame(QuicUtils::GetCryptoStreamId(version.transport_version),
                         false, 0, absl::string_view(data)));
@@ -981,7 +1025,7 @@ std::unique_ptr<QuicEncryptedPacket> MakeLongHeaderPacket(
   header.destination_connection_id_included = CONNECTION_ID_PRESENT;
   header.source_connection_id = EmptyQuicConnectionId();
   header.source_connection_id_included = CONNECTION_ID_PRESENT;
-  if (!version.SupportsClientConnectionIds()) {
+  if (!version.IsIetfQuic()) {
     header.source_connection_id_included = CONNECTION_ID_ABSENT;
   }
   header.version_flag = true;
@@ -989,7 +1033,8 @@ std::unique_ptr<QuicEncryptedPacket> MakeLongHeaderPacket(
   header.packet_number_length = PACKET_4BYTE_PACKET_NUMBER;
   header.packet_number = QuicPacketNumber(33);
   header.long_packet_type = long_header_type;
-  if (version.HasLongHeaderLengths()) {
+  header.form = IETF_QUIC_LONG_HEADER_PACKET;
+  if (version.IsIetfQuic()) {
     header.retry_token_length_length = quiche::VARIABLE_LENGTH_INTEGER_LENGTH_1;
     header.length_length = quiche::VARIABLE_LENGTH_INTEGER_LENGTH_2;
   }
@@ -998,7 +1043,7 @@ std::unique_ptr<QuicEncryptedPacket> MakeLongHeaderPacket(
                     kQuicDefaultConnectionIdLength);
   framer.SetInitialObfuscators(server_connection_id);
 
-  if (long_header_type != INITIAL) {
+  if (encryption_level != ENCRYPTION_INITIAL) {
     framer.SetEncrypter(encryption_level,
                         std::make_unique<TaggingEncrypter>(encryption_level));
   }
@@ -1046,8 +1091,7 @@ QuicEncryptedPacket* ConstructMisFramedEncryptedPacket(
   header.reset_flag = reset_flag;
   header.packet_number_length = packet_number_length;
   header.packet_number = QuicPacketNumber(packet_number);
-  if (QuicVersionHasLongHeaderLengths(version.transport_version) &&
-      version_flag) {
+  if (VersionIsIetfQuic(version.transport_version) && version_flag) {
     header.retry_token_length_length = quiche::VARIABLE_LENGTH_INTEGER_LENGTH_1;
     header.length_length = quiche::VARIABLE_LENGTH_INTEGER_LENGTH_2;
   }
@@ -1197,7 +1241,7 @@ void CreateServerSessionForTest(
 QuicStreamId GetNthClientInitiatedBidirectionalStreamId(
     QuicTransportVersion version, int n) {
   int num = n;
-  if (!VersionUsesHttp3(version)) {
+  if (!VersionIsIetfQuic(version)) {
     num++;
   }
   return QuicUtils::GetFirstBidirectionalStreamId(version,
@@ -1229,7 +1273,7 @@ QuicStreamId GetNthClientInitiatedUnidirectionalStreamId(
 StreamType DetermineStreamType(QuicStreamId id, ParsedQuicVersion version,
                                Perspective perspective, bool is_incoming,
                                StreamType default_type) {
-  return version.HasIetfQuicFrames()
+  return version.IsIetfQuic()
              ? QuicUtils::GetStreamType(id, perspective, is_incoming, version)
              : default_type;
 }
@@ -1334,7 +1378,7 @@ WriteResult TestPacketWriter::WritePacket(
     memcpy(&final_bytes_of_last_packet_, packet.data() + packet.length() - 4,
            sizeof(final_bytes_of_last_packet_));
   }
-  if (framer_.framer()->version().KnowsWhichDecrypterToUse()) {
+  if (framer_.framer()->version().IsIetfQuic()) {
     framer_.framer()->InstallDecrypter(ENCRYPTION_HANDSHAKE,
                                        std::make_unique<TaggingDecrypter>());
     framer_.framer()->InstallDecrypter(ENCRYPTION_ZERO_RTT,

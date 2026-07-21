@@ -5,7 +5,8 @@
 #include "quiche/quic/core/tls_client_handshaker.h"
 
 #include <algorithm>
-#include <cstring>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -15,15 +16,30 @@
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "openssl/ssl.h"
+#include "quiche/quic/core/crypto/client_proof_source.h"
+#include "quiche/quic/core/crypto/crypto_handshake.h"
+#include "quiche/quic/core/crypto/crypto_message_parser.h"
+#include "quiche/quic/core/crypto/crypto_protocol.h"
+#include "quiche/quic/core/crypto/crypto_utils.h"
+#include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/crypto/quic_crypto_client_config.h"
-#include "quiche/quic/core/crypto/quic_encrypter.h"
 #include "quiche/quic/core/crypto/transport_parameters.h"
+#include "quiche/quic/core/quic_crypto_client_stream.h"
+#include "quiche/quic/core/quic_data_writer.h"
+#include "quiche/quic/core/quic_error_codes.h"
+#include "quiche/quic/core/quic_server_id.h"
 #include "quiche/quic/core/quic_session.h"
 #include "quiche/quic/core/quic_types.h"
+#include "quiche/quic/core/quic_versions.h"
+#include "quiche/quic/core/tls_handshaker.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
+#include "quiche/quic/platform/api/quic_flag_utils.h"
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_hostname_utils.h"
+#include "quiche/quic/platform/api/quic_logging.h"
+#include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/common/quiche_text_utils.h"
 
 namespace quic {
@@ -172,6 +188,13 @@ bool TlsClientHandshaker::CryptoConnect() {
     }
   }
 
+#if BORINGSSL_API_VERSION >= 41
+  if (tls_connection_.ssl_config().server_padding_to_request.has_value()) {
+    SSL_set_server_padding_request(
+        ssl(), tls_connection_.ssl_config().server_padding_to_request.value());
+  }
+#endif
+
   // The compliance policy must be the last thing configured before the
   // handshake in order to have defined behavior.
   if (ssl_compliance_policy_.has_value()) {
@@ -255,7 +278,7 @@ bool TlsClientHandshaker::SetAlpn() {
   // Enable ALPS only for versions that use HTTP/3 frames.
   for (const std::string& alpn_string : alpns) {
     for (const ParsedQuicVersion& version : session()->supported_versions()) {
-      if (!version.UsesHttp3() || AlpnForVersion(version) != alpn_string) {
+      if (!version.IsIetfQuic() || AlpnForVersion(version) != alpn_string) {
         continue;
       }
       if (SSL_add_application_settings(
@@ -275,10 +298,6 @@ bool TlsClientHandshaker::SetAlpn() {
 bool TlsClientHandshaker::SetTransportParameters() {
   TransportParameters params;
   params.perspective = Perspective::IS_CLIENT;
-  params.legacy_version_information =
-      TransportParameters::LegacyVersionInformation();
-  params.legacy_version_information->version =
-      CreateQuicVersionLabel(session()->supported_versions().front());
   params.version_information = TransportParameters::VersionInformation();
   const QuicVersionLabel version = CreateQuicVersionLabel(session()->version());
   params.version_information->chosen_version = version;
@@ -286,6 +305,18 @@ bool TlsClientHandshaker::SetTransportParameters() {
 
   if (!handshaker_delegate()->FillTransportParameters(&params)) {
     return false;
+  }
+
+  // The `debugging_sni` field must not be sent when attempting Encrypted Client
+  // Hello (ECH) because it would reveal the real SNI in cleartext. When only
+  // ECH GREASE will be sent, it's still sensible to omit `debugging_sni`
+  // because it would enable observers to discriminate real ECH from GREASE. The
+  // `kDSNI` option forces `debugging_sni` to be sent despite ECH GREASE.
+  if (!tls_connection_.ssl_config().ech_config_list.empty() ||
+      (tls_connection_.ssl_config().ech_grease_enabled &&
+       !session_->config()->HasClientSentConnectionOption(
+           kDSNI, Perspective::IS_CLIENT))) {
+    params.debugging_sni.reset();
   }
 
   // Notify QuicConnectionDebugVisitor.
@@ -322,21 +353,6 @@ bool TlsClientHandshaker::ProcessTransportParameters(
   session()->connection()->OnTransportParametersReceived(
       *received_transport_params_);
 
-  if (received_transport_params_->legacy_version_information.has_value()) {
-    if (received_transport_params_->legacy_version_information->version !=
-        CreateQuicVersionLabel(session()->connection()->version())) {
-      *error_details = "Version mismatch detected";
-      return false;
-    }
-    if (CryptoUtils::ValidateServerHelloVersions(
-            received_transport_params_->legacy_version_information
-                ->supported_versions,
-            session()->connection()->server_supported_versions(),
-            error_details) != QUIC_NO_ERROR) {
-      QUICHE_DCHECK(!error_details->empty());
-      return false;
-    }
-  }
   if (received_transport_params_->version_information.has_value()) {
     if (!CryptoUtils::ValidateChosenVersion(
             received_transport_params_->version_information->chosen_version,
@@ -414,6 +430,10 @@ bool TlsClientHandshaker::ExportKeyingMaterial(absl::string_view label,
 
 bool TlsClientHandshaker::MatchedTrustAnchorIdForTesting() const {
   return matched_trust_anchor_id_;
+}
+
+bool TlsClientHandshaker::ServerPaddingSentForTesting() const {
+  return server_sent_padding_;
 }
 
 std::optional<ssl_compliance_policy_t>
@@ -552,18 +572,10 @@ QuicAsyncStatus TlsClientHandshaker::VerifyCertChain(
   std::string sct_list(reinterpret_cast<const char*>(sct_list_raw),
                        sct_list_len);
 
-  // cronet-reality: stash the SSL handle for the Chromium ProofVerifier
-  // so it can detect REALITY-enabled sessions and short-circuit cert
-  // chain validation in favor of the HMAC tag carried in the leaf's
-  // signature field. See SSL_reality_register_pending_verify in
-  // BoringSSL's handshake_client.cc for the rationale.
-  SSL_reality_register_pending_verify(ssl());
-  QuicAsyncStatus status = proof_verifier_->VerifyCertChain(
+  return proof_verifier_->VerifyCertChain(
       server_id_.host(), server_id_.port(), certs, ocsp_response, sct_list,
       verify_context_.get(), error_details, details, out_alert,
       std::move(callback));
-  SSL_reality_clear_pending_verify();
-  return status;
 }
 
 void TlsClientHandshaker::OnProofVerifyDetailsAvailable(
@@ -627,6 +639,10 @@ void TlsClientHandshaker::FinishHandshake() {
       return;
     }
   }
+
+#if BORINGSSL_API_VERSION >= 41
+  server_sent_padding_ = SSL_server_sent_requested_padding(ssl());
+#endif
 
   state_ = HANDSHAKE_COMPLETE;
   handshaker_delegate()->OnTlsHandshakeComplete();
@@ -703,6 +719,32 @@ void TlsClientHandshaker::InsertSession(bssl::UniquePtr<SSL_SESSION> session) {
   session_cache_->Insert(server_id_, std::move(session),
                          *received_transport_params_,
                          received_application_state_.get());
+}
+
+int TlsClientHandshaker::OnClientCertRequested(SSL* ssl) {
+  QUICHE_DCHECK(GetQuicRestartFlag(quic_client_cert_support));
+  if (SSL_get0_chain(ssl) != nullptr) {
+    QUIC_DVLOG(1) << "Client certificate already set, continuing handshake.";
+    return 1;
+  }
+  const STACK_OF(CRYPTO_BUFFER)* ca_names = SSL_get0_server_requested_CAs(ssl);
+  std::vector<std::string> cert_authorities;
+  if (ca_names != nullptr) {
+    for (size_t i = 0; i < sk_CRYPTO_BUFFER_num(ca_names); ++i) {
+      CRYPTO_BUFFER* buffer = sk_CRYPTO_BUFFER_value(ca_names, i);
+      cert_authorities.push_back(
+          std::string(reinterpret_cast<const char*>(CRYPTO_BUFFER_data(buffer)),
+                      CRYPTO_BUFFER_len(buffer)));
+    }
+  }
+
+  // OnCertificateRequested returns true if the implementation intends to
+  // provide the client certificate asynchronously, in which case we suspend the
+  // handshake.
+  if (proof_handler_->OnCertificateRequested(cert_authorities)) {
+    return -1;
+  }
+  return 1;
 }
 
 void TlsClientHandshaker::WriteMessage(EncryptionLevel level,

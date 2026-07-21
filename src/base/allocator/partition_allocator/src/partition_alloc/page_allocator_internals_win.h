@@ -2,20 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_PAGE_ALLOCATOR_INTERNALS_WIN_H_
 #define PARTITION_ALLOC_PAGE_ALLOCATOR_INTERNALS_WIN_H_
 
 #include <cstdint>
 
 #include "partition_alloc/buildflags.h"
+#include "partition_alloc/internal/page_allocator_internal.h"
 #include "partition_alloc/oom.h"
 #include "partition_alloc/page_allocator.h"
-#include "partition_alloc/page_allocator_internal.h"
 #include "partition_alloc/partition_alloc_base/notreached.h"
 #include "partition_alloc/partition_alloc_check.h"
 
@@ -251,6 +246,10 @@ void DiscardSystemPagesInternal(uintptr_t address, size_t length) {
 
 bool SealSystemPagesInternal(uintptr_t address, size_t length) {
   return false;
+}
+
+size_t GetZeroSegmentSizeFromOS() {
+  return 0;
 }
 
 }  // namespace partition_alloc::internal

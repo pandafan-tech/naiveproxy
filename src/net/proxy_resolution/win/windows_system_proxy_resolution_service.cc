@@ -11,8 +11,7 @@
 #include "base/values.h"
 #include "base/win/windows_version.h"
 #include "net/base/net_errors.h"
-#include "net/base/net_info_source_list.h"
-#include "net/log/net_log.h"
+#include "net/base/proxy_delegate.h"
 #include "net/log/net_log_event_type.h"
 #include "net/log/net_log_with_source.h"
 #include "net/proxy_resolution/win/windows_system_proxy_resolution_request.h"
@@ -48,8 +47,8 @@ WindowsSystemProxyResolutionService::Create(
 WindowsSystemProxyResolutionService::WindowsSystemProxyResolutionService(
     std::unique_ptr<WindowsSystemProxyResolver> windows_system_proxy_resolver,
     NetLog* net_log)
-    : windows_system_proxy_resolver_(std::move(windows_system_proxy_resolver)),
-      net_log_(net_log) {}
+    : windows_system_proxy_resolver_(std::move(windows_system_proxy_resolver)) {
+}
 
 WindowsSystemProxyResolutionService::~WindowsSystemProxyResolutionService() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -60,9 +59,16 @@ WindowsSystemProxyResolutionService::~WindowsSystemProxyResolutionService() {
   // callbacks (if it deletes another request), iterating through the set in a
   // for-loop will not work.
   while (!pending_requests_.empty()) {
-    WindowsSystemProxyResolutionRequest* req = *pending_requests_.begin();
+    const size_t size_before = pending_requests_.size();
+    auto* req = static_cast<WindowsSystemProxyResolutionRequest*>(
+        pending_requests_.begin()->get());
+    // ProxyResolutionComplete() removes |req| from pending_requests_ via
+    // MarkCompleted(), and sets service_ = nullptr on the request so
+    // the base ~SystemProxyResolutionRequest destructor skips its cleanup
+    // (no double-remove, no spurious CANCELLED log).
     req->ProxyResolutionComplete(ProxyList(), WinHttpStatus::kAborted, 0);
-    pending_requests_.erase(req);
+    CHECK_LT(pending_requests_.size(), size_before)
+        << "ProxyResolutionComplete did not remove request from pending set";
   }
 }
 
@@ -70,10 +76,12 @@ int WindowsSystemProxyResolutionService::ResolveProxy(
     const GURL& url,
     const std::string& method,
     const NetworkAnonymizationKey& network_anonymization_key,
+    handles::NetworkHandle target_network,
     ProxyInfo* results,
     CompletionOnceCallback callback,
     std::unique_ptr<ProxyResolutionRequest>* request,
-    const NetLogWithSource& net_log) {
+    const NetLogWithSource& net_log,
+    RequestPriority priority) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(!callback.is_null());
   DCHECK(request);
@@ -95,72 +103,12 @@ int WindowsSystemProxyResolutionService::ResolveProxy(
   return ERR_IO_PENDING;
 }
 
-void WindowsSystemProxyResolutionService::ReportSuccess(
-    const ProxyInfo& proxy_info) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  const ProxyRetryInfoMap& new_retry_info = proxy_info.proxy_retry_info();
-  ProxyResolutionService::ProcessProxyRetryInfo(
-      new_retry_info, proxy_retry_info_, proxy_delegate_);
-}
-
-void WindowsSystemProxyResolutionService::SetProxyDelegate(
-    ProxyDelegate* delegate) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!proxy_delegate_ || !delegate);
-  proxy_delegate_ = delegate;
-}
-
-void WindowsSystemProxyResolutionService::OnShutdown() {
-  // TODO(crbug.com/40111093): Add cleanup here as necessary. If cleanup
-  // is unnecessary, update the interface to not require an implementation for
-  // this so OnShutdown() can be removed.
-}
-
-void WindowsSystemProxyResolutionService::ClearBadProxiesCache() {
-  proxy_retry_info_.clear();
-}
-
-const ProxyRetryInfoMap& WindowsSystemProxyResolutionService::proxy_retry_info()
-    const {
-  return proxy_retry_info_;
-}
-
-base::Value::Dict WindowsSystemProxyResolutionService::GetProxyNetLogValues() {
-  base::Value::Dict net_info_dict;
-
-  // Log proxy settings - Windows system proxy uses the system configuration
-  {
-    base::Value::Dict dict;
-    dict.Set("source", "system");
-    dict.Set("description", "Windows system proxy configuration");
-    net_info_dict.Set(kNetInfoProxySettings, std::move(dict));
-  }
-
-  // Log Bad Proxies.
-  net_info_dict.Set(kNetInfoBadProxies, BuildBadProxiesList(proxy_retry_info_));
-
-  return net_info_dict;
-}
-
-bool WindowsSystemProxyResolutionService::
-    CastToConfiguredProxyResolutionService(
-        ConfiguredProxyResolutionService**
-            configured_proxy_resolution_service) {
-  *configured_proxy_resolution_service = nullptr;
-  return false;
-}
-
-bool WindowsSystemProxyResolutionService::ContainsPendingRequest(
-    WindowsSystemProxyResolutionRequest* req) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  return pending_requests_.count(req) == 1;
-}
-
-void WindowsSystemProxyResolutionService::RemovePendingRequest(
-    WindowsSystemProxyResolutionRequest* req) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(ContainsPendingRequest(req));
-  pending_requests_.erase(req);
+base::DictValue
+WindowsSystemProxyResolutionService::GetProxySettingsForNetLog() {
+  base::DictValue dict;
+  dict.Set("source", "system");
+  dict.Set("description", "Windows system proxy configuration");
+  return dict;
 }
 
 int WindowsSystemProxyResolutionService::DidFinishResolvingProxy(
@@ -176,7 +124,7 @@ int WindowsSystemProxyResolutionService::DidFinishResolvingProxy(
   // Log the diagnostic information about the WinHTTP resolution
   net_log.AddEvent(
       NetLogEventType::PROXY_RESOLUTION_SERVICE_RESOLVED_PROXY_LIST, [&] {
-        base::Value::Dict resolution_dict;
+        base::DictValue resolution_dict;
         resolution_dict.Set("winhttp_status", static_cast<int>(winhttp_status));
         resolution_dict.Set("windows_error", windows_error);
         if (winhttp_status == WinHttpStatus::kOk) {

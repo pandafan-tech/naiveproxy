@@ -4,10 +4,12 @@
 
 #include "base/memory_coordinator/test_memory_consumer_registry.h"
 
+#include <algorithm>
+
 #include "base/check.h"
 #include "base/check_op.h"
-#include "base/containers/contains.h"
 #include "base/memory_coordinator/memory_consumer.h"
+#include "base/task/single_thread_task_runner.h"
 
 namespace base {
 
@@ -23,30 +25,52 @@ TestMemoryConsumerRegistry::~TestMemoryConsumerRegistry() {
 }
 
 void TestMemoryConsumerRegistry::OnMemoryConsumerAdded(
-    std::string_view consumer_id,
-    MemoryConsumerTraits traits,
-    RegisteredMemoryConsumer consumer) {
-  CHECK(!base::Contains(memory_consumers_, consumer));
-  memory_consumers_.push_back(consumer);
+    uint32_t consumer_id,
+    std::string_view consumer_name,
+    std::optional<MemoryConsumerTraits> traits,
+    MemoryConsumer* consumer) {
+  CHECK(!memory_consumers_.HasObserver(consumer));
+  memory_consumers_.AddObserver(consumer);
+  size_++;
 }
 
 void TestMemoryConsumerRegistry::OnMemoryConsumerRemoved(
-    std::string_view consumer_id,
-    RegisteredMemoryConsumer consumer) {
-  size_t removed = std::erase(memory_consumers_, consumer);
-  CHECK_EQ(removed, 1u);
+    uint32_t consumer_id,
+    MemoryConsumer* consumer) {
+  CHECK(memory_consumers_.HasObserver(consumer));
+  memory_consumers_.RemoveObserver(consumer);
+  size_--;
 }
 
 void TestMemoryConsumerRegistry::NotifyUpdateMemoryLimit(int percentage) {
-  for (RegisteredMemoryConsumer consumer : memory_consumers_) {
-    consumer.UpdateMemoryLimit(percentage);
+  for (MemoryConsumer& consumer : memory_consumers_) {
+    MemoryConsumerRegistry::NotifyUpdateMemoryLimit(&consumer, percentage);
   }
 }
 
 void TestMemoryConsumerRegistry::NotifyReleaseMemory() {
-  for (RegisteredMemoryConsumer consumer : memory_consumers_) {
-    consumer.ReleaseMemory();
+  for (MemoryConsumer& consumer : memory_consumers_) {
+    MemoryConsumerRegistry::NotifyReleaseMemory(&consumer);
   }
+}
+
+void TestMemoryConsumerRegistry::NotifyUpdateMemoryLimitAsync(
+    int percentage,
+    OnceClosure on_notification_sent_callback) {
+  SingleThreadTaskRunner::GetMainThreadDefault()->PostTaskAndReply(
+      FROM_HERE,
+      BindOnce(&TestMemoryConsumerRegistry::NotifyUpdateMemoryLimit,
+               weak_ptr_factory_.GetWeakPtr(), percentage),
+      std::move(on_notification_sent_callback));
+}
+
+void TestMemoryConsumerRegistry::NotifyReleaseMemoryAsync(
+    OnceClosure on_notification_sent_callback) {
+  SingleThreadTaskRunner::GetMainThreadDefault()->PostTaskAndReply(
+      FROM_HERE,
+      BindOnce(&TestMemoryConsumerRegistry::NotifyReleaseMemory,
+               weak_ptr_factory_.GetWeakPtr()),
+      std::move(on_notification_sent_callback));
 }
 
 }  // namespace base

@@ -2,10 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
+// See also docs/network_traffic_annotations.md for the complete documentation.
 
 #ifndef NET_TRAFFIC_ANNOTATION_NETWORK_TRAFFIC_ANNOTATION_H_
 #define NET_TRAFFIC_ANNOTATION_NETWORK_TRAFFIC_ANNOTATION_H_
@@ -13,6 +10,7 @@
 #include <cstdint>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
 #include "build/build_config.h"
 
@@ -27,7 +25,7 @@ consteval int32_t ComputeAnnotationHash(const char (&str)[N]) {
   uint32_t ret = 0;
   // - 1 to not include NUL
   for (size_t i = 0; i < N - 1; ++i) {
-    ret = (ret * 31u + static_cast<uint32_t>(str[i])) % 138003713u;
+    ret = (ret * 31u + static_cast<uint32_t>(UNSAFE_TODO(str[i]))) % 138003713u;
   }
   return static_cast<int32_t>(ret);
 }
@@ -52,6 +50,9 @@ namespace net {
 struct PartialNetworkTrafficAnnotationTag;
 
 // Defined types for network traffic annotation tags.
+//
+// Typically created via DefineNetworkTrafficAnnotation(). See
+// docs/network_traffic_annotations.md for more details.
 struct NetworkTrafficAnnotationTag {
   const int32_t unique_id_hash_code;
 
@@ -148,8 +149,8 @@ struct PartialNetworkTrafficAnnotationTag {
 //
 // An empty and a sample template for the text-encoded protobuf can be found in
 // tools/traffic_annotation/sample_traffic_annotation.cc.
-// TODO(crbug.com/40505662): Add tools to check annotation text's format during
-// presubmit checks.
+//
+// See docs/network_traffic_annotations.md.
 inline constexpr NetworkTrafficAnnotationTag DefineNetworkTrafficAnnotation(
     internal::StringLiteralToHash unique_id,
     const char* proto) {

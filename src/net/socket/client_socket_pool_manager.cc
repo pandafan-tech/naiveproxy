@@ -11,6 +11,7 @@
 
 #include "base/check_op.h"
 #include "base/metrics/field_trial_params.h"
+#include "base/numerics/safe_conversions.h"
 #include "build/build_config.h"
 #include "net/base/load_flags.h"
 #include "net/base/net_export.h"
@@ -31,17 +32,17 @@ namespace net {
 
 namespace {
 
-// The limit for active sockets per pool for this network process. This may be
-// modified by set_max_sockets_per_pool in tests, but should otherwise be as
-// stated below.
-auto g_max_sockets_per_pool = std::to_array<int>({
-    256,  // NORMAL_SOCKET_POOL
-    256   // WEBSOCKET_SOCKET_POOL
-});
+static constexpr size_t kSocketPoolTypesSize =
+    std::to_underlying(HttpNetworkSession::SocketPoolType::kMaxValue) + 1;
 
-static_assert(std::size(g_max_sockets_per_pool) ==
-                  HttpNetworkSession::NUM_SOCKET_POOL_TYPES,
-              "max sockets per pool length mismatch");
+// The soft limit for active sockets per pool for this network process. This may
+// be modified by set_socket_soft_cap_per_pool in tests, but should otherwise be
+// as stated below.
+std::array<size_t, kSocketPoolTypesSize> g_socket_soft_cap_per_pool =
+    std::to_array<size_t>({
+        256,  // kNormal
+        256   // kWebSocket
+    });
 
 // Default to allow up to 6 connections per host. Experiment and tuning may
 // try other values (greater than 0).  Too large may cause many problems, such
@@ -51,26 +52,35 @@ static_assert(std::size(g_max_sockets_per_pool) ==
 // than normal other connections. Use a limit of 255, so the limit for wss will
 // be the same as the limit for ws. Also note that Firefox uses a limit of 200.
 // See http://crbug.com/486800
-auto g_max_sockets_per_group = std::to_array<int>({
-    6,   // NORMAL_SOCKET_POOL
-    255  // WEBSOCKET_SOCKET_POOL
-});
+std::array<size_t, kSocketPoolTypesSize> g_max_sockets_per_group =
+    std::to_array<size_t>({
+        6,   // kNormal
+        255  // kWebSocket
+    });
 
-static_assert(std::size(g_max_sockets_per_group) ==
-                  HttpNetworkSession::NUM_SOCKET_POOL_TYPES,
-              "max sockets per group length mismatch");
+// Returns the limit for active connections through a specific proxy chain for
+// this network process. `set_max_sockets_per_proxy_chain` can modify this.
+std::array<size_t, kSocketPoolTypesSize>& GlobalMaxSocketPerProxyChain() {
+  static std::array<size_t, kSocketPoolTypesSize>
+      g_max_sockets_per_proxy_chain = []() {
+        if (base::FeatureList::IsEnabled(features::kTcpSocketPoolProxyLimit)) {
+          return std::to_array<size_t>({
+              base::saturated_cast<size_t>(
+                  features::kTcpSocketPoolProxyLimitNormal.Get()),  // kNormal
+              base::saturated_cast<size_t>(
+                  features::kTcpSocketPoolProxyLimitWebSocket
+                      .Get())  // kWebSocket
+          });
+        }
+        return std::to_array<size_t>({
+            32,  // kNormal
+            32   // kWebSocket
+        });
+      }();
+  return g_max_sockets_per_proxy_chain;
+}
 
-// The max number of sockets to allow per proxy chain.  This applies both to
-// http and SOCKS proxies.  See http://crbug.com/12066 and
-// http://crbug.com/44501 for details about proxy chain connection limits.
-auto g_max_sockets_per_proxy_chain = std::to_array<int>({
-    kDefaultMaxSocketsPerProxyChain,  // NORMAL_SOCKET_POOL
-    kDefaultMaxSocketsPerProxyChain   // WEBSOCKET_SOCKET_POOL
-});
-
-static_assert(std::size(g_max_sockets_per_proxy_chain) ==
-                  HttpNetworkSession::NUM_SOCKET_POOL_TYPES,
-              "max sockets per proxy chain length mismatch");
+bool g_allow_size_randomization_for_proxy = true;
 
 // TODO(crbug.com/40609237) In order to resolve longstanding issues
 // related to pooling distinguishable sockets together, get rid of SocketParams
@@ -94,13 +104,14 @@ int InitSocketPoolHelper(
     NetworkAnonymizationKey network_anonymization_key,
     SecureDnsPolicy secure_dns_policy,
     const SocketTag& socket_tag,
+    handles::NetworkHandle target_network,
     const NetLogWithSource& net_log,
     int num_preconnect_streams,
     ClientSocketHandle* socket_handle,
     HttpNetworkSession::SocketPoolType socket_pool_type,
     CompletionOnceCallback callback,
     const ClientSocketPool::ProxyAuthCallback& proxy_auth_callback,
-    bool fail_if_alias_requires_proxy_override) {
+    ClientSocketPool::PreconnectCompletionCallback preconnect_callback) {
   DCHECK(endpoint.IsValid());
 
   session->ApplyTestingFixedPort(endpoint);
@@ -109,7 +120,7 @@ int InitSocketPoolHelper(
       !!(request_load_flags & LOAD_DISABLE_CERT_NETWORK_FETCHES);
   ClientSocketPool::GroupId connection_group(
       std::move(endpoint), privacy_mode, std::move(network_anonymization_key),
-      secure_dns_policy, disable_cert_network_fetches);
+      secure_dns_policy, disable_cert_network_fetches, target_network);
   scoped_refptr<ClientSocketPool::SocketParams> socket_params =
       CreateSocketParams(connection_group, allowed_bad_certs);
 
@@ -127,15 +138,13 @@ int InitSocketPoolHelper(
   if (num_preconnect_streams) {
     return pool->RequestSockets(connection_group, std::move(socket_params),
                                 proxy_annotation, num_preconnect_streams,
-                                fail_if_alias_requires_proxy_override,
-                                std::move(callback), net_log);
+                                std::move(preconnect_callback), net_log);
   }
 
-  return socket_handle->Init(
-      connection_group, std::move(socket_params), proxy_annotation,
-      request_priority, socket_tag, respect_limits, std::move(callback),
-      proxy_auth_callback, fail_if_alias_requires_proxy_override, pool,
-      net_log);
+  return socket_handle->Init(connection_group, std::move(socket_params),
+                             proxy_annotation, request_priority, socket_tag,
+                             respect_limits, std::move(callback),
+                             proxy_auth_callback, pool, net_log);
 }
 
 }  // namespace
@@ -144,61 +153,67 @@ ClientSocketPoolManager::ClientSocketPoolManager() = default;
 ClientSocketPoolManager::~ClientSocketPoolManager() = default;
 
 // static
-int ClientSocketPoolManager::max_sockets_per_pool(
+size_t ClientSocketPoolManager::socket_soft_cap_per_pool(
     HttpNetworkSession::SocketPoolType pool_type) {
-  DCHECK_LT(pool_type, HttpNetworkSession::NUM_SOCKET_POOL_TYPES);
-  return g_max_sockets_per_pool[pool_type];
+  return g_socket_soft_cap_per_pool[std::to_underlying(pool_type)];
 }
 
 // static
-void ClientSocketPoolManager::set_max_sockets_per_pool(
+void ClientSocketPoolManager::set_socket_soft_cap_per_pool_for_test(
     HttpNetworkSession::SocketPoolType pool_type,
-    int socket_count) {
-  DCHECK_LT(0, socket_count);     // At least one socket must be allowed.
-  DCHECK_LT(pool_type, HttpNetworkSession::NUM_SOCKET_POOL_TYPES);
-  g_max_sockets_per_pool[pool_type] = socket_count;
-  DCHECK_GE(g_max_sockets_per_pool[pool_type],
-            g_max_sockets_per_group[pool_type]);
+    size_t socket_count) {
+  DCHECK_LT(0u, socket_count);     // At least one socket must be allowed.
+  g_socket_soft_cap_per_pool[std::to_underlying(pool_type)] = socket_count;
+  DCHECK_GE(g_socket_soft_cap_per_pool[std::to_underlying(pool_type)],
+            g_max_sockets_per_group[std::to_underlying(pool_type)]);
 }
 
 // static
-int ClientSocketPoolManager::max_sockets_per_group(
+size_t ClientSocketPoolManager::max_sockets_per_group(
     HttpNetworkSession::SocketPoolType pool_type) {
-  DCHECK_LT(pool_type, HttpNetworkSession::NUM_SOCKET_POOL_TYPES);
-  return g_max_sockets_per_group[pool_type];
+  return g_max_sockets_per_group[std::to_underlying(pool_type)];
 }
 
 // static
-void ClientSocketPoolManager::set_max_sockets_per_group(
+void ClientSocketPoolManager::set_max_sockets_per_group_for_test(
     HttpNetworkSession::SocketPoolType pool_type,
-    int socket_count) {
-  DCHECK_LT(0, socket_count);    // At least one socket must be allowed.
-  DCHECK_LT(pool_type, HttpNetworkSession::NUM_SOCKET_POOL_TYPES);
-  g_max_sockets_per_group[pool_type] = socket_count;
+    size_t socket_count) {
+  DCHECK_LT(0u, socket_count);    // At least one socket must be allowed.
+  g_max_sockets_per_group[std::to_underlying(pool_type)] = socket_count;
 
-  DCHECK_GE(g_max_sockets_per_pool[pool_type],
-            g_max_sockets_per_group[pool_type]);
-  DCHECK_GE(g_max_sockets_per_proxy_chain[pool_type],
-            g_max_sockets_per_group[pool_type]);
+  DCHECK_GE(g_socket_soft_cap_per_pool[std::to_underlying(pool_type)],
+            g_max_sockets_per_group[std::to_underlying(pool_type)]);
+  DCHECK_GE(GlobalMaxSocketPerProxyChain()[std::to_underlying(pool_type)],
+            g_max_sockets_per_group[std::to_underlying(pool_type)]);
 }
 
 // static
-int ClientSocketPoolManager::max_sockets_per_proxy_chain(
+size_t ClientSocketPoolManager::max_sockets_per_proxy_chain(
     HttpNetworkSession::SocketPoolType pool_type) {
-  DCHECK_LT(pool_type, HttpNetworkSession::NUM_SOCKET_POOL_TYPES);
-  return g_max_sockets_per_proxy_chain[pool_type];
+  return GlobalMaxSocketPerProxyChain()[std::to_underlying(pool_type)];
+}
+
+// static
+bool ClientSocketPoolManager::allow_size_randomization_for_proxy() {
+  return g_allow_size_randomization_for_proxy;
 }
 
 // static
 void ClientSocketPoolManager::set_max_sockets_per_proxy_chain(
     HttpNetworkSession::SocketPoolType pool_type,
-    int socket_count) {
-  DCHECK_LT(0, socket_count);    // At least one socket must be allowed.
-  DCHECK_LT(pool_type, HttpNetworkSession::NUM_SOCKET_POOL_TYPES);
-  // Assert this case early on. The max number of sockets per group cannot
-  // exceed the max number of sockets per proxy chain.
-  DCHECK_LE(g_max_sockets_per_group[pool_type], socket_count);
-  g_max_sockets_per_proxy_chain[pool_type] = socket_count;
+    size_t socket_count) {
+  // LINT.IfChange(set_max_sockets_per_proxy_chain)
+  // We set out explicit limits here because they are hard coded in the
+  // enterprise policy MaxConnectionsPerProxy.
+  CHECK_GE(socket_count, 6u);
+  // LINT.ThenChange(/net/socket/client_socket_pool_manager.cc:SetMaxConnectionsPerProxyChain)
+  GlobalMaxSocketPerProxyChain()[std::to_underlying(pool_type)] = socket_count;
+}
+
+// static
+void ClientSocketPoolManager::set_allow_size_randomization_for_proxy(
+    bool allow) {
+  g_allow_size_randomization_for_proxy = allow;
 }
 
 // static
@@ -219,19 +234,19 @@ int NET_EXPORT InitSocketHandleForHttpRequest(
     NetworkAnonymizationKey network_anonymization_key,
     SecureDnsPolicy secure_dns_policy,
     const SocketTag& socket_tag,
+    handles::NetworkHandle target_network,
     const NetLogWithSource& net_log,
     ClientSocketHandle* socket_handle,
     CompletionOnceCallback callback,
-    const ClientSocketPool::ProxyAuthCallback& proxy_auth_callback,
-    bool fail_if_alias_requires_proxy_override) {
+    const ClientSocketPool::ProxyAuthCallback& proxy_auth_callback) {
   DCHECK(socket_handle);
   return InitSocketPoolHelper(
       std::move(endpoint), request_load_flags, request_priority, session,
       proxy_info, allowed_bad_certs, privacy_mode,
       std::move(network_anonymization_key), secure_dns_policy, socket_tag,
-      net_log, 0, socket_handle, HttpNetworkSession::NORMAL_SOCKET_POOL,
-      std::move(callback), proxy_auth_callback,
-      fail_if_alias_requires_proxy_override);
+      target_network, net_log, 0, socket_handle,
+      HttpNetworkSession::SocketPoolType::kNormal, std::move(callback),
+      proxy_auth_callback, ClientSocketPool::PreconnectCompletionCallback());
 }
 
 int InitSocketHandleForWebSocketRequest(
@@ -243,11 +258,11 @@ int InitSocketHandleForWebSocketRequest(
     const std::vector<SSLConfig::CertAndStatus>& allowed_bad_certs,
     PrivacyMode privacy_mode,
     NetworkAnonymizationKey network_anonymization_key,
+    handles::NetworkHandle target_network,
     const NetLogWithSource& net_log,
     ClientSocketHandle* socket_handle,
     CompletionOnceCallback callback,
-    const ClientSocketPool::ProxyAuthCallback& proxy_auth_callback,
-    bool fail_if_alias_requires_proxy_override) {
+    const ClientSocketPool::ProxyAuthCallback& proxy_auth_callback) {
   DCHECK(socket_handle);
 
   // QUIC proxies are currently not supported through this method.
@@ -262,9 +277,9 @@ int InitSocketHandleForWebSocketRequest(
       std::move(endpoint), request_load_flags, request_priority, session,
       proxy_info, allowed_bad_certs, privacy_mode,
       std::move(network_anonymization_key), SecureDnsPolicy::kAllow,
-      SocketTag(), net_log, 0, socket_handle,
-      HttpNetworkSession::WEBSOCKET_SOCKET_POOL, std::move(callback),
-      proxy_auth_callback, fail_if_alias_requires_proxy_override);
+      SocketTag(), target_network, net_log, 0, socket_handle,
+      HttpNetworkSession::SocketPoolType::kWebSocket, std::move(callback),
+      proxy_auth_callback, ClientSocketPool::PreconnectCompletionCallback());
 }
 
 int PreconnectSocketsForHttpRequest(
@@ -277,10 +292,10 @@ int PreconnectSocketsForHttpRequest(
     PrivacyMode privacy_mode,
     NetworkAnonymizationKey network_anonymization_key,
     SecureDnsPolicy secure_dns_policy,
+    handles::NetworkHandle target_network,
     const NetLogWithSource& net_log,
     int num_preconnect_streams,
-    bool fail_if_alias_requires_proxy_override,
-    CompletionOnceCallback callback) {
+    ClientSocketPool::PreconnectCompletionCallback callback) {
   // Expect websocket schemes (ws and wss) to be converted to the http(s)
   // equivalent.
   DCHECK(endpoint.scheme() == url::kHttpScheme ||
@@ -290,10 +305,9 @@ int PreconnectSocketsForHttpRequest(
       std::move(endpoint), request_load_flags, request_priority, session,
       proxy_info, allowed_bad_certs, privacy_mode,
       std::move(network_anonymization_key), secure_dns_policy, SocketTag(),
-      net_log, num_preconnect_streams, nullptr,
-      HttpNetworkSession::NORMAL_SOCKET_POOL, std::move(callback),
-      ClientSocketPool::ProxyAuthCallback(),
-      fail_if_alias_requires_proxy_override);
+      target_network, net_log, num_preconnect_streams, nullptr,
+      HttpNetworkSession::SocketPoolType::kNormal, CompletionOnceCallback(),
+      ClientSocketPool::ProxyAuthCallback(), std::move(callback));
 }
 
 }  // namespace net

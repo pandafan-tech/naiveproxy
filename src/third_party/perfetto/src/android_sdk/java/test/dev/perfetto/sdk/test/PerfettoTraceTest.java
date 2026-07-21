@@ -28,6 +28,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import dev.perfetto.sdk.PerfettoNativeMemoryCleaner.AllocationStats;
 import dev.perfetto.sdk.PerfettoTrace;
 import dev.perfetto.sdk.PerfettoTrackEventBuilder;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import org.junit.Before;
@@ -113,13 +114,13 @@ public class PerfettoTraceTest {
     // We test that the GC triggers 'free native memory' function when the corresponding java
     // objects are garbage collected.
     AllocationStats allocationStats = PerfettoTrackEventBuilder.getNativeAllocationStats();
-    String argStringClsName = "dev.perfetto.sdk.PerfettoTrackEventExtra$ArgString";
-    assertThat(allocationStats.getAllocCountForTarget(argStringClsName)).isEqualTo(600_000);
+    String argClsName = "dev.perfetto.sdk.PerfettoTrackEventExtra$Arg";
+    assertThat(allocationStats.getAllocCountForTarget(argClsName)).isEqualTo(600_000);
     // Assert that the native memory was freed at least once.
     // In practice the counter is usually greater than 300_000 if not manually trigger GC,
     // and 599_995 (600_000 - dev.perfetto.sdk.PerfettoTrackEventBuilder#DEFAULT_EXTRA_CACHE_SIZE)
     // if do manually trigger.
-    assertThat(allocationStats.getFreeCountForTarget(argStringClsName)).isGreaterThan(0);
+    assertThat(allocationStats.getFreeCountForTarget(argClsName)).isGreaterThan(0);
     String allocDebugStats = allocationStats.reportStats();
     Log.d(TAG, "Memory cleaner allocation stats: " + allocDebugStats);
   }
@@ -156,8 +157,10 @@ public class PerfettoTraceTest {
     PerfettoTrace.Session session = new PerfettoTrace.Session(true, traceConfig.toByteArray());
 
     PerfettoTrace.instant(FOO_CATEGORY, "event")
-        .setFlow(2)
-        .setTerminatingFlow(3)
+        .addFlow(2)
+        .addFlow(3)
+        .addTerminatingFlow(4)
+        .addTerminatingFlow(5)
         .addArg("long_val", 10000000000L)
         .addArg("bool_val", true)
         .addArg("double_val", 3.14)
@@ -178,8 +181,8 @@ public class PerfettoTraceTest {
 
         if (TrackEvent.Type.TYPE_INSTANT.equals(event.getType())
             && event.getDebugAnnotationsCount() == 4
-            && event.getFlowIdsCount() == 1
-            && event.getTerminatingFlowIdsCount() == 1) {
+            && event.getFlowIdsCount() == 2
+            && event.getTerminatingFlowIdsCount() == 2) {
           hasDebugAnnotations = true;
 
           List<DebugAnnotation> annotations = event.getDebugAnnotationsList();
@@ -188,6 +191,13 @@ public class PerfettoTraceTest {
           assertThat(annotations.get(1).getBoolValue()).isTrue();
           assertThat(annotations.get(2).getDoubleValue()).isEqualTo(3.14);
           assertThat(annotations.get(3).getStringValue()).isEqualTo(FOO);
+
+          // Flow IDs are transformed by PerfettoTeProcessScopedFlow in
+          // include/perfetto/public/track_event.h
+          // so we cannot assert for specific values. Instead, we check that
+          // there are exactly 2 distinct elements in each list.
+          assertThat(new HashSet<>(event.getFlowIdsList())).hasSize(2);
+          assertThat(new HashSet<>(event.getTerminatingFlowIdsList())).hasSize(2);
         }
       }
 
@@ -287,6 +297,115 @@ public class PerfettoTraceTest {
     assertThat(mTrackNames).contains(FOO);
     assertThat(mTrackNames).contains("bar");
   }
+
+  @Test
+  public void testStaticNamedTrack() throws Exception {
+    TraceConfig traceConfig = getTraceConfig(FOO);
+
+    PerfettoTrace.Session session = new PerfettoTrace.Session(true, traceConfig.toByteArray());
+
+    PerfettoTrace.begin(FOO_CATEGORY, "event")
+        .usingProcessNamedTrack(123, "static_track")
+        .emit();
+
+    PerfettoTrace.end(FOO_CATEGORY)
+        .usingProcessNamedTrack(123, "static_track")
+        .emit();
+
+    Trace trace = Trace.parseFrom(session.close());
+
+    boolean foundStaticName = false;
+    for (TracePacket packet : trace.getPacketList()) {
+      if (packet.hasTrackDescriptor()) {
+        TrackDescriptor td = packet.getTrackDescriptor();
+        if ("static_track".equals(td.getStaticName())) {
+          foundStaticName = true;
+        }
+      }
+    }
+
+    assertThat(foundStaticName).isTrue();
+  }
+
+  @Test
+  public void testDynamicNamedTrack() throws Exception {
+    TraceConfig traceConfig = getTraceConfig(FOO);
+
+    PerfettoTrace.Session session = new PerfettoTrace.Session(true, traceConfig.toByteArray());
+
+    PerfettoTrace.begin(FOO_CATEGORY, "event")
+        .usingProcessNamedTrackWithDynamicName(123, "dynamic_track")
+        .emit();
+
+    PerfettoTrace.end(FOO_CATEGORY)
+        .usingProcessNamedTrackWithDynamicName(123, "dynamic_track")
+        .emit();
+
+    Trace trace = Trace.parseFrom(session.close());
+
+    boolean foundDynamicName = false;
+    for (TracePacket packet : trace.getPacketList()) {
+      if (packet.hasTrackDescriptor()) {
+        TrackDescriptor td = packet.getTrackDescriptor();
+        if ("dynamic_track".equals(td.getName())) {
+          foundDynamicName = true;
+        }
+      }
+    }
+
+    assertThat(foundDynamicName).isTrue();
+  }
+
+  @Test
+  public void testStaticCounterTrack() throws Exception {
+    TraceConfig traceConfig = getTraceConfig(FOO);
+
+    PerfettoTrace.Session session = new PerfettoTrace.Session(true, traceConfig.toByteArray());
+
+    PerfettoTrace.counter(FOO_CATEGORY, 42)
+        .usingProcessCounterTrack("static_counter")
+        .emit();
+
+    Trace trace = Trace.parseFrom(session.close());
+
+    boolean foundStaticName = false;
+    for (TracePacket packet : trace.getPacketList()) {
+      if (packet.hasTrackDescriptor()) {
+        TrackDescriptor td = packet.getTrackDescriptor();
+        if ("static_counter".equals(td.getStaticName())) {
+          foundStaticName = true;
+        }
+      }
+    }
+
+    assertThat(foundStaticName).isTrue();
+  }
+
+  @Test
+  public void testDynamicCounterTrack() throws Exception {
+    TraceConfig traceConfig = getTraceConfig(FOO);
+
+    PerfettoTrace.Session session = new PerfettoTrace.Session(true, traceConfig.toByteArray());
+
+    PerfettoTrace.counter(FOO_CATEGORY, 42)
+        .usingProcessCounterTrackWithDynamicName("dynamic_counter")
+        .emit();
+
+    Trace trace = Trace.parseFrom(session.close());
+
+    boolean foundDynamicName = false;
+    for (TracePacket packet : trace.getPacketList()) {
+      if (packet.hasTrackDescriptor()) {
+        TrackDescriptor td = packet.getTrackDescriptor();
+        if ("dynamic_counter".equals(td.getName())) {
+          foundDynamicName = true;
+        }
+      }
+    }
+
+    assertThat(foundDynamicName).isTrue();
+  }
+
 
   @Test
   public void testCounterSimple() throws Exception {
@@ -460,6 +579,48 @@ public class PerfettoTraceTest {
     assertThat(hasTrackEvent).isTrue();
     assertThat(hasSourceLocation).isTrue();
     assertThat(mCategoryNames).contains(FOO);
+  }
+
+  @Test
+  public void testProtoWithInterning() throws Exception {
+    TraceConfig traceConfig = getTraceConfig(FOO);
+
+    PerfettoTrace.Session session = new PerfettoTrace.Session(true, traceConfig.toByteArray());
+
+    final long fieldId = 1;
+    final long internedTypeId = 44; // InternedData.android_job_name
+    final String stringToIntern = "my_interned_string";
+
+    PerfettoTrace.instant(FOO_CATEGORY, "event_with_interning")
+        .beginProto()
+        .addFieldWithInterning(fieldId, stringToIntern, internedTypeId)
+        .endProto()
+        .emit();
+
+    byte[] traceBytes = session.close();
+
+    Trace trace = Trace.parseFrom(traceBytes);
+
+    boolean hasTrackEvent = false;
+    boolean hasInternedString = false;
+
+    for (TracePacket packet : trace.getPacketList()) {
+      if (packet.hasInternedData()) {
+        InternedData internedData = packet.getInternedData();
+        if (internedData.getAndroidJobNameCount() > 0) {
+          if (internedData.getAndroidJobName(0).getName().equals(stringToIntern)) {
+            hasInternedString = true;
+          }
+        }
+      }
+
+      if (packet.hasTrackEvent()) {
+        hasTrackEvent = true;
+      }
+    }
+
+    assertThat(hasTrackEvent).isTrue();
+    assertThat(hasInternedString).isTrue();
   }
 
   @Test
@@ -783,6 +944,11 @@ public class PerfettoTraceTest {
       return;
     }
     TrackDescriptor desc = packet.getTrackDescriptor();
-    mTrackNames.add(desc.getName());
+    if (desc.hasName()) {
+      mTrackNames.add(desc.getName());
+    }
+    if (desc.hasStaticName()) {
+      mTrackNames.add(desc.getStaticName());
+    }
   }
 }

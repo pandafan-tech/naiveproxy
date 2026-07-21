@@ -13,6 +13,7 @@
 
 #include "base/feature_list.h"
 #include "base/memory/raw_ptr.h"
+#include "base/rand_util.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
 #include "net/base/ip_address.h"

@@ -10,6 +10,7 @@
 #include <string>
 
 #include "base/functional/callback.h"
+#include "components/unexportable_keys/unexportable_key_service.h"
 #include "net/device_bound_sessions/session.h"
 #include "net/device_bound_sessions/session_key.h"
 
@@ -28,7 +29,8 @@ namespace net::device_bound_sessions {
 class NET_EXPORT SessionStore {
  public:
   static std::unique_ptr<SessionStore> Create(
-      const base::FilePath& db_storage_path);
+      const base::FilePath& db_storage_path,
+      unexportable_keys::UnexportableKeyService* unexportable_key_service);
 
   virtual ~SessionStore() = default;
 
@@ -49,8 +51,9 @@ class NET_EXPORT SessionStore {
 
   // Asynchronously retrieves the unwrapped session binding key
   // from its persistent form saved in the store.
-  using RestoreSessionBindingKeyCallback = base::OnceCallback<void(
-      unexportable_keys::ServiceErrorOr<unexportable_keys::UnexportableKeyId>)>;
+  using RestoreSessionBindingKeyCallback =
+      base::OnceCallback<void(unexportable_keys::ServiceErrorOr<
+                              unexportable_keys::UnexportableSigningKeyId>)>;
   virtual void RestoreSessionBindingKey(
       const SessionKey& session_key,
       RestoreSessionBindingKeyCallback callback) = 0;

@@ -8,6 +8,7 @@
 
 #include "base/functional/bind.h"
 #include "base/task/default_delayed_task_handle_delegate.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/time/time.h"
 

@@ -2,17 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "base/substring_set_matcher/substring_set_matcher.h"
 
 #include <stddef.h>
 
 #include <algorithm>
 #include <queue>
+#include <set>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "base/compiler_specific.h"
 
 #ifdef __SSE2__
 #include <immintrin.h>
@@ -21,7 +22,6 @@
 #endif
 
 #include "base/check_op.h"
-#include "base/containers/contains.h"
 #include "base/containers/queue.h"
 #include "base/numerics/checked_math.h"
 #include "base/trace_event/memory_usage_estimator.h"  // no-presubmit-check
@@ -63,8 +63,8 @@ bool SubstringSetMatcher::Build(
     std::set<MatcherStringPattern::ID> ids;
     std::set<std::string> pattern_strings;
     for (const MatcherStringPattern* pattern : patterns) {
-      CHECK(!base::Contains(ids, pattern->id()));
-      CHECK(!base::Contains(pattern_strings, pattern->pattern()));
+      CHECK(!ids.contains(pattern->id()));
+      CHECK(!pattern_strings.contains(pattern->pattern()));
       ids.insert(pattern->id());
       pattern_strings.insert(pattern->pattern());
     }
@@ -79,7 +79,7 @@ bool SubstringSetMatcher::Build(
   }
 
   // Compute the total number of tree nodes needed.
-  std::sort(patterns.begin(), patterns.end(), ComparePatterns);
+  std::ranges::sort(patterns, ComparePatterns);
   NodeID tree_size = GetTreeSize(patterns);
   if (tree_size >= kInvalidNodeID) {
     return false;
@@ -99,7 +99,7 @@ SubstringSetMatcher::SubstringSetMatcher() = default;
 SubstringSetMatcher::~SubstringSetMatcher() = default;
 
 bool SubstringSetMatcher::Match(
-    const std::string& text,
+    std::string_view text,
     std::set<MatcherStringPattern::ID>* matches) const {
   const size_t old_number_of_matches = matches->size();
 
@@ -134,7 +134,7 @@ bool SubstringSetMatcher::Match(
   return old_number_of_matches != matches->size();
 }
 
-bool SubstringSetMatcher::AnyMatch(const std::string& text) const {
+bool SubstringSetMatcher::AnyMatch(std::string_view text) const {
   // Handle patterns matching the empty string.
   const AhoCorasickNode* const root = &tree_[kRootID];
   if (root->has_outputs()) {
@@ -180,7 +180,7 @@ constexpr SubstringSetMatcher::NodeID SubstringSetMatcher::kRootID;
 
 SubstringSetMatcher::NodeID SubstringSetMatcher::GetTreeSize(
     const std::vector<const MatcherStringPattern*>& patterns) const {
-  DCHECK(std::is_sorted(patterns.begin(), patterns.end(), ComparePatterns));
+  DCHECK(std::ranges::is_sorted(patterns, ComparePatterns));
 
   base::CheckedNumeric<NodeID> result = 1u;  // 1 for the root node.
   if (patterns.empty()) {
@@ -271,7 +271,7 @@ void SubstringSetMatcher::CreateFailureAndOutputEdges() {
   NodeID root_output_link = root->IsEndOfPattern() ? kRootID : kInvalidNodeID;
 
   for (unsigned edge_idx = 0; edge_idx < root->num_edges(); ++edge_idx) {
-    const AhoCorasickEdge& edge = root->edges()[edge_idx];
+    const AhoCorasickEdge& edge = UNSAFE_TODO(root->edges()[edge_idx]);
     if (edge.label >= kFirstSpecialLabel) {
       continue;
     }
@@ -292,7 +292,8 @@ void SubstringSetMatcher::CreateFailureAndOutputEdges() {
     // of the current node.
     for (unsigned edge_idx = 0; edge_idx < current_node->num_edges();
          ++edge_idx) {
-      const AhoCorasickEdge& edge = current_node->edges()[edge_idx];
+      const AhoCorasickEdge& edge =
+          UNSAFE_TODO(current_node->edges()[edge_idx]);
       if (edge.label >= kFirstSpecialLabel) {
         continue;
       }
@@ -397,26 +398,26 @@ SubstringSetMatcher::AhoCorasickNode::GetEdgeNoInline(uint32_t label) const {
   const __m128i mask = _mm_set1_epi32(0x1ff);
   for (unsigned edge_idx = 0; edge_idx < num_edges(); edge_idx += 4) {
     const __m128i four = _mm_loadu_si128(
-        reinterpret_cast<const __m128i*>(&edges_.edges[edge_idx]));
+        reinterpret_cast<const __m128i*>(&UNSAFE_TODO(edges_.edges[edge_idx])));
     const __m128i match = _mm_cmpeq_epi32(_mm_and_si128(four, mask), lbl);
     const uint32_t match_mask = static_cast<uint32_t>(_mm_movemask_epi8(match));
     if (match_mask != 0) {
       if (match_mask & 0x1u) {
-        return edges_.edges[edge_idx].node_id;
+        return UNSAFE_TODO(edges_.edges[edge_idx]).node_id;
       }
       if (match_mask & 0x10u) {
-        return edges_.edges[edge_idx + 1].node_id;
+        return UNSAFE_TODO(edges_.edges[edge_idx + 1]).node_id;
       }
       if (match_mask & 0x100u) {
-        return edges_.edges[edge_idx + 2].node_id;
+        return UNSAFE_TODO(edges_.edges[edge_idx + 2]).node_id;
       }
       DCHECK(match_mask & 0x1000u);
-      return edges_.edges[edge_idx + 3].node_id;
+      return UNSAFE_TODO(edges_.edges[edge_idx + 3]).node_id;
     }
   }
 #else
   for (unsigned edge_idx = 0; edge_idx < num_edges(); ++edge_idx) {
-    const AhoCorasickEdge& edge = edges_.edges[edge_idx];
+    const AhoCorasickEdge& edge = UNSAFE_TODO(edges_.edges[edge_idx]);
     if (edge.label == label) {
       return edge.node_id;
     }
@@ -432,21 +433,22 @@ void SubstringSetMatcher::AhoCorasickNode::SetEdge(uint32_t label,
 #if DCHECK_IS_ON()
   // We don't support overwriting existing edges.
   for (unsigned edge_idx = 0; edge_idx < num_edges(); ++edge_idx) {
-    DCHECK_NE(label, edges()[edge_idx].label);
+    UNSAFE_TODO(DCHECK_NE(label, edges()[edge_idx].label));
   }
 #endif
 
   if (edges_capacity_ == 0 && num_free_edges_ > 0) {
     // Still space in the inline storage, so use that.
-    edges_.inline_edges[num_edges()] = AhoCorasickEdge{label, node};
+    UNSAFE_TODO(edges_.inline_edges[num_edges()]) =
+        AhoCorasickEdge{label, node};
     if (label == kFailureNodeLabel) {
       // Make sure that kFailureNodeLabel is first.
       // NOTE: We don't use std::swap here, because the compiler doesn't
       // understand that inline_edges[] is 4-aligned and can give
       // a warning or error.
       AhoCorasickEdge temp = edges_.inline_edges[0];
-      edges_.inline_edges[0] = edges_.inline_edges[num_edges()];
-      edges_.inline_edges[num_edges()] = temp;
+      edges_.inline_edges[0] = UNSAFE_TODO(edges_.inline_edges[num_edges()]);
+      UNSAFE_TODO(edges_.inline_edges[num_edges()]) = temp;
     }
     --num_free_edges_;
     return;
@@ -462,10 +464,11 @@ void SubstringSetMatcher::AhoCorasickNode::SetEdge(uint32_t label,
     unsigned new_capacity = std::min(old_capacity * 2, kEmptyLabel + 1);
     DCHECK_EQ(0u, new_capacity % 4);
     AhoCorasickEdge* new_edges = new AhoCorasickEdge[new_capacity];
-    memcpy(new_edges, edges(), sizeof(AhoCorasickEdge) * old_capacity);
+    UNSAFE_TODO(
+        memcpy(new_edges, edges(), sizeof(AhoCorasickEdge) * old_capacity));
     for (unsigned edge_idx = old_capacity; edge_idx < new_capacity;
          ++edge_idx) {
-      new_edges[edge_idx].label = kEmptyLabel;
+      UNSAFE_TODO(new_edges[edge_idx]).label = kEmptyLabel;
     }
     if (edges_capacity_ != 0) {
       delete[] edges_.edges;
@@ -477,10 +480,10 @@ void SubstringSetMatcher::AhoCorasickNode::SetEdge(uint32_t label,
   }
 
   // Insert the new edge at the end of our heap storage.
-  edges_.edges[num_edges()] = AhoCorasickEdge{label, node};
+  UNSAFE_TODO(edges_.edges[num_edges()]) = AhoCorasickEdge{label, node};
   if (label == kFailureNodeLabel) {
     // Make sure that kFailureNodeLabel is first.
-    std::swap(edges_.edges[0], edges_.edges[num_edges()]);
+    std::swap(edges_.edges[0], UNSAFE_TODO(edges_.edges[num_edges()]));
   }
   --num_free_edges_;
 }
@@ -496,8 +499,8 @@ size_t SubstringSetMatcher::AhoCorasickNode::EstimateMemoryUsage() const {
   if (edges_capacity_ == 0) {
     return 0;
   } else {
-    return base::trace_event::EstimateMemoryUsage(
-        base::span<const AhoCorasickEdge>(edges_.edges, edges_capacity_));
+    return base::trace_event::EstimateMemoryUsage(UNSAFE_TODO(
+        base::span<const AhoCorasickEdge>(edges_.edges, edges_capacity_)));
   }
 }
 

@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_PARTITION_ADDRESS_SPACE_H_
 #define PARTITION_ALLOC_PARTITION_ADDRESS_SPACE_H_
 
@@ -20,7 +15,6 @@
 #include "partition_alloc/partition_alloc_base/bits.h"
 #include "partition_alloc/partition_alloc_base/compiler_specific.h"
 #include "partition_alloc/partition_alloc_base/component_export.h"
-#include "partition_alloc/partition_alloc_base/notreached.h"
 #include "partition_alloc/partition_alloc_check.h"
 #include "partition_alloc/partition_alloc_config.h"
 #include "partition_alloc/partition_alloc_constants.h"
@@ -105,44 +99,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   }
 #endif
 
-  PA_ALWAYS_INLINE static PoolInfo GetPoolInfo(uintptr_t address) {
-    // When USE_BACKUP_REF_PTR is off, BRP pool isn't used.
-#if !PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
-    PA_DCHECK(!IsInBRPPool(address));
-#endif
-    pool_handle pool = kNullPoolHandle;
-    uintptr_t base = 0;
-    uintptr_t base_mask = 0;
-#if PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
-    if (IsInBRPPool(address)) {
-      pool = kBRPPoolHandle;
-      base = setup_.brp_pool_base_address_;
-      base_mask = CorePoolBaseMask();
-    } else
-#endif  // PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
-      if (IsInRegularPool(address)) {
-        pool = kRegularPoolHandle;
-        base = setup_.regular_pool_base_address_;
-        base_mask = CorePoolBaseMask();
-      } else if (IsInConfigurablePool(address)) {
-        PA_DCHECK(IsConfigurablePoolInitialized());
-        pool = kConfigurablePoolHandle;
-        base = setup_.configurable_pool_base_address_;
-        base_mask = setup_.configurable_pool_base_mask_;
-#if PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
-      } else if (IsInThreadIsolatedPool(address)) {
-        pool = kThreadIsolatedPoolHandle;
-        base = setup_.thread_isolated_pool_base_address_;
-        base_mask = kThreadIsolatedPoolBaseMask;
-#endif
-      } else {
-        PA_NOTREACHED();
-      }
-    return PoolInfo{.handle = pool,
-                    .base = base,
-                    .base_mask = base_mask,
-                    .offset = address - base};
-  }
+  PA_ALWAYS_INLINE static PoolInfo GetPoolInfo(uintptr_t address);
   PA_ALWAYS_INLINE static constexpr size_t ConfigurablePoolMaxSize() {
     return kConfigurablePoolMaxSize;
   }
@@ -150,26 +107,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
     return kConfigurablePoolMinSize;
   }
 
-  PA_ALWAYS_INLINE static PoolOffsetLookup GetOffsetLookup(pool_handle pool) {
-    switch (pool) {
-      case kRegularPoolHandle:
-        return PoolOffsetLookup(setup_.regular_pool_base_address_,
-                                CorePoolBaseMask());
-      case kBRPPoolHandle:
-        return PoolOffsetLookup(setup_.brp_pool_base_address_,
-                                CorePoolBaseMask());
-#if PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
-      case kThreadIsolatedPoolHandle:
-        return PoolOffsetLookup(setup_.thread_isolated_pool_base_address_,
-                                kThreadIsolatedPoolBaseMask);
-#endif  // PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
-      case kConfigurablePoolHandle:
-        return PoolOffsetLookup(setup_.configurable_pool_base_address_,
-                                setup_.configurable_pool_base_mask_);
-      default:
-        PA_NOTREACHED();
-    }
-  }
+  PA_ALWAYS_INLINE static PoolOffsetLookup GetOffsetLookup(pool_handle pool);
 
   // Initialize pools (except for the configurable one).
   //
@@ -188,22 +126,23 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   static void UninitForTesting();
   static void UninitConfigurablePoolForTesting();
 
-  PA_ALWAYS_INLINE static bool IsInitialized() {
-    // Either neither or both regular and BRP pool are initialized. The
-    // configurable and thread isolated pool are initialized separately.
-    if (setup_.regular_pool_base_address_ != kUninitializedPoolBaseAddress) {
-      PA_DCHECK(setup_.brp_pool_base_address_ != kUninitializedPoolBaseAddress);
-      return true;
-    }
+  PA_ALWAYS_INLINE static bool IsInitialized();
 
-    PA_DCHECK(setup_.brp_pool_base_address_ == kUninitializedPoolBaseAddress);
-    return false;
+  PA_ALWAYS_INLINE static size_t GetZeroSegmentSize() {
+#if PA_CONFIG(ENABLE_USER_SPACE_ZERO_SEGMENT)
+    return zero_segment_size_;
+#else
+    return 0;
+#endif
   }
 
-  PA_ALWAYS_INLINE static bool IsConfigurablePoolInitialized() {
-    return setup_.configurable_pool_base_address_ !=
-           kUninitializedPoolBaseAddress;
+  PA_ALWAYS_INLINE static bool IsConfigurablePoolInitialized();
+
+#if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
+  PA_ALWAYS_INLINE static bool IsCorePoolSizeReduced() {
+    return is_core_pool_size_reduced_;
   }
+#endif
 
 #if PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
   PA_ALWAYS_INLINE static bool IsThreadIsolatedPoolInitialized() {
@@ -223,10 +162,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
            setup_.regular_pool_base_address_;
   }
 
-  PA_ALWAYS_INLINE static uintptr_t RegularPoolBase() {
-    return setup_.regular_pool_base_address_;
-  }
-
+  PA_ALWAYS_INLINE static uintptr_t RegularPoolBase();
   // Returns false for nullptr.
   PA_ALWAYS_INLINE static bool IsInBRPPool(uintptr_t address) {
 #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
@@ -238,9 +174,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   }
 
 #if PA_CONFIG(MOVE_METADATA_OUT_OF_GIGACAGE)
-  PA_ALWAYS_INLINE static uintptr_t BRPPoolBase() {
-    return RegularPoolBase() + CorePoolSize();
-  }
+  PA_ALWAYS_INLINE static uintptr_t BRPPoolBase();
 #endif  // PA_CONFIG(MOVE_METADATA_OUT_OF_GIGACAGE)
 
   // Checks whether the address belongs to either regular or BRP pool.
@@ -259,6 +193,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
     PA_DCHECK(ret == (IsInRegularPool(address) || IsInBRPPool(address)));
     return ret;
   }
+
 #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
   PA_ALWAYS_INLINE static size_t CorePoolsSize() { return CorePoolSize() * 2; }
 #else
@@ -267,20 +202,14 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   }
 #endif  // PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
 
-  PA_ALWAYS_INLINE static uintptr_t OffsetInBRPPool(uintptr_t address) {
-    PA_DCHECK(IsInBRPPool(address));
-    return address - setup_.brp_pool_base_address_;
-  }
-
+  PA_ALWAYS_INLINE static uintptr_t OffsetInBRPPool(uintptr_t address);
   // Returns false for nullptr.
   PA_ALWAYS_INLINE static bool IsInConfigurablePool(uintptr_t address) {
     return (address & setup_.configurable_pool_base_mask_) ==
            setup_.configurable_pool_base_address_;
   }
 
-  PA_ALWAYS_INLINE static uintptr_t ConfigurablePoolBase() {
-    return setup_.configurable_pool_base_address_;
-  }
+  PA_ALWAYS_INLINE static uintptr_t ConfigurablePoolBase();
 
 #if PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
   // Returns false for nullptr.
@@ -295,25 +224,17 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   // The address space contains all metadata for all pools (i.e. regular, brp,
   // and configurable pools).
 #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
-  PA_ALWAYS_INLINE static size_t MetadataRegionSize() {
-    return metadata_region_size_;
-  }
+  PA_ALWAYS_INLINE static size_t MetadataRegionSize();
 #else
-  PA_ALWAYS_INLINE static constexpr size_t MetadataRegionSize() {
-    return std::max(kConfigurablePoolMaxSize, CorePoolSize());
-  }
+  PA_ALWAYS_INLINE static constexpr size_t MetadataRegionSize();
 #endif
 
   // Returns a metadata offset. SuperPage address plus the offset contains
   // the metadata for the SuperPage.
-  PA_ALWAYS_INLINE static std::ptrdiff_t MetadataOffset(pool_handle pool) {
-    return offsets_to_metadata_[pool];
-  }
+  PA_ALWAYS_INLINE static std::ptrdiff_t MetadataOffset(pool_handle pool);
 
   PA_ALWAYS_INLINE static std::ptrdiff_t MetadataOffsetFromAddr(
-      uintptr_t address) {
-    return MetadataOffset(GetPoolHandle(address));
-  }
+      uintptr_t address);
 
   // TODO(crbug.com/40238514): Confirm we can use kConfigurablePoolMaxSize/4
   // for iOS and confirm iOS EarlyGrey tests pass when the external  metadata
@@ -325,31 +246,10 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
       "Temporarily disable ExternalMetadata feature on iOS");
 
 #if PA_BUILDFLAG(DCHECKS_ARE_ON)
-  PA_ALWAYS_INLINE static bool IsInMetadataRegion(uintptr_t address) {
-    return metadata_region_start_ <= address &&
-           address < metadata_region_start_ + MetadataRegionSize();
-  }
+  PA_ALWAYS_INLINE static bool IsInMetadataRegion(uintptr_t address);
 #endif  // PA_BUILDFLAG(DCHECKS_ARE_ON)
 
-  PA_ALWAYS_INLINE static pool_handle GetPoolHandle(uintptr_t address) {
-#if PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
-    if (IsInBRPPool(address)) [[likely]] {
-      return kBRPPoolHandle;
-    }
-#endif
-    if (IsInRegularPool(address)) [[likely]] {
-      return kRegularPoolHandle;
-    }
-    if (IsInConfigurablePool(address)) {
-      return kConfigurablePoolHandle;
-    }
-#if PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
-    if (IsInThreadIsolatedPool(address)) {
-      return kThreadIsolatedPoolHandle;
-    }
-#endif
-    return kNullPoolHandle;
-  }
+  PA_ALWAYS_INLINE static pool_handle GetPoolHandle(uintptr_t address);
 
   static void InitMetadataRegionAndOffsets();
 #endif  // PA_CONFIG(MOVE_METADATA_OUT_OF_GIGACAGE)
@@ -363,10 +263,17 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
 #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
  private:
   static bool IsIOSTestProcess();
+  static bool is_core_pool_size_reduced_;
 
  public:
   PA_ALWAYS_INLINE static size_t CorePoolSize() {
-    return IsIOSTestProcess() ? kCorePoolSizeForIOSTestProcess : kCorePoolSize;
+    if (IsIOSTestProcess()) {
+      return kCorePoolSizeForIOSTestProcess;
+    }
+    if (is_core_pool_size_reduced_) {
+      return kCorePoolSizeForIOSReducedPoolSize;
+    }
+    return kCorePoolSize;
   }
 #else
   // The pool sizes should be as large as maximum whenever possible.
@@ -388,6 +295,10 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
 #endif
 
  private:
+#if PA_CONFIG(ENABLE_USER_SPACE_ZERO_SEGMENT)
+  static void InitZeroSegment();
+#endif
+
   // On 64-bit systems, PA allocates from several contiguous, mutually disjoint
   // pools. The BRP pool is where all allocations have a BRP ref-count, thus
   // pointers pointing there can use a BRP protection against UaF. Allocations
@@ -424,14 +335,17 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
 #if !PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
 #error iOS is only supported with a dynamically sized GigaCase.
 #endif
-
   // We can't afford pool sizes as large as kPoolMaxSize in iOS EarlGrey tests,
   // since the test process cannot use an extended virtual address space (see
   // crbug.com/1250788).
   static constexpr size_t kCorePoolSizeForIOSTestProcess = kGiB / 4;
   static_assert(kCorePoolSizeForIOSTestProcess < kCorePoolSize);
   static_assert(base::bits::HasSingleBit(kCorePoolSizeForIOSTestProcess));
-#endif  // PA_BUILDFLAG(IOS_IOS)
+  static constexpr size_t kCorePoolSizeForIOSReducedPoolSize =
+      kCorePoolSize / 2;
+  static_assert(kCorePoolSizeForIOSReducedPoolSize < kCorePoolSize);
+  static_assert(base::bits::HasSingleBit(kCorePoolSizeForIOSReducedPoolSize));
+#endif  // PA_BUILDFLAG(IS_IOS)
 
 #if !PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
   // Masks used to easy determine belonging to a pool.
@@ -490,6 +404,10 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   // alignment and padding.
   PA_CONSTINIT static PoolSetup setup_;
 
+#if PA_CONFIG(ENABLE_USER_SPACE_ZERO_SEGMENT)
+  static size_t zero_segment_size_;
+#endif
+
 #if PA_CONFIG(MOVE_METADATA_OUT_OF_GIGACAGE)
   static std::array<std::ptrdiff_t, kMaxPoolHandle> offsets_to_metadata_;
   static uintptr_t metadata_region_start_;
@@ -504,19 +422,6 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   friend void WriteProtectThreadIsolatedGlobals(ThreadIsolationOption);
 #endif
 };
-
-PA_ALWAYS_INLINE PartitionAddressSpace::PoolInfo GetPoolInfo(
-    uintptr_t address) {
-  return PartitionAddressSpace::GetPoolInfo(address);
-}
-
-PA_ALWAYS_INLINE pool_handle GetPool(uintptr_t address) {
-  return GetPoolInfo(address).handle;
-}
-
-PA_ALWAYS_INLINE uintptr_t OffsetInBRPPool(uintptr_t address) {
-  return PartitionAddressSpace::OffsetInBRPPool(address);
-}
 
 }  // namespace internal
 
@@ -535,37 +440,8 @@ PA_ALWAYS_INLINE bool IsManagedByPartitionAlloc(uintptr_t address) {
 }
 
 // Returns false for nullptr.
-PA_ALWAYS_INLINE bool IsManagedByPartitionAllocRegularPool(uintptr_t address) {
-  return internal::PartitionAddressSpace::IsInRegularPool(address);
-}
-
-// Returns false for nullptr.
 PA_ALWAYS_INLINE bool IsManagedByPartitionAllocBRPPool(uintptr_t address) {
   return internal::PartitionAddressSpace::IsInBRPPool(address);
-}
-
-// Checks whether the address belongs to either regular or BRP pool.
-// Returns false for nullptr.
-PA_ALWAYS_INLINE bool IsManagedByPartitionAllocCorePools(uintptr_t address) {
-  return internal::PartitionAddressSpace::IsInCorePools(address);
-}
-
-// Returns false for nullptr.
-PA_ALWAYS_INLINE bool IsManagedByPartitionAllocConfigurablePool(
-    uintptr_t address) {
-  return internal::PartitionAddressSpace::IsInConfigurablePool(address);
-}
-
-#if PA_BUILDFLAG(ENABLE_THREAD_ISOLATION)
-// Returns false for nullptr.
-PA_ALWAYS_INLINE bool IsManagedByPartitionAllocThreadIsolatedPool(
-    uintptr_t address) {
-  return internal::PartitionAddressSpace::IsInThreadIsolatedPool(address);
-}
-#endif
-
-PA_ALWAYS_INLINE bool IsConfigurablePoolAvailable() {
-  return internal::PartitionAddressSpace::IsConfigurablePoolInitialized();
 }
 
 }  // namespace partition_alloc

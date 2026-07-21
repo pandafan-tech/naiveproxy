@@ -25,7 +25,6 @@
 
 #include "base/check.h"
 #include "base/clang_profiling_buildflags.h"
-#include "base/compiler_specific.h"
 #include "base/feature_list.h"
 #include "base/features.h"
 #include "base/files/file_enumerator.h"
@@ -35,6 +34,7 @@
 #include "base/functional/callback.h"
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/path_service.h"
 #include "base/process/process_handle.h"
@@ -68,6 +68,94 @@ int g_extra_allowed_path_for_no_execute = 0;
 constexpr DWORD kFileShareAll =
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 constexpr std::wstring_view kDefaultTempDirPrefix = L"ChromiumTemp";
+
+// Result of ReplaceFile for logging histograms. These values are persisted to
+// logs. Entries should not be renumbered and numeric values should never be
+// reused.
+enum class ReplaceFileResult {
+  // ::ReplaceFile succeeded.
+  kSuccess = 0,
+  // Fail to find a valid backup file path for ::ReplaceFile to use.
+  // OBSOLETE: kUnableToFindValidBackupFilePath = 1,
+  // ::ReplaceFile failed with ERROR_UNABLE_TO_MOVE_REPLACEMENT and the fallback
+  // ::MoveFile operation also failed.
+  kUnableToMoveReplacementMoveFailed = 2,
+  // ::ReplaceFile failed with ERROR_UNABLE_TO_MOVE_REPLACEMENT but the fallback
+  // ::MoveFile operation succeeded. It's treated as success for ReplaceFile.
+  kUnableToMoveReplacementMoveSuccess = 3,
+  // ::ReplaceFile failed with ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 and the
+  // following recovery of the replaced file using backup with ::MoveFile failed
+  // either.
+  kUnableToMoveReplacement2RecoveryFailed = 4,
+  // ::ReplaceFile failed with ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 but the
+  // following recovery of the replaced file using backup with ::MoveFile
+  // succeeded. It's treated as a failure for ReplaceFile.
+  kUnableToMoveReplacement2RecoverySuccess = 5,
+  // ::ReplaceFile failed with ERROR_FILE_NOT_FOUND and the fallback
+  // ::MoveFile operation also failed.
+  kFileNotFoundMoveFailed = 6,
+  // ::ReplaceFile failed with ERROR_FILE_NOT_FOUND but the fallback
+  // ::MoveFile operation succeeded. It's treated as success for ReplaceFile.
+  kFileNotFoundMoveSuccess = 7,
+  // ::ReplaceFile failed with other errors and the fallback ::MoveFile
+  // operation also failed.
+  kOtherErrorsMoveFailed = 8,
+  // ::ReplaceFile failed with other errors but the fallback ::MoveFile
+  // operation succeeded. It's treated as success for ReplaceFile.
+  kOtherErrorsMoveSuccess = 9,
+  // ::ReplaceFile failed with ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 and no backup
+  // file is used, and the fallback ::MoveFile operation failed. It's treated as
+  // failure for ReplaceFile.
+  kUnableToMoveReplacement2MoveFailed = 10,
+  // ::ReplaceFile failed with ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 and no backup
+  // file is used, but the fallback ::MoveFile operation succeeded. It's treated
+  // as success for ReplaceFile.
+  kUnableToMoveReplacement2MoveSuccess = 11,
+  kMaxValue = kUnableToMoveReplacement2MoveSuccess
+};
+
+// Records histogram for the ReplaceFile result. |is_backup_path_valid|
+// indicates whether a valid backup file path is found. |replace_result| is the
+// result of ::ReplaceFile which can be ERROR_SUCCESS or the error code from
+// ::GetLastError() and is optional. |is_move_success| indicates if the fallback
+// ::MoveFile operation succeeded and is optional.
+void RecordReplaceFileResult(bool is_backup_path_valid,
+                             std::optional<DWORD> replace_result,
+                             std::optional<bool> is_move_success) {
+  ReplaceFileResult result = ReplaceFileResult::kSuccess;
+  switch (replace_result.value()) {
+    case ERROR_SUCCESS:
+      break;
+    case ERROR_FILE_NOT_FOUND:
+      result = is_move_success.value()
+                   ? ReplaceFileResult::kFileNotFoundMoveSuccess
+                   : ReplaceFileResult::kFileNotFoundMoveFailed;
+      break;
+    case ERROR_UNABLE_TO_MOVE_REPLACEMENT:
+      result = is_move_success.value()
+                   ? ReplaceFileResult::kUnableToMoveReplacementMoveSuccess
+                   : ReplaceFileResult::kUnableToMoveReplacementMoveFailed;
+      break;
+    case ERROR_UNABLE_TO_MOVE_REPLACEMENT_2:
+      if (is_backup_path_valid) {
+        result =
+            is_move_success.value()
+                ? ReplaceFileResult::kUnableToMoveReplacement2RecoverySuccess
+                : ReplaceFileResult::kUnableToMoveReplacement2RecoveryFailed;
+      } else {
+        result = is_move_success.value()
+                     ? ReplaceFileResult::kUnableToMoveReplacement2MoveSuccess
+                     : ReplaceFileResult::kUnableToMoveReplacement2MoveFailed;
+      }
+      break;
+    default:
+      result = is_move_success.value()
+                   ? ReplaceFileResult::kOtherErrorsMoveSuccess
+                   : ReplaceFileResult::kOtherErrorsMoveFailed;
+      break;
+  }
+  UmaHistogramEnumeration("Windows.ReplaceFileResult", result);
+}
 
 // Returns the Win32 last error code or ERROR_SUCCESS if the last error code is
 // ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND. This is useful in cases where
@@ -106,9 +194,14 @@ DWORD DeleteFileRecursive(const FilePath& path,
     DWORD this_result = ERROR_SUCCESS;
     if (info.IsDirectory()) {
       if (recursive) {
-        this_result = DeleteFileRecursive(current, pattern, true);
-        DCHECK_NE(static_cast<LONG>(this_result), ERROR_FILE_NOT_FOUND);
-        DCHECK_NE(static_cast<LONG>(this_result), ERROR_PATH_NOT_FOUND);
+        // Use `IsLink` to ensure fresh data is used to determine whether or not
+        // `current` is a mount point or similar.
+        if (!FeatureList::IsEnabled(features::kPreventReparsePointTraversal) ||
+            !IsLink(current)) {
+          this_result = DeleteFileRecursive(current, pattern, true);
+          DCHECK_NE(static_cast<LONG>(this_result), ERROR_FILE_NOT_FOUND);
+          DCHECK_NE(static_cast<LONG>(this_result), ERROR_PATH_NOT_FOUND);
+        }
         if (this_result == ERROR_SUCCESS &&
             !::RemoveDirectory(current.value().c_str())) {
           this_result = ReturnLastErrorOrSuccessOnNotFound();
@@ -309,7 +402,9 @@ DWORD DoDeleteFile(const FilePath& path, bool recursive) {
                : ReturnLastErrorOrSuccessOnNotFound();
   }
 
-  if (recursive) {
+  if (recursive &&
+      (!FeatureList::IsEnabled(features::kPreventReparsePointTraversal) ||
+       !IsLink(path))) {
     const DWORD error_code =
         DeleteFileRecursive(path, FILE_PATH_LITERAL("*"), true);
     DCHECK_NE(static_cast<LONG>(error_code), ERROR_FILE_NOT_FOUND);
@@ -517,27 +612,73 @@ bool ReplaceFile(const FilePath& from_path,
                  File::Error* error) {
   ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
 
+  // Try to find a valid path for the backup file in the same directory as the
+  // destination file.
+  FilePath backup_path;
+  if (File temp_file =
+          CreateAndOpenTemporaryFileInDir(to_path.DirName(), &backup_path);
+      temp_file.IsValid()) {
+    // A valid backup file path is found. Delete the file that was just created.
+    temp_file.DeleteOnClose(true);
+  } else {
+    // Not find a valid backup file path and won't use backup file.
+    backup_path.clear();
+  }
+
   // Assume that |to_path| already exists and try the normal replace. This will
   // fail with ERROR_FILE_NOT_FOUND if |to_path| does not exist. When writing to
   // a network share, we may not be able to change the ACLs. Ignore ACL errors
   // then (REPLACEFILE_IGNORE_MERGE_ERRORS).
-  if (::ReplaceFile(to_path.value().c_str(), from_path.value().c_str(), NULL,
+  if (::ReplaceFile(to_path.value().c_str(), from_path.value().c_str(),
+                    backup_path.empty() ? NULL : backup_path.value().c_str(),
                     REPLACEFILE_IGNORE_MERGE_ERRORS, NULL, NULL)) {
+    // ReplaceFile succeeded. The backup file is no longer needed.
+    if (!backup_path.empty()) {
+      DeleteFile(backup_path);
+    }
+    RecordReplaceFileResult(/*is_backup_path_valid=*/!backup_path.empty(),
+                            /*replace_result=*/ERROR_SUCCESS,
+                            /*is_move_success=*/std::nullopt);
     return true;
   }
 
-  File::Error replace_error = File::OSErrorToFileError(GetLastError());
+  const DWORD replace_error_code = GetLastError();
+  if (replace_error_code == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 &&
+      !backup_path.empty()) {
+    // In the case of ERROR_UNABLE_TO_MOVE_REPLACEMENT_2, the replace operation
+    // failed and |to_path| file is lost. The |backup_path| now points to the
+    // original |to_path| file. Try to recover the |to_path| file by moving the
+    // backup file back to it.
+    const bool is_move_success =
+        ::MoveFile(backup_path.value().c_str(), to_path.value().c_str());
+    RecordReplaceFileResult(/*is_backup_path_valid=*/true, replace_error_code,
+                            is_move_success);
+  } else {
+    // For other errors, we still try to move the |from_path| file to |to_path|
+    // to see if we can complete this. It will only succeed when |to_path|
+    // doesn't already exist.
+    const bool is_move_success =
+        ::MoveFile(from_path.value().c_str(), to_path.value().c_str());
+    RecordReplaceFileResult(/*is_backup_path_valid=*/!backup_path.empty(),
+                            replace_error_code, is_move_success);
 
-  // Try a simple move next. It will only succeed when |to_path| doesn't already
-  // exist.
-  if (::MoveFile(from_path.value().c_str(), to_path.value().c_str())) {
-    return true;
+    if (is_move_success) {
+      // Though ::ReplaceFile failed, we were able to move the file to the
+      // destination. The backup file is no longer needed. This is treated as
+      // success for ReplaceFile.
+      if (!backup_path.empty()) {
+        DeleteFile(backup_path);
+      }
+      return true;
+    }
   }
 
   // In the case of FILE_ERROR_NOT_FOUND from ReplaceFile, it is likely that
   // |to_path| does not exist. In this case, the more relevant error comes
   // from the call to MoveFile.
   if (error) {
+    const File::Error replace_error =
+        File::OSErrorToFileError(replace_error_code);
     *error = replace_error == File::FILE_ERROR_NOT_FOUND
                  ? File::GetLastFileError()
                  : replace_error;
@@ -638,15 +779,17 @@ FilePath GetHomeDir() {
   return FilePath(FILE_PATH_LITERAL("C:\\"));
 }
 
-File CreateAndOpenTemporaryFileInDir(const FilePath& dir, FilePath* temp_file) {
+File CreateAndOpenTemporaryFileInDir(const FilePath& dir,
+                                     FilePath* temp_file,
+                                     uint32_t additional_flags) {
   ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
 
   // Open the file with exclusive r/w/d access, and allow the caller to decide
   // to mark it for deletion upon close after the fact.
-  constexpr uint32_t kFlags = File::FLAG_CREATE | File::FLAG_READ |
-                              File::FLAG_WRITE | File::FLAG_WIN_EXCLUSIVE_READ |
-                              File::FLAG_WIN_EXCLUSIVE_WRITE |
-                              File::FLAG_CAN_DELETE_ON_CLOSE;
+  uint32_t flags = File::FLAG_CREATE | File::FLAG_READ | File::FLAG_WRITE |
+                   File::FLAG_WIN_EXCLUSIVE_READ |
+                   File::FLAG_WIN_EXCLUSIVE_WRITE |
+                   File::FLAG_CAN_DELETE_ON_CLOSE | additional_flags;
 
   // Use GUID instead of ::GetTempFileName() to generate unique file names.
   // "Due to the algorithm used to generate file names, GetTempFileName can
@@ -662,8 +805,8 @@ File CreateAndOpenTemporaryFileInDir(const FilePath& dir, FilePath* temp_file) {
   // still use a loop here in case it happens.
   for (int i = 0; i < 100; ++i) {
     temp_name = dir.Append(FormatTemporaryFileName(
-        UTF8ToWide(Uuid::GenerateRandomV4().AsLowercaseString())));
-    file.Initialize(temp_name, kFlags);
+        UTF8ToWide(Uuid::GenerateRandomV4().AsLowercaseString()), true));
+    file.Initialize(temp_name, flags);
     if (file.IsValid()) {
       break;
     }
@@ -692,7 +835,8 @@ bool CreateTemporaryFileInDir(const FilePath& dir, FilePath* temp_file) {
   return CreateAndOpenTemporaryFileInDir(dir, temp_file).IsValid();
 }
 
-FilePath FormatTemporaryFileName(FilePath::StringViewType identifier) {
+FilePath FormatTemporaryFileName(FilePath::StringViewType identifier,
+                                 bool /*hidden*/) {
   return FilePath(StrCat({identifier, FILE_PATH_LITERAL(".tmp")}));
 }
 
@@ -719,8 +863,8 @@ bool CreateTemporaryDirInDir(const FilePath& base_dir,
     new_dir_name.assign(prefix);
     new_dir_name.append(AsWString(NumberToString16(GetCurrentProcId())));
     new_dir_name.push_back('_');
-    new_dir_name.append(AsWString(
-        NumberToString16(RandInt(0, std::numeric_limits<int32_t>::max()))));
+    new_dir_name.append(AsWString(NumberToString16(
+        RandIntInclusive(0, std::numeric_limits<int32_t>::max()))));
 
     path_to_create = base_dir.Append(new_dir_name);
     if (::CreateDirectory(path_to_create.value().c_str(), NULL)) {
@@ -892,9 +1036,8 @@ bool DevicePathToDriveLetterPath(const FilePath& nt_device_path,
       FilePath device_path(device_path_as_string);
       if (device_path == nt_device_path ||
           device_path.IsParent(nt_device_path)) {
-        *out_drive_letter_path =
-            FilePath(drive + nt_device_path.value().substr(
-                                 UNSAFE_TODO(wcslen(device_path_as_string))));
+        *out_drive_letter_path = FilePath(
+            drive + nt_device_path.value().substr(device_path.value().size()));
         return true;
       }
     }
@@ -931,9 +1074,44 @@ bool CreateWinHardLink(const FilePath& to_file, const FilePath& from_file) {
                           nullptr);
 }
 
-// TODO(rkc): Work out if we want to handle NTFS junctions here or not, handle
-// them if we do decide to.
 bool IsLink(const FilePath& file_path) {
+  ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
+
+  DWORD attributes = ::GetFileAttributes(file_path.value().c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+    return false;
+  }
+
+  // Open a handle to the reparse point itself, not its target, requiring
+  // minimal permissions.
+  File file(::CreateFile(
+      file_path.value().c_str(),
+      FILE_READ_ATTRIBUTES,  // Does NOT require FILE_LIST_DIRECTORY
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr));
+
+  if (!file.IsValid()) {
+    // Best-effort fallback for cases where CreateFile fails (e.g., sharing
+    // violation or access denied).
+    WIN32_FIND_DATA find_data;
+    HANDLE find_handle = ::FindFirstFile(file_path.value().c_str(), &find_data);
+    if (find_handle != INVALID_HANDLE_VALUE) {
+      ::FindClose(find_handle);
+      return IsReparseTagNameSurrogate(find_data.dwReserved0);
+    }
+    return false;
+  }
+
+  FILE_ATTRIBUTE_TAG_INFO info;
+  bool success = ::GetFileInformationByHandleEx(
+      file.GetPlatformFile(), FileAttributeTagInfo, &info, sizeof(info));
+
+  if (success) {
+    return IsReparseTagNameSurrogate(info.ReparseTag);
+  }
+
   return false;
 }
 
@@ -971,12 +1149,14 @@ bool GetFileInfo(const FilePath& file_path, File::Info* results) {
   return true;
 }
 
-FILE* OpenFile(const FilePath& filename, const char* mode) {
+FILE* OpenFile(const FilePath& filename, base::cstring_view mode) {
+  size_t n_pos = mode.find('N');
+  size_t comma_pos = mode.find(',');
+
   // 'N' is unconditionally added below, so be sure there is not one already
-  // present before a comma in |mode|.
-  DCHECK(UNSAFE_TODO(strchr(mode, 'N')) == nullptr ||
-         (UNSAFE_TODO(strchr(mode, ',')) != nullptr &&
-          UNSAFE_TODO(strchr(mode, 'N')) > UNSAFE_TODO(strchr(mode, ','))));
+  // present before a comma in `mode`.
+  DCHECK(n_pos == base::cstring_view::npos ||
+         (comma_pos != base::cstring_view::npos && n_pos > comma_pos));
   ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
   std::wstring w_mode = UTF8ToWide(mode);
   AppendModeCharacter(L'N', &w_mode);
@@ -1239,8 +1419,8 @@ bool PreventExecuteMappingInternal(const FilePath& path, bool skip_path_check) {
     return false;
   }
 
-  static constexpr wchar_t kEveryoneSid[] = L"WD";
-  auto sids = win::Sid::FromSddlStringVector({kEveryoneSid});
+  const std::vector<std::wstring> sddl = {L"WD"};
+  auto sids = win::Sid::FromSddlStringVector(sddl);
 
   // Remove executable access from the file. The API does not add a duplicate
   // ACE if it already exists.

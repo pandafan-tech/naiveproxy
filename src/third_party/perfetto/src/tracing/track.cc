@@ -34,7 +34,7 @@
 namespace perfetto {
 
 // static
-uint64_t Track::process_uuid;
+uint64_t Track::process_uuid = 0;
 
 protos::gen::TrackDescriptor Track::Serialize() const {
   protos::gen::TrackDescriptor desc;
@@ -74,7 +74,7 @@ protos::gen::TrackDescriptor ProcessTrack::Serialize() const {
           std::string(splitter.cur_token(), splitter.cur_token_size()));
     }
   }
-  // TODO(skyostil): Record command line on Windows and Mac.
+  // TODO(skyostil): Record command line on Windows, FreeBSD and Mac.
 #endif
   return desc;
 }

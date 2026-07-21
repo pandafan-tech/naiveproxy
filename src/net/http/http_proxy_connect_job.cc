@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
-#include <set>
 #include <utility>
 #include <variant>
 
@@ -16,6 +15,7 @@
 #include "base/metrics/field_trial.h"
 #include "base/metrics/field_trial_params.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
@@ -156,7 +156,8 @@ HttpProxySocketParams::HttpProxySocketParams(
     bool tunnel,
     const NetworkTrafficAnnotationTag traffic_annotation,
     const NetworkAnonymizationKey& network_anonymization_key,
-    SecureDnsPolicy secure_dns_policy)
+    SecureDnsPolicy secure_dns_policy,
+    handles::NetworkHandle target_network)
     : HttpProxySocketParams(std::move(nested_params),
                             std::nullopt,
                             endpoint,
@@ -165,7 +166,8 @@ HttpProxySocketParams::HttpProxySocketParams(
                             tunnel,
                             std::move(traffic_annotation),
                             network_anonymization_key,
-                            secure_dns_policy) {}
+                            secure_dns_policy,
+                            target_network) {}
 
 HttpProxySocketParams::HttpProxySocketParams(
     SSLConfig quic_ssl_config,
@@ -175,7 +177,8 @@ HttpProxySocketParams::HttpProxySocketParams(
     bool tunnel,
     const NetworkTrafficAnnotationTag traffic_annotation,
     const NetworkAnonymizationKey& network_anonymization_key,
-    SecureDnsPolicy secure_dns_policy)
+    SecureDnsPolicy secure_dns_policy,
+    handles::NetworkHandle target_network)
     : HttpProxySocketParams(std::nullopt,
                             std::move(quic_ssl_config),
                             endpoint,
@@ -184,7 +187,8 @@ HttpProxySocketParams::HttpProxySocketParams(
                             tunnel,
                             std::move(traffic_annotation),
                             network_anonymization_key,
-                            secure_dns_policy) {}
+                            secure_dns_policy,
+                            target_network) {}
 
 HttpProxySocketParams::HttpProxySocketParams(
     std::optional<ConnectJobParams> nested_params,
@@ -195,7 +199,8 @@ HttpProxySocketParams::HttpProxySocketParams(
     bool tunnel,
     const NetworkTrafficAnnotationTag traffic_annotation,
     const NetworkAnonymizationKey& network_anonymization_key,
-    SecureDnsPolicy secure_dns_policy)
+    SecureDnsPolicy secure_dns_policy,
+    handles::NetworkHandle target_network)
     : nested_params_(std::move(nested_params)),
       quic_ssl_config_(std::move(quic_ssl_config)),
       endpoint_(endpoint),
@@ -204,7 +209,8 @@ HttpProxySocketParams::HttpProxySocketParams(
       tunnel_(tunnel),
       network_anonymization_key_(network_anonymization_key),
       traffic_annotation_(traffic_annotation),
-      secure_dns_policy_(secure_dns_policy) {
+      secure_dns_policy_(secure_dns_policy),
+      target_network_(target_network) {
   DCHECK(!proxy_chain_.is_direct());
   DCHECK(proxy_chain_.IsValid());
   CHECK(proxy_chain_index_ < proxy_chain_.length());
@@ -339,14 +345,6 @@ void HttpProxyConnectJob::OnNeedsProxyAuth(
   // implementations after nested_connect_job_ has already established a
   // connection.
   NOTREACHED();
-}
-
-Error HttpProxyConnectJob::OnDestinationDnsAliasesResolved(
-    const std::set<std::string>& aliases,
-    ConnectJob* job) {
-  // Do nothing and return OK when DNS aliases for HTTP proxy hostnames since
-  // higher-level layers will not take action on these.
-  return OK;
 }
 
 base::TimeDelta HttpProxyConnectJob::AlternateNestedConnectionTimeout(
@@ -505,7 +503,7 @@ int HttpProxyConnectJob::DoTransportConnect() {
   ProxyServer::Scheme scheme = GetProxyServerScheme();
   if (scheme == ProxyServer::SCHEME_HTTP) {
     if (params_->is_over_transport()) {
-      nested_connect_job_ = std::make_unique<TransportConnectJob>(
+      nested_connect_job_ = TransportConnectJob::Factory::CreateJob(
           priority(), socket_tag(), common_connect_job_params(),
           params_->transport_params(), this, &net_log());
     } else if (params_->is_over_http()) {
@@ -785,8 +783,9 @@ int HttpProxyConnectJob::DoQuicProxyCreateSession() {
       kH2QuicTunnelPriority, socket_tag(), params_->network_anonymization_key(),
       params_->secure_dns_policy(),
       /*require_dns_https_alpn=*/false, ssl_config.GetCertVerifyFlags(),
-      GURL("https://" + proxy_server.ToString()), net_log(),
-      &quic_net_error_details_, MultiplexedSessionCreationInitiator::kUnknown,
+      GURL("https://" + proxy_server.ToString()), params_->target_network(),
+      net_log(), &quic_net_error_details_,
+      MultiplexedSessionCreationInitiator::kUnknown,
       /*management_config=*/std::nullopt,
       /*failed_on_default_network_callback=*/CompletionOnceCallback(),
       base::BindOnce(&HttpProxyConnectJob::OnIOComplete,
@@ -946,7 +945,8 @@ SpdySessionKey HttpProxyConnectJob::CreateSpdySessionKey() const {
       params_->proxy_server().host_port_pair(), PRIVACY_MODE_DISABLED,
       session_key_proxy_chain, SessionUsage::kProxy, socket_tag(),
       params_->network_anonymization_key(), params_->secure_dns_policy(),
-      /*disable_cert_verification_network_fetches=*/true);
+      /*disable_cert_verification_network_fetches=*/true,
+      params_->target_network());
 }
 
 // static

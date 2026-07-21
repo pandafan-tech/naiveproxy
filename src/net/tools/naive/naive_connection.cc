@@ -55,7 +55,7 @@ constexpr int kBufferSize = 64 * 1024;
 NaiveConnection::NaiveConnection(
     unsigned int id,
     ClientProtocol protocol,
-    std::unique_ptr<PaddingDetectorDelegate> padding_detector_delegate,
+    std::unique_ptr<PaddingType> negotiated_client_padding,
     const ProxyInfo& proxy_info,
     RedirectResolver* resolver,
     HttpNetworkSession* session,
@@ -65,7 +65,7 @@ NaiveConnection::NaiveConnection(
     const NetworkTrafficAnnotationTag& traffic_annotation)
     : id_(id),
       protocol_(protocol),
-      padding_detector_delegate_(std::move(padding_detector_delegate)),
+      negotiated_client_padding_(std::move(negotiated_client_padding)),
       proxy_info_(proxy_info),
       resolver_(resolver),
       session_(session),
@@ -82,6 +82,7 @@ NaiveConnection::NaiveConnection(
       early_pull_result_(ERR_IO_PENDING),
       full_duplex_(false),
       time_func_(&base::TimeTicks::Now),
+      created_at_(base::TimeTicks::Now()),
       traffic_annotation_(traffic_annotation) {
   io_callback_ = base::BindRepeating(&NaiveConnection::OnIOComplete,
                                      weak_ptr_factory_.GetWeakPtr());
@@ -96,8 +97,9 @@ int NaiveConnection::Connect(CompletionOnceCallback callback) {
   DCHECK_EQ(next_state_, STATE_NONE);
   DCHECK(!connect_callback_);
 
-  if (full_duplex_)
+  if (full_duplex_) {
     return OK;
+  }
 
   next_state_ = STATE_CONNECT_CLIENT;
 
@@ -111,11 +113,13 @@ int NaiveConnection::Connect(CompletionOnceCallback callback) {
 void NaiveConnection::Disconnect() {
   full_duplex_ = false;
   // Closes server side first because latency is higher.
-  if (server_socket_handle_->socket())
+  if (server_socket_handle_->socket()) {
     server_socket_handle_->socket()->Disconnect();
+  }
   client_socket_->Disconnect();
 
   next_state_ = STATE_NONE;
+  OnBothDisconnected();
   connect_callback_.Reset();
   run_callback_.Reset();
 }
@@ -130,7 +134,10 @@ void NaiveConnection::DoCallback(int result) {
 }
 
 void NaiveConnection::OnIOComplete(int result) {
-  DCHECK_NE(next_state_, STATE_NONE);
+  if (next_state_ == STATE_NONE) {
+    // Disconnect() was called during client or server socket Connect().
+    return;
+  }
   int rv = DoLoop(result);
   if (rv != ERR_IO_PENDING) {
     DoCallback(rv);
@@ -159,7 +166,6 @@ int NaiveConnection::DoLoop(int last_io_result) {
         rv = DoConnectServerComplete(rv);
         break;
       default:
-        NOTREACHED() << "bad state";
         rv = ERR_UNEXPECTED;
         break;
     }
@@ -174,21 +180,18 @@ int NaiveConnection::DoConnectClient() {
 }
 
 int NaiveConnection::DoConnectClientComplete(int result) {
-  if (result < 0)
+  if (result < 0) {
     return result;
-
-  std::optional<PaddingType> client_padding_type =
-      padding_detector_delegate_->GetClientPaddingType();
-  CHECK(client_padding_type.has_value());
+  }
 
   sockets_[kClient] = std::make_unique<NaivePaddingSocket>(
-      client_socket_.get(), *client_padding_type, kClient);
+      client_socket_.get(), *negotiated_client_padding_, kClient);
 
   // For proxy client sockets, padding support detection is finished after the
   // first server response which means there will be one missed early pull. For
   // proxy server sockets (HttpProxyServerSocket), padding support detection is
   // done during client connect, so there shouldn't be any missed early pull.
-  if (!padding_detector_delegate_->GetServerPaddingType().has_value()) {
+  if (!GetServerPaddingType().has_value()) {
     early_pull_pending_ = false;
     early_pull_result_ = 0;
     next_state_ = STATE_CONNECT_SERVER;
@@ -274,23 +277,24 @@ int NaiveConnection::DoConnectServer() {
     return ERR_ADDRESS_INVALID;
   }
 
-  LOG(INFO) << "Connection " << id_ << " to " << origin.ToString();
+  LOG(INFO) << "Connection " << id_ << " to " << origin.ToString() << " via "
+            << proxy_info_.ToDebugString();
 
   // Ignores socket limit set by socket pool for this type of socket.
   return InitSocketHandleForHttpRequest(
       std::move(endpoint), LOAD_IGNORE_LIMITS, MAXIMUM_PRIORITY, session_,
-      proxy_info_, {}, PRIVACY_MODE_DISABLED,
-      network_anonymization_key_, SecureDnsPolicy::kDisable, SocketTag(),
+      proxy_info_, {}, PRIVACY_MODE_DISABLED, network_anonymization_key_,
+      SecureDnsPolicy::kDisable, SocketTag(), handles::kInvalidNetworkHandle,
       net_log_, server_socket_handle_.get(), io_callback_,
-      ClientSocketPool::ProxyAuthCallback(), false);
+      ClientSocketPool::ProxyAuthCallback());
 }
 
 int NaiveConnection::DoConnectServerComplete(int result) {
-  if (result < 0)
+  if (result < 0) {
     return result;
+  }
 
-  std::optional<PaddingType> server_padding_type =
-      padding_detector_delegate_->GetServerPaddingType();
+  std::optional<PaddingType> server_padding_type = GetServerPaddingType();
   CHECK(server_padding_type.has_value());
 
   sockets_[kServer] = std::make_unique<NaivePaddingSocket>(
@@ -308,10 +312,12 @@ int NaiveConnection::Run(CompletionOnceCallback callback) {
 
   // The client-side socket may be closed before the server-side
   // socket is connected.
-  if (errors_[kClient] != OK || sockets_[kClient] == nullptr)
+  if (errors_[kClient] != OK || sockets_[kClient] == nullptr) {
     return errors_[kClient];
-  if (errors_[kServer] != OK)
+  }
+  if (errors_[kServer] != OK) {
     return errors_[kServer];
+  }
 
   run_callback_ = std::move(callback);
 
@@ -337,8 +343,9 @@ int NaiveConnection::Run(CompletionOnceCallback callback) {
 }
 
 void NaiveConnection::Pull(Direction from, Direction to) {
-  if (errors_[kClient] < 0 || errors_[kServer] < 0)
+  if (errors_[kClient] < 0 || errors_[kServer] < 0) {
     return;
+  }
 
   int read_size = kBufferSize;
   read_buffers_[from] = base::MakeRefCounted<IOBufferWithSize>(kBufferSize);
@@ -346,14 +353,16 @@ void NaiveConnection::Pull(Direction from, Direction to) {
   DCHECK(sockets_[from]);
   int rv = sockets_[from]->Read(
       read_buffers_[from].get(), read_size,
-      base::BindRepeating(&NaiveConnection::OnPullComplete,
-                          weak_ptr_factory_.GetWeakPtr(), from, to));
+      base::BindOnce(&NaiveConnection::OnPullComplete,
+                     weak_ptr_factory_.GetWeakPtr(), from, to));
 
-  if (from == kClient && early_pull_pending_)
+  if (from == kClient && early_pull_pending_) {
     early_pull_result_ = rv;
+  }
 
-  if (rv != ERR_IO_PENDING)
+  if (rv != ERR_IO_PENDING) {
     OnPullComplete(from, to, rv);
+  }
 }
 
 void NaiveConnection::Push(Direction from, Direction to, int size) {
@@ -363,12 +372,14 @@ void NaiveConnection::Push(Direction from, Direction to, int size) {
   DCHECK(sockets_[to]);
   int rv = sockets_[to]->Write(
       write_buffers_[to].get(), write_buffers_[to]->BytesRemaining(),
-      base::BindRepeating(&NaiveConnection::OnPushComplete,
-                          weak_ptr_factory_.GetWeakPtr(), from, to),
+      base::BindOnce(&NaiveConnection::OnPushComplete,
+                     weak_ptr_factory_.GetWeakPtr(), from, to),
       traffic_annotation_);
+  last_write_time_[to] = time_func_();
 
-  if (rv != ERR_IO_PENDING)
+  if (rv != ERR_IO_PENDING) {
     OnPushComplete(from, to, rv);
+  }
 }
 
 void NaiveConnection::Disconnect(Direction side) {
@@ -386,10 +397,12 @@ bool NaiveConnection::IsConnected(Direction side) {
 void NaiveConnection::OnBothDisconnected() {
   if (run_callback_) {
     int error = OK;
-    if (errors_[kClient] != ERR_CONNECTION_CLOSED && errors_[kClient] < 0)
+    if (errors_[kClient] != ERR_CONNECTION_CLOSED && errors_[kClient] < 0) {
       error = errors_[kClient];
-    if (errors_[kServer] != ERR_CONNECTION_CLOSED && errors_[kClient] < 0)
+    }
+    if (errors_[kServer] != ERR_CONNECTION_CLOSED && errors_[kServer] < 0) {
       error = errors_[kServer];
+    }
     std::move(run_callback_).Run(error);
   }
 }
@@ -400,11 +413,13 @@ void NaiveConnection::OnPullError(Direction from, Direction to, int error) {
   errors_[from] = error;
   Disconnect(from);
 
-  if (!write_pending_[to])
+  if (!write_pending_[to]) {
     Disconnect(to);
+  }
 
-  if (!IsConnected(from) && !IsConnected(to))
+  if (!IsConnected(from) && !IsConnected(to)) {
     OnBothDisconnected();
+  }
 }
 
 void NaiveConnection::OnPushError(Direction from, Direction to, int error) {
@@ -419,8 +434,9 @@ void NaiveConnection::OnPushError(Direction from, Direction to, int error) {
     Disconnect(to);
   }
 
-  if (!IsConnected(from) && !IsConnected(to))
+  if (!IsConnected(from) && !IsConnected(to)) {
     OnBothDisconnected();
+  }
 }
 
 void NaiveConnection::OnPullComplete(Direction from, Direction to, int result) {
@@ -434,8 +450,9 @@ void NaiveConnection::OnPullComplete(Direction from, Direction to, int result) {
     return;
   }
 
-  if (from == kClient && !can_push_to_server_)
+  if (from == kClient && !can_push_to_server_) {
     return;
+  }
 
   Push(from, to, result);
 }
@@ -448,11 +465,13 @@ void NaiveConnection::OnPushComplete(Direction from, Direction to, int result) {
     if (size > 0) {
       int rv = sockets_[to]->Write(
           write_buffers_[to].get(), size,
-          base::BindRepeating(&NaiveConnection::OnPushComplete,
-                              weak_ptr_factory_.GetWeakPtr(), from, to),
+          base::BindOnce(&NaiveConnection::OnPushComplete,
+                         weak_ptr_factory_.GetWeakPtr(), from, to),
           traffic_annotation_);
-      if (rv != ERR_IO_PENDING)
+      last_write_time_[to] = time_func_();
+      if (rv != ERR_IO_PENDING) {
         OnPushComplete(from, to, rv);
+      }
       return;
     }
   }
@@ -467,12 +486,29 @@ void NaiveConnection::OnPushComplete(Direction from, Direction to, int result) {
     yield_after_time_[from] =
         time_func_() + base::Milliseconds(kYieldAfterDurationMilliseconds);
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE,
-        base::BindRepeating(&NaiveConnection::Pull,
-                            weak_ptr_factory_.GetWeakPtr(), from, to));
+        FROM_HERE, base::BindOnce(&NaiveConnection::Pull,
+                                  weak_ptr_factory_.GetWeakPtr(), from, to));
   } else {
     Pull(from, to);
   }
 }
 
+std::optional<PaddingType> NaiveConnection::GetServerPaddingType() const {
+  auto* proxy_delegate =
+      static_cast<NaiveProxyDelegate*>(session_->context().proxy_delegate);
+  DCHECK(proxy_delegate);
+  return proxy_delegate->GetProxyChainPaddingType(proxy_info_.proxy_chain());
+}
+
+base::TimeTicks NaiveConnection::GetLastWriteTime() const {
+  if (last_write_time_[kClient] > last_write_time_[kServer]) {
+    return last_write_time_[kClient];
+  } else {
+    return last_write_time_[kServer];
+  }
+}
+
+base::TimeTicks NaiveConnection::GetCreationTime() const {
+  return created_at_;
+}
 }  // namespace net

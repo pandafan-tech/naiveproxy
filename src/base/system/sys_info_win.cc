@@ -20,8 +20,10 @@
 #include <type_traits>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/check.h"
 #include "base/files/file_path.h"
+#include "base/not_fatal_until.h"
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/process/process_metrics.h"
@@ -114,39 +116,14 @@ std::vector<uint64_t> GetCoreProcessorMasks() {
   return processor_masks;
 }
 
-base::ByteCount AmountOfMemory(DWORDLONG MEMORYSTATUSEX::* memory_field) {
+base::ByteSize AmountOfMemory(DWORDLONG MEMORYSTATUSEX::* memory_field) {
   MEMORYSTATUSEX memory_info;
   memory_info.dwLength = sizeof(memory_info);
   if (!GlobalMemoryStatusEx(&memory_info)) {
     NOTREACHED();
   }
 
-  return base::ByteCount::FromUnsigned(memory_info.*memory_field);
-}
-
-bool GetDiskSpaceInfo(const base::FilePath& path,
-                      int64_t* available_bytes,
-                      int64_t* total_bytes) {
-  ULARGE_INTEGER available;
-  ULARGE_INTEGER total;
-  ULARGE_INTEGER free;
-  if (!GetDiskFreeSpaceExW(path.value().c_str(), &available, &total, &free)) {
-    return false;
-  }
-
-  if (available_bytes) {
-    *available_bytes = static_cast<int64_t>(available.QuadPart);
-    if (*available_bytes < 0) {
-      *available_bytes = std::numeric_limits<int64_t>::max();
-    }
-  }
-  if (total_bytes) {
-    *total_bytes = static_cast<int64_t>(total.QuadPart);
-    if (*total_bytes < 0) {
-      *total_bytes = std::numeric_limits<int64_t>::max();
-    }
-  }
-  return true;
+  return base::ByteSize(memory_info.*memory_field);
 }
 
 }  // namespace
@@ -188,48 +165,55 @@ int SysInfo::NumberOfEfficientProcessorsImpl() {
 }
 
 // static
-ByteCount SysInfo::AmountOfPhysicalMemoryImpl() {
+ByteSize SysInfo::AmountOfTotalPhysicalMemoryImpl() {
   return AmountOfMemory(&MEMORYSTATUSEX::ullTotalPhys);
 }
 
 // static
-ByteCount SysInfo::AmountOfAvailablePhysicalMemoryImpl() {
+ByteSize SysInfo::AmountOfAvailablePhysicalMemoryImpl() {
   SystemMemoryInfo info;
   if (!GetSystemMemoryInfo(&info)) {
-    return ByteCount(0);
+    return ByteSize(0);
   }
   return info.avail_phys;
 }
 
 // static
-ByteCount SysInfo::AmountOfVirtualMemory() {
+ByteSize SysInfo::AmountOfVirtualMemory() {
   return AmountOfMemory(&MEMORYSTATUSEX::ullTotalVirtual);
 }
 
 // static
 std::optional<int64_t> SysInfo::AmountOfFreeDiskSpace(const FilePath& path) {
-  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
-                                                base::BlockingType::MAY_BLOCK);
-
-  int64_t available;
-  if (!GetDiskSpaceInfo(path, &available, nullptr)) {
-    return std::nullopt;
-  }
-  CHECK(available >= 0, base::NotFatalUntil::M150);
-  return available;
+  return AmountOfDiskSpace(path).transform([](DiskSpaceInfo info) {
+    return static_cast<int64_t>(info.available.InBytes());
+  });
 }
 
 // static
 std::optional<int64_t> SysInfo::AmountOfTotalDiskSpace(const FilePath& path) {
+  return AmountOfDiskSpace(path).transform([](DiskSpaceInfo info) {
+    return static_cast<int64_t>(info.total.InBytes());
+  });
+}
+
+// static
+std::optional<SysInfo::DiskSpaceInfo> SysInfo::AmountOfDiskSpace(
+    const FilePath& path) {
   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
                                                 base::BlockingType::MAY_BLOCK);
 
-  int64_t total;
-  if (!GetDiskSpaceInfo(path, nullptr, &total)) {
+  ULARGE_INTEGER available;
+  ULARGE_INTEGER total;
+  if (!GetDiskFreeSpaceExW(path.value().c_str(), &available, &total, nullptr)) {
     return std::nullopt;
   }
-  CHECK(total >= 0, base::NotFatalUntil::M150);
-  return total;
+  constexpr uint64_t kMaxBytes = uint64_t{std::numeric_limits<int64_t>::max()};
+  CHECK_LE(total.QuadPart, kMaxBytes, NotFatalUntil::M151);
+  CHECK_LE(available.QuadPart, kMaxBytes, NotFatalUntil::M151);
+  return DiskSpaceInfo{
+      .total = ByteSize(std::min(total.QuadPart, kMaxBytes)),
+      .available = ByteSize(std::min(available.QuadPart, kMaxBytes))};
 }
 
 std::string SysInfo::OperatingSystemName() {

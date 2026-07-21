@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "net/base/backoff_entry.h"
@@ -14,6 +15,7 @@
 #include "net/base/rand_callback.h"
 #include "net/reporting/reporting_cache.h"
 #include "net/reporting/reporting_policy.h"
+#include "net/reporting/reporting_uploader.h"
 
 namespace base {
 class Clock;
@@ -39,7 +41,8 @@ class NET_EXPORT ReportingContext {
       const ReportingPolicy& policy,
       URLRequestContext* request_context,
       ReportingCache::PersistentReportingStore* store,
-      const base::flat_map<std::string, GURL>& enterprise_reporting_endpoints);
+      ReportingUploader::PrepareUploadRequestCallback
+          prepare_upload_request_callback = base::DoNothing());
 
   ReportingContext(const ReportingContext&) = delete;
   ReportingContext& operator=(const ReportingContext&) = delete;
@@ -77,15 +80,13 @@ class NET_EXPORT ReportingContext {
   void OnShutdown();
 
  protected:
-  ReportingContext(
-      const ReportingPolicy& policy,
-      base::Clock* clock,
-      const base::TickClock* tick_clock,
-      const RandIntCallback& rand_callback,
-      std::unique_ptr<ReportingUploader> uploader,
-      std::unique_ptr<ReportingDelegate> delegate,
-      ReportingCache::PersistentReportingStore* store,
-      const base::flat_map<std::string, GURL>& enterprise_reporting_endpoints);
+  ReportingContext(const ReportingPolicy& policy,
+                   base::Clock* clock,
+                   const base::TickClock* tick_clock,
+                   const RandIntCallback& rand_callback,
+                   std::unique_ptr<ReportingUploader> uploader,
+                   std::unique_ptr<ReportingDelegate> delegate,
+                   ReportingCache::PersistentReportingStore* store);
 
  private:
   ReportingPolicy policy_;
@@ -94,7 +95,11 @@ class NET_EXPORT ReportingContext {
   raw_ptr<const base::TickClock> tick_clock_;
   std::unique_ptr<ReportingUploader> uploader_;
 
-  base::ObserverList<ReportingCacheObserver, /* check_empty= */ true>::Unchecked
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      ReportingCacheObserver,
+      /*check_empty=*/true,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
       cache_observers_;
 
   std::unique_ptr<ReportingDelegate> delegate_;

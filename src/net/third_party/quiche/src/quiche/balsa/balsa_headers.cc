@@ -22,8 +22,10 @@
 #include "absl/strings/string_view.h"
 #include "quiche/balsa/balsa_enums.h"
 #include "quiche/balsa/header_properties.h"
+#include "quiche/common/platform/api/quiche_flags.h"
 #include "quiche/common/platform/api/quiche_header_policy.h"
 #include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/quiche_feature_flags_list.h"
 
 namespace {
 
@@ -323,10 +325,6 @@ void BalsaHeaders::AppendAndMakeDescription(absl::string_view key,
 // header we're removing is one of those headers.
 void BalsaHeaders::MaybeClearSpecialHeaderValues(absl::string_view key) {
   if (absl::EqualsIgnoreCase(key, kContentLength)) {
-    if (transfer_encoding_is_chunked_) {
-      return;
-    }
-
     content_length_status_ = BalsaHeadersEnums::NO_CONTENT_LENGTH;
     content_length_ = 0;
     return;

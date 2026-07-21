@@ -56,14 +56,17 @@ RedirectResolver::~RedirectResolver() = default;
 
 void RedirectResolver::DoRead() {
   for (;;) {
-    int rv = socket_->RecvFrom(
-        buffer_.get(), kUdpReadBufferSize, &recv_address_,
-        base::BindOnce(&RedirectResolver::OnRecv, base::Unretained(this)));
-    if (rv == ERR_IO_PENDING)
+    int rv =
+        socket_->RecvFrom(buffer_.get(), kUdpReadBufferSize, &recv_address_,
+                          base::BindOnce(&RedirectResolver::OnRecv,
+                                         weak_ptr_factory_.GetWeakPtr()));
+    if (rv == ERR_IO_PENDING) {
       return;
+    }
     rv = HandleReadResult(rv);
-    if (rv == ERR_IO_PENDING)
+    if (rv == ERR_IO_PENDING) {
       return;
+    }
     if (rv < 0) {
       LOG(INFO) << "DoRead: ignoring error " << ErrorToShortString(rv);
     }
@@ -73,8 +76,9 @@ void RedirectResolver::DoRead() {
 void RedirectResolver::OnRecv(int result) {
   int rv;
   rv = HandleReadResult(result);
-  if (rv == ERR_IO_PENDING)
+  if (rv == ERR_IO_PENDING) {
     return;
+  }
   if (rv < 0) {
     LOG(INFO) << "OnRecv: ignoring error " << ErrorToShortString(rv);
   }
@@ -91,8 +95,9 @@ void RedirectResolver::OnSend(int result) {
 }
 
 int RedirectResolver::HandleReadResult(int result) {
-  if (result < 0)
+  if (result < 0) {
     return result;
+  }
 
   DnsQuery query(buffer_.get());
   if (!query.Parse(result)) {
@@ -217,26 +222,29 @@ int RedirectResolver::HandleReadResult(int result) {
   }
   buffer_->first(size).copy_from(response.io_buffer()->span());
 
-  return socket_->SendTo(
-      buffer_.get(), size, recv_address_,
-      base::BindOnce(&RedirectResolver::OnSend, base::Unretained(this)));
+  return socket_->SendTo(buffer_.get(), size, recv_address_,
+                         base::BindOnce(&RedirectResolver::OnSend,
+                                        weak_ptr_factory_.GetWeakPtr()));
 }
 
 bool RedirectResolver::IsInResolvedRange(const IPAddress& address) const {
-  if (!address.IsIPv4())
+  if (!address.IsIPv4()) {
     return false;
+  }
   return IPAddressMatchesPrefix(address, range_, prefix_);
 }
 
 std::string RedirectResolver::FindNameByAddress(
     const IPAddress& address) const {
-  if (!address.IsIPv4())
+  if (!address.IsIPv4()) {
     return {};
+  }
   uint32_t addr = (address.bytes()[0] << 24) | (address.bytes()[1] << 16) |
                   (address.bytes()[2] << 8) | address.bytes()[3];
   auto by_addr = resolution_by_addr_.find(addr);
-  if (by_addr == resolution_by_addr_.end())
+  if (by_addr == resolution_by_addr_.end()) {
     return {};
+  }
   return by_addr->second->name;
 }
 

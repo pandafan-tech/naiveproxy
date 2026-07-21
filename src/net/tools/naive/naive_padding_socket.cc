@@ -62,7 +62,7 @@ int NaivePaddingSocket::ReadNoPadding(IOBuffer* buf,
   int rv = transport_socket_->Read(
       buf, buf_len,
       base::BindOnce(&NaivePaddingSocket::OnReadNoPaddingComplete,
-                     base::Unretained(this), std::move(callback)));
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
   return rv;
 }
 
@@ -109,8 +109,9 @@ void NaivePaddingSocket::OnReadPaddingV1Complete(int rv) {
                       read_user_buf_len_);
     if (rv == 0) {
       rv = ReadPaddingV1Payload();
-      if (rv == ERR_IO_PENDING)
+      if (rv == ERR_IO_PENDING) {
         return;
+      }
     }
   }
 
@@ -126,7 +127,7 @@ int NaivePaddingSocket::ReadPaddingV1Payload() {
     int rv = transport_socket_->Read(
         read_buf_.get(), read_user_buf_len_,
         base::BindOnce(&NaivePaddingSocket::OnReadPaddingV1Complete,
-                       base::Unretained(this)));
+                       weak_ptr_factory_.GetWeakPtr()));
     if (rv <= 0) {
       return rv;
     }
@@ -168,7 +169,7 @@ int NaivePaddingSocket::WriteNoPadding(
   return transport_socket_->Write(
       buf, buf_len,
       base::BindOnce(&NaivePaddingSocket::OnWriteNoPaddingComplete,
-                     base::Unretained(this), std::move(callback),
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                      traffic_annotation),
       traffic_annotation);
 }
@@ -194,13 +195,13 @@ int NaivePaddingSocket::WritePaddingV1(
   int padding_size;
   if (direction_ == kServer) {
     if (buf_len < 100) {
-      padding_size = base::RandInt(framer_.max_padding_size() - buf_len,
-                                   framer_.max_padding_size());
+      padding_size = base::RandIntInclusive(
+          framer_.max_padding_size() - buf_len, framer_.max_padding_size());
     } else {
-      padding_size = base::RandInt(0, framer_.max_padding_size());
+      padding_size = base::RandIntInclusive(0, framer_.max_padding_size());
     }
   } else {
-    padding_size = base::RandInt(0, framer_.max_padding_size());
+    padding_size = base::RandIntInclusive(0, framer_.max_padding_size());
   }
   int write_buf_len =
       framer_.Write(buf->data(), buf_len, padding_size, padded->data(),
@@ -232,8 +233,9 @@ void NaivePaddingSocket::OnWritePaddingV1Complete(
   if (rv > 0) {
     write_buf_->DidConsume(rv);
     rv = WritePaddingV1Drain(traffic_annotation);
-    if (rv == ERR_IO_PENDING)
+    if (rv == ERR_IO_PENDING) {
       return;
+    }
   }
 
   // Must reset these before invoking write_callback_, which may reenter
@@ -250,14 +252,14 @@ int NaivePaddingSocket::WritePaddingV1Drain(
 
   while (write_buf_->BytesRemaining() > 0) {
     int remaining = write_buf_->BytesRemaining();
-    if (direction_ == kServer && write_user_payload_len_ > 400 &&
+    if (direction_ == kServer && write_user_payload_len_ > 200 &&
         write_user_payload_len_ < 1024) {
-      remaining = std::min(remaining, base::RandInt(200, 300));
+      remaining = std::min(remaining, base::RandIntInclusive(100, 200));
     }
     int rv = transport_socket_->Write(
         write_buf_.get(), remaining,
         base::BindOnce(&NaivePaddingSocket::OnWritePaddingV1Complete,
-                       base::Unretained(this), traffic_annotation),
+                       weak_ptr_factory_.GetWeakPtr(), traffic_annotation),
         traffic_annotation);
     if (rv <= 0) {
       return rv;

@@ -29,8 +29,7 @@ bool FieldTrialEntry::GetState(std::string_view& trial_name,
   return ReadHeader(iter, trial_name, group_name, overridden);
 }
 
-bool FieldTrialEntry::GetParams(
-    std::map<std::string, std::string>* params) const {
+bool FieldTrialEntry::GetParams(FieldTrialParams* params) const {
   PickleIterator iter = GetPickleIterator();
   std::string_view tmp_string;
   bool tmp_bool;
@@ -50,12 +49,11 @@ bool FieldTrialEntry::GetParams(
 }
 
 PickleIterator FieldTrialEntry::GetPickleIterator() const {
-  Pickle pickle = Pickle::WithUnownedBuffer(
+  return PickleIterator::WithData(
       // TODO(crbug.com/40284755): FieldTrialEntry should be constructed with a
       // span over the pickle memory.
       UNSAFE_TODO(
           span(GetPickledDataPtr(), checked_cast<size_t>(pickle_size))));
-  return PickleIterator(pickle);
 }
 
 bool FieldTrialEntry::ReadHeader(PickleIterator& iter,

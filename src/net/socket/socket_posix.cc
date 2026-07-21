@@ -17,7 +17,9 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/posix/eintr_wrapper.h"
+#include "base/rand_util.h"
 #include "base/task/current_thread.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
@@ -37,6 +39,10 @@
 #include "net/socket/socket_apple.h"
 #endif  // BUILDFLAG(IS_APPLE)
 
+#if BUILDFLAG(IS_ANDROID)
+#include "net/android/network_library.h"
+#endif  // BUILDFLAG(IS_ANDROID)
+
 namespace net {
 
 namespace {
@@ -55,7 +61,23 @@ int MapAcceptError(int os_error) {
   }
 }
 
-int MapConnectError(int os_error) {
+int MapConnectError(int os_error, SocketDescriptor fd) {
+#if BUILDFLAG(IS_ANDROID)
+  // Android local network permission errors are surfaced as
+  // EPERM/EACCESS/EINPROGRESS/ETIMEDOUT when connecting (or reading/writing
+  // from) a TCP socket
+  // (https://developer.android.com/privacy-and-security/local-network-permission).
+  // Note that these errors are not unique to LNP. So, before returning the
+  // LNP-specific ERR_LOCAL_NETWORK_PERMISSION_MISSING, we must check whether
+  // LNP was really the cause.
+  if (os_error == EINPROGRESS || os_error == EPERM || os_error == EACCES ||
+      os_error == ETIMEDOUT) {
+    if (android::GetNetworkBlockedReason(fd) ==
+        android::NetworkBlockedReason::kLnp) {
+      return ERR_LOCAL_NETWORK_PERMISSION_MISSING;
+    }
+  }
+#endif
   switch (os_error) {
     case EINPROGRESS:
       return ERR_IO_PENDING;
@@ -228,7 +250,7 @@ int SocketPosix::Connect(const SockaddrStorage& address,
     errno = os_error;
   }
 
-  rv = MapConnectError(errno);
+  rv = MapConnectError(errno, socket_fd_);
   if (rv != OK && rv != ERR_IO_PENDING) {
     write_socket_watcher_.StopWatchingFileDescriptor();
     return rv;
@@ -468,7 +490,7 @@ int SocketPosix::DoConnect() {
   int rv = HANDLE_EINTR(
       connect(socket_fd_, peer_address_->addr(), peer_address_->addr_len));
   DCHECK_GE(0, rv);
-  return rv == 0 ? OK : MapConnectError(errno);
+  return rv == 0 ? OK : MapConnectError(errno, socket_fd_);
 }
 
 void SocketPosix::ConnectCompleted() {
@@ -480,7 +502,7 @@ void SocketPosix::ConnectCompleted() {
     errno = os_error;
   }
 
-  int rv = MapConnectError(errno);
+  int rv = MapConnectError(errno, socket_fd_);
   if (rv == ERR_IO_PENDING)
     return;
 
@@ -491,6 +513,9 @@ void SocketPosix::ConnectCompleted() {
 }
 
 int SocketPosix::DoRead(IOBuffer* buf, int buf_len) {
+  SCOPED_UMA_HISTOGRAM_TIMER_MICROS_SUBSAMPLED(
+      "Net.SocketPosix.DoReadDuration",
+      base::ShouldRecordSubsampledMetric(0.001));
   int rv = HANDLE_EINTR(read(socket_fd_, buf->data(), buf_len));
   return rv >= 0 ? rv : MapSystemError(errno);
 }

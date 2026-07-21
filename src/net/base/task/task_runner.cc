@@ -7,21 +7,18 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
 #include "base/rand_util.h"
+#include "base/task/single_thread_task_runner.h"
 
 namespace net {
 
 namespace {
-base::MetricsSubSampler& GetMetricsSubSampler() {
-  static base::MetricsSubSampler sampler;
-  return sampler;
-}
 
 }  // namespace
 
 const scoped_refptr<base::SingleThreadTaskRunner>& GetTaskRunner(
     RequestPriority priority) {
   // Sample with a 0.001 probability to reduce metrics overhead.
-  if (GetMetricsSubSampler().ShouldSample(0.001)) {
+  if (base::ShouldRecordSubsampledMetric(0.001)) {
     base::UmaHistogramEnumeration("Net.TaskRunner.RequestPriority", priority);
   }
 

@@ -146,7 +146,7 @@ class StringTokenizerT {
   // blocks the most obvious instances of this (e.g. passing a string literal to
   // the constructor), but caution must still be exercised.
   StringTokenizerT(
-      const str& string,
+      const str& string LIFETIME_BOUND,
       const owning_str& delims,
       WhitespacePolicy whitespace_policy = WhitespacePolicy::kIncludeInTokens) {
     Init(string.begin(), string.end(), delims, whitespace_policy);
@@ -376,13 +376,15 @@ class StringTokenizerT {
   WhitespacePolicy whitespace_policy_;
 };
 
-typedef StringTokenizerT<std::string, std::string::const_iterator>
-    StringTokenizer;
-typedef StringTokenizerT<std::string_view, std::string_view::const_iterator>
-    StringViewTokenizer;
-typedef StringTokenizerT<std::u16string, std::u16string::const_iterator>
-    String16Tokenizer;
-typedef StringTokenizerT<std::string, const char*> CStringTokenizer;
+using StringTokenizer =
+    StringTokenizerT<std::string, std::string::const_iterator>;
+using StringViewTokenizer =
+    StringTokenizerT<std::string_view, std::string_view::const_iterator>;
+using String16Tokenizer =
+    StringTokenizerT<std::u16string, std::u16string::const_iterator>;
+using StringView16Tokenizer =
+    StringTokenizerT<std::u16string_view, std::u16string_view::const_iterator>;
+using CStringTokenizer = StringTokenizerT<std::string, const char*>;
 
 }  // namespace base
 

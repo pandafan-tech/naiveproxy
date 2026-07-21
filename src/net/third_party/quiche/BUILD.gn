@@ -69,7 +69,6 @@ component("quiche") {
               "src/quiche/common/platform/default/quiche_platform_impl/quiche_flags_impl.h",
               "src/quiche/common/platform/default/quiche_platform_impl/quiche_time_utils_impl.cc",
               "src/quiche/common/platform/default/quiche_platform_impl/quiche_time_utils_impl.h",
-              "src/quiche/http2/hpack/hpack_static_table_entries.inc",
             ] + quiche_core_hdrs + quiche_core_srcs + binary_http_srcs +
             binary_http_hdrs + oblivious_http_srcs + oblivious_http_hdrs
 
@@ -122,7 +121,7 @@ proto_library("net_quic_test_tools_proto") {
   cc_include = "net/base/net_export.h"
   component_build_force_source_set = true
 
-  link_deps = [ "//net:net_export_header" ]
+  link_deps = [ "//net/base:net_export_header" ]
 
   defines = [ "NET_IMPLEMENTATION" ]
 

@@ -3,14 +3,11 @@
 // found in the LICENSE file.
 
 #include "base/feature_list.h"
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
 
 #include <stddef.h>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -18,7 +15,7 @@
 #include "base/base_switches.h"
 #include "base/check_is_test.h"
 #include "base/command_line.h"
-#include "base/containers/contains.h"
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/debug/crash_logging.h"
 #include "base/debug/dump_without_crashing.h"
@@ -30,6 +27,8 @@
 #include "base/metrics/field_trial.h"
 #include "base/metrics/field_trial_param_associator.h"
 #include "base/metrics/field_trial_params.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/metrics/metrics_hashes.h"
 #include "base/metrics/persistent_memory_allocator.h"
 #include "base/no_destructor.h"
 #include "base/notreached.h"
@@ -145,37 +144,39 @@ void DCheckOverridesAllowed() {}
 
 // An allocator entry for a feature in shared memory. The FeatureEntry is
 // followed by a base::Pickle object that contains the feature and trial name.
-struct FeatureEntry {
+class FeatureEntry {
+ public:
   // SHA1(FeatureEntry): Increment this if structure changes!
   static constexpr uint32_t kPersistentTypeId = 0x06567CA6 + 2;
 
   // Expected size for 32/64-bit check.
   static constexpr size_t kExpectedInstanceSize = 16;
 
-  // Specifies whether a feature override enables or disables the feature. Same
-  // values as the OverrideState enum in feature_list.h
-  uint32_t override_state;
+  static FeatureEntry* Create(PersistentMemoryAllocator* allocator,
+                              uint32_t override_state,
+                              const Pickle& pickle) {
+    size_t total_size = sizeof(FeatureEntry) + pickle.size();
+    FeatureEntry* entry = allocator->New<FeatureEntry>(total_size);
+    if (entry) {
+      entry->override_state_ = override_state;
+      entry->pickle_size_ = pickle.size();
+      entry->GetPickleData().copy_from(span(pickle));
+    }
+    return entry;
+  }
 
-  // On e.g. x86, alignof(uint64_t) is 4.  Ensure consistent size and alignment
-  // of `pickle_size` across platforms.
-  uint32_t padding;
+  FeatureEntry(const FeatureEntry&) = delete;
+  FeatureEntry& operator=(const FeatureEntry&) = delete;
 
-  // Size of the pickled structure, NOT the total size of this entry.
-  uint64_t pickle_size;
-
-  // Return a pointer to the pickled data area immediately following the entry.
-  uint8_t* GetPickledDataPtr() { return reinterpret_cast<uint8_t*>(this + 1); }
-  const uint8_t* GetPickledDataPtr() const {
-    return reinterpret_cast<const uint8_t*>(this + 1);
+  FeatureList::OverrideState override_state() const {
+    return static_cast<FeatureList::OverrideState>(override_state_);
   }
 
   // Reads the feature and trial name from the pickle. Calling this is only
   // valid on an initialized entry that's in shared memory.
   bool GetFeatureAndTrialName(std::string_view* feature_name,
                               std::string_view* trial_name) const {
-    Pickle pickle = Pickle::WithUnownedBuffer(
-        span(GetPickledDataPtr(), checked_cast<size_t>(pickle_size)));
-    PickleIterator pickle_iter(pickle);
+    PickleIterator pickle_iter = PickleIterator::WithData(GetPickleData());
     if (!pickle_iter.ReadStringPiece(feature_name)) {
       return false;
     }
@@ -183,6 +184,36 @@ struct FeatureEntry {
     std::ignore = pickle_iter.ReadStringPiece(trial_name);
     return true;
   }
+
+ private:
+  friend class ::base::PersistentMemoryAllocator;
+
+  FeatureEntry() = default;
+
+  // Return a span to the pickled data area immediately following the entry.
+  span<uint8_t> GetPickleData() {
+    // SAFETY: `Create()` guarantees that `pickle_size_` bytes are allocated for
+    // Pickle data immediately following FeatureEntry data.
+    return UNSAFE_BUFFERS(span(reinterpret_cast<uint8_t*>(this + 1),
+                               checked_cast<size_t>(pickle_size_)));
+  }
+  span<const uint8_t> GetPickleData() const {
+    // SAFETY: `Create()` guarantees that `pickle_size_` bytes are allocated for
+    // Pickle data immediately following FeatureEntry data.
+    return UNSAFE_BUFFERS(span(reinterpret_cast<const uint8_t*>(this + 1),
+                               checked_cast<size_t>(pickle_size_)));
+  }
+
+  // Specifies whether a feature override enables or disables the feature. Same
+  // values as the OverrideState enum in feature_list.h
+  uint32_t override_state_;
+
+  // On e.g. x86, alignof(uint64_t) is 4.  Ensure consistent size and alignment
+  // of `pickle_size` across platforms.
+  uint32_t padding_;
+
+  // Size of the pickled structure, NOT the total size of this entry.
+  uint64_t pickle_size_;
 };
 
 // Splits |text| into two parts by the |separator| where the first part will be
@@ -197,12 +228,18 @@ bool SplitIntoTwo(std::string_view text,
                   std::string* second) {
   std::vector<std::string_view> parts =
       SplitStringPiece(text, separator, TRIM_WHITESPACE, SPLIT_WANT_ALL);
-  if (parts.size() == 2) {
-    *second = std::string(parts[1]);
-  } else if (parts.size() > 2) {
+  if (parts.empty()) {
+    DLOG(ERROR) << "Using '" << separator << "' to split '" << text
+                << "' failed.";
+    return false;
+  }
+  if (parts.size() > 2) {
     DLOG(ERROR) << "Only one '" << separator
                 << "' is allowed but got: " << text;
     return false;
+  }
+  if (parts.size() == 2) {
+    *second = std::string(parts[1]);
   }
   *first = parts[0];
   return true;
@@ -253,15 +290,16 @@ bool ParseEnableFeatures(const std::string& enable_features,
 }
 
 std::pair<FeatureList::OverrideState, uint16_t> UnpackFeatureCache(
-    uint32_t packed_cache_value) {
+    Feature::FeatureStateCache packed_cache_value) {
   return std::make_pair(
       static_cast<FeatureList::OverrideState>(packed_cache_value >> 24),
       packed_cache_value & 0xFFFF);
 }
 
-uint32_t PackFeatureCache(FeatureList::OverrideState override_state,
-                          uint32_t caching_context) {
-  return (static_cast<uint32_t>(override_state) << 24) |
+Feature::FeatureStateCache PackFeatureCache(
+    FeatureList::OverrideState override_state,
+    uint32_t caching_context) {
+  return (static_cast<Feature::FeatureStateCache>(override_state) << 24) |
          (caching_context & 0xFFFF);
 }
 
@@ -269,6 +307,32 @@ uint32_t PackFeatureCache(FeatureList::OverrideState override_state,
 // to invalidate the cache member of `base::Feature` objects that were queried
 // with a different `FeatureList` installed.
 uint16_t g_current_caching_context = 1;
+
+void SetFeatureCachedBits(std::atomic<Feature::FeatureStateCache>& cached_value,
+                          Feature::FeatureStateCache new_value) {
+  // In non-test code, this value can be in one of 2 states: either it's unset,
+  // or another thread has updated it to the same value we're about to write.
+  // Because of this, a plain `store` yields the correct result in all cases.
+  // In test code, it's possible for a different thread to have installed a new
+  // `ScopedFeatureList` and written a value that's different than the one we're
+  // about to write, although that would be a thread safety violation already
+  // and such tests should be fixed.
+  Feature::FeatureStateCache expected =
+      cached_value.load(std::memory_order_relaxed);
+  Feature::FeatureStateCache value_to_store;
+
+  // We need to use a loop to preserve the logging bits (bits 16 and 17),
+  // which might be set concurrently by RegisterFeatureAccess(). A simple store
+  // would clear those bits.
+  do {
+    value_to_store = new_value | (expected & (Feature::kCachedLogGeneralMask |
+                                              Feature::kCachedLogEarlyMask));
+    // Note that compare_exchange_weak() will update `expected` if the value
+    // doesn't match.
+  } while (!cached_value.compare_exchange_weak(expected, value_to_store,
+                                               std::memory_order_relaxed,
+                                               std::memory_order_relaxed));
+}
 
 }  // namespace
 
@@ -346,8 +410,7 @@ void FeatureList::InitFromSharedMemory(PersistentMemoryAllocator* allocator) {
   PersistentMemoryAllocator::Iterator iter(allocator);
   const FeatureEntry* entry;
   while ((entry = iter.GetNextOfObject<FeatureEntry>()) != nullptr) {
-    OverrideState override_state =
-        static_cast<OverrideState>(entry->override_state);
+    OverrideState override_state = entry->override_state();
 
     std::string_view feature_name;
     std::string_view trial_name;
@@ -382,6 +445,7 @@ void FeatureList::AssociateReportingFieldTrial(
     const std::string& feature_name,
     OverrideState for_overridden_state,
     FieldTrial* field_trial) {
+  DCHECK(!initialized_);
   DCHECK(
       IsFeatureOverriddenFromCommandLine(feature_name, for_overridden_state));
 
@@ -432,15 +496,11 @@ void FeatureList::AddFeaturesToAllocator(PersistentMemoryAllocator* allocator) {
       pickle.WriteString(override.second.field_trial->trial_name());
     }
 
-    size_t total_size = sizeof(FeatureEntry) + pickle.size();
-    FeatureEntry* entry = allocator->New<FeatureEntry>(total_size);
+    FeatureEntry* entry = FeatureEntry::Create(
+        allocator, override.second.overridden_state, pickle);
     if (!entry) {
       return;
     }
-
-    entry->override_state = override.second.overridden_state;
-    entry->pickle_size = pickle.size();
-    memcpy(entry->GetPickledDataPtr(), pickle.data(), pickle.size());
 
     allocator->MakeIterable(entry);
   }
@@ -461,8 +521,11 @@ void FeatureList::GetCommandLineFeatureOverrides(
 
 // static
 bool FeatureList::IsEnabled(const Feature& feature) {
+  RegisterFeatureAccess(feature, Feature::kCachedLogGeneralMask);
+
   if (!g_feature_list_instance ||
       !g_feature_list_instance->AllowFeatureAccess(feature)) {
+    RegisterFeatureAccess(feature, Feature::kCachedLogEarlyMask);
     EarlyFeatureAccessTracker::GetInstance()->AccessedFeature(
         feature, g_feature_list_instance &&
                      g_feature_list_instance->IsEarlyAccessInstance());
@@ -584,7 +647,7 @@ bool FeatureList::InitInstance(
     instance_existed_before = true;
   }
 
-  std::unique_ptr<FeatureList> feature_list(new FeatureList);
+  auto feature_list = std::make_unique<FeatureList>();
   feature_list->InitFromCommandLine(enable_features, disable_features);
   feature_list->RegisterExtraFeatureOverrides(extra_overrides);
   FeatureList::SetInstance(std::move(feature_list));
@@ -681,6 +744,11 @@ void FeatureList::ResetEarlyFeatureAccessTrackerForTesting() {
   EarlyFeatureAccessTracker::GetInstance()->Reset();
 }
 
+// static
+void FeatureList::ClearFeatureCachedValueForTesting(const Feature& feature) {
+  feature.cached_value.store(0, std::memory_order_relaxed);
+}
+
 void FeatureList::AddEarlyAllowedFeatureForTesting(std::string feature_name) {
   CHECK(IsEarlyAccessInstance());
   allowed_feature_names_.insert(std::move(feature_name));
@@ -736,6 +804,37 @@ void FeatureList::VisitFeaturesAndParams(FeatureVisitor& visitor,
   }
 }
 
+// static
+void FeatureList::RegisterFeatureAccess(
+    const Feature& feature,
+    Feature::FeatureStateCache logging_mask) {
+  Feature::FeatureStateCache expected =
+      feature.cached_value.load(std::memory_order_relaxed);
+
+  while ((expected & logging_mask) != logging_mask) {
+    Feature::FeatureStateCache new_value = expected | logging_mask;
+    // Note that compare_exchange_weak() will update `expected` if the value
+    // doesn't match.
+    if (feature.cached_value.compare_exchange_weak(expected, new_value,
+                                                   std::memory_order_relaxed,
+                                                   std::memory_order_relaxed)) {
+      if ((logging_mask & Feature::kCachedLogGeneralMask) &&
+          (expected & Feature::kCachedLogGeneralMask) == 0) {
+        base::UmaHistogramSparse(
+            "Variations.FeatureAccess",
+            static_cast<int>(base::HashFieldTrialName(feature.name)));
+      }
+      if ((logging_mask & Feature::kCachedLogEarlyMask) &&
+          (expected & Feature::kCachedLogEarlyMask) == 0) {
+        base::UmaHistogramSparse(
+            "Variations.FeatureAccessEarly",
+            static_cast<int>(base::HashFieldTrialName(feature.name)));
+      }
+      return;
+    }
+  }
+}
+
 void FeatureList::FinalizeInitialization() {
   DCHECK(!initialized_);
   // Store the field trial list pointer for DCHECKing.
@@ -777,7 +876,7 @@ FeatureList::OverrideState FeatureList::GetOverrideState(
          "components (shared libraries) without a corresponding export "
          "statement";
 
-  uint32_t current_cache_value =
+  Feature::FeatureStateCache current_cache_value =
       feature.cached_value.load(std::memory_order_relaxed);
 
   auto unpacked = UnpackFeatureCache(current_cache_value);
@@ -787,17 +886,11 @@ FeatureList::OverrideState FeatureList::GetOverrideState(
   }
 
   OverrideState state = GetOverrideStateByFeatureName(feature.name);
-  uint32_t new_cache_value = PackFeatureCache(state, caching_context_);
+  Feature::FeatureStateCache new_cache_value =
+      PackFeatureCache(state, caching_context_);
 
   // Update the cache with the new value.
-  // In non-test code, this value can be in one of 2 states: either it's unset,
-  // or another thread has updated it to the same value we're about to write.
-  // Because of this, a plain `store` yields the correct result in all cases.
-  // In test code, it's possible for a different thread to have installed a new
-  // `ScopedFeatureList` and written a value that's different than the one we're
-  // about to write, although that would be a thread safety violation already
-  // and such tests should be fixed.
-  feature.cached_value.store(new_cache_value, std::memory_order_relaxed);
+  SetFeatureCachedBits(feature.cached_value, new_cache_value);
 
   return state;
 }
@@ -921,9 +1014,8 @@ void FeatureList::RegisterOverride(std::string_view feature_name,
 
   // When `replace_use_default_overrides` is true, if an `OVERRIDE_USE_DEFAULT`
   // entry exists, it should be replaced.
-  const std::string feature_name_str(feature_name);
   if (replace_use_default_overrides) {
-    auto found = overrides_.find(feature_name_str);
+    auto found = overrides_.find(feature_name);
     if (found != overrides_.end() &&
         found->second.overridden_state == OVERRIDE_USE_DEFAULT) {
       // Also, keep the existing trial if a null trial was passed.
@@ -933,11 +1025,10 @@ void FeatureList::RegisterOverride(std::string_view feature_name,
     }
   }
 
-  // Note: The semantics of emplace() is that it does not overwrite the entry if
-  // one already exists for the key. Thus, only the first override for a given
-  // feature name takes effect.
-  overrides_.emplace(feature_name_str,
-                     OverrideEntry(overridden_state, field_trial));
+  // Note: The semantics of try_emplace() is that it does not overwrite the
+  // entry if one already exists for the key. Thus, only the first override for
+  // a given feature name takes effect.
+  overrides_.try_emplace(feature_name, overridden_state, field_trial);
 }
 
 void FeatureList::GetFeatureOverridesImpl(std::string* enable_overrides,
@@ -1021,7 +1112,7 @@ bool FeatureList::AllowFeatureAccess(const Feature& feature) const {
   if (!IsEarlyAccessInstance()) {
     return true;
   }
-  return base::Contains(allowed_feature_names_, feature.name);
+  return allowed_feature_names_.contains(feature.name);
 }
 
 FeatureList::OverrideEntry::OverrideEntry(OverrideState overridden_state,
@@ -1040,7 +1131,7 @@ FeatureList::OverrideState FeatureList::Accessor::GetOverrideStateByFeatureName(
 
 bool FeatureList::Accessor::GetParamsByFeatureName(
     std::string_view feature_name,
-    std::map<std::string, std::string>* params) {
+    FieldTrialParams* params) {
   base::FieldTrial* trial =
       feature_list_->GetAssociatedFieldTrialByFeatureName(feature_name);
   return FieldTrialParamAssociator::GetInstance()->GetFieldTrialParams(trial,

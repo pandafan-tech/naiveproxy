@@ -93,7 +93,8 @@ SCHED_SLICE_TABLE = Table(
 SPURIOUS_SCHED_WAKEUP_TABLE = Table(
     python_module=__file__,
     class_name='SpuriousSchedWakeupTable',
-    sql_name='spurious_sched_wakeup',
+    sql_name='__intrinsic_spurious_sched_wakeup',
+    wrapping_sql_view=WrappingSqlView('spurious_sched_wakeup'),
     columns=[
         C('ts', CppInt64(), flags=ColumnFlag.SORTED),
         C('thread_state_id', CppInt64()),
@@ -161,7 +162,11 @@ THREAD_STATE_TABLE = Table(
             CppOptional(CppUint32()),
             cpp_access=CppAccess.READ_AND_LOW_PERF_WRITE,
         ),
-        C('waker_id', CppOptional(CppSelfTableId())),
+        C(
+            'waker_id',
+            CppOptional(CppSelfTableId()),
+            cpp_access=CppAccess.READ,
+        ),
         C(
             'irq_context',
             CppOptional(CppUint32()),

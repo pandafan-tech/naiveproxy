@@ -32,7 +32,7 @@
 
 #include "perfetto/base/logging.h"
 #include "perfetto/base/status.h"
-#include "perfetto/ext/base/fnv_hash.h"
+#include "perfetto/ext/base/murmur_hash.h"
 #include "perfetto/ext/base/status_macros.h"
 #include "perfetto/ext/base/string_utils.h"
 #include "perfetto/ext/base/string_view.h"
@@ -40,15 +40,18 @@
 #include "perfetto/public/compiler.h"
 #include "perfetto/trace_processor/trace_blob_view.h"
 #include "src/trace_processor/containers/string_pool.h"
+#include "src/trace_processor/importers/common/clock_tracker.h"
 #include "src/trace_processor/importers/common/legacy_v8_cpu_profile_tracker.h"
 #include "src/trace_processor/importers/common/parser_types.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
+#include "src/trace_processor/importers/common/v8_profile_parser.h"
 #include "src/trace_processor/importers/json/json_trace_parser.h"
 #include "src/trace_processor/importers/systrace/systrace_line.h"
 #include "src/trace_processor/sorter/trace_sorter.h"  // IWYU pragma: keep
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
+#include "src/trace_processor/util/clock_synchronizer.h"
 #include "src/trace_processor/util/json_parser.h"
-#include "src/trace_processor/util/json_utils.h"
 
 namespace perfetto::trace_processor {
 namespace {
@@ -327,7 +330,7 @@ void ParseId2(json::Iterator& inner_it,
               std::optional<IdResult>& id2_global) {
   inner_it.Reset(id2.data(), id2.data() + id2.size());
   if (!inner_it.ParseStart()) {
-    context->storage->IncrementStats(stats::json_tokenizer_failure);
+    context->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
     return;
   }
   for (;;) {
@@ -336,7 +339,7 @@ void ParseId2(json::Iterator& inner_it,
       case State::kEndOfScope:
         break;
       case State::kError:
-        context->storage->IncrementStats(stats::json_tokenizer_failure);
+        context->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
         return;
       case State::kIncompleteInput:
         PERFETTO_FATAL("Unexpected incomplete input in JSON object for id2");
@@ -488,7 +491,8 @@ JsonTraceTokenizer::JsonTraceTokenizer(TraceProcessorContext* ctx)
       systrace_stream_(context_->sorter->CreateStream(
           std::make_unique<SystraceSink>(&parser_))),
       v8_stream_(context_->sorter->CreateStream(
-          std::make_unique<V8Sink>(v8_tracker_.get()))) {}
+          std::make_unique<V8Sink>(v8_tracker_.get()))),
+      trace_file_clock_(ClockId::TraceFile(ctx->trace_id().value)) {}
 JsonTraceTokenizer::~JsonTraceTokenizer() = default;
 
 base::Status JsonTraceTokenizer::Parse(TraceBlobView blob) {
@@ -616,15 +620,12 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
       std::string_view ph = GetStringValue(it_.value());
       event.phase = ph.size() >= 1 ? ph[0] : '\0';
     } else if (it_.key() == "ts") {
-      if (!CoerceToTs(it_.value(), ts, status)) {
-        PERFETTO_DLOG("%s", status.c_message());
-        context_->storage->IncrementStats(stats::json_tokenizer_failure);
-        return false;
-      }
+      // On failure, ts remains at max() which will be handled below.
+      CoerceToTs(it_.value(), ts, status);
     } else if (it_.key() == "dur") {
       if (!CoerceToTs(it_.value(), event.dur, status)) {
         PERFETTO_DLOG("%s", status.c_message());
-        context_->storage->IncrementStats(stats::json_tokenizer_failure);
+        context_->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
         return false;
       }
     } else if (it_.key() == "pid") {
@@ -727,13 +728,13 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
     } else if (it_.key() == "tts") {
       if (!CoerceToTs(it_.value(), event.tts, status)) {
         PERFETTO_DLOG("%s", status.c_message());
-        context_->storage->IncrementStats(stats::json_tokenizer_failure);
+        context_->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
         return false;
       }
     } else if (it_.key() == "tdur") {
       if (!CoerceToTs(it_.value(), event.tdur, status)) {
         PERFETTO_DLOG("%s", status.c_message());
-        context_->storage->IncrementStats(stats::json_tokenizer_failure);
+        context_->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
         return false;
       }
     } else if (it_.key() == "args") {
@@ -751,13 +752,14 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
     }
   }
   if (!event.phase) {
-    context_->storage->IncrementStats(stats::json_tokenizer_failure);
+    context_->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
     return true;
   }
-  // Metadata events may omit ts. In all other cases error.
+  // Don't check ts for metadata events. In all other cases error.
   if (ts == std::numeric_limits<int64_t>::max()) {
     if (event.phase != 'M') {
-      context_->storage->IncrementStats(stats::json_tokenizer_failure);
+      PERFETTO_DLOG("%s", status.c_message());
+      context_->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
       return true;
     }
     // If the event is a metadata event, we can set ts to 0.
@@ -772,14 +774,14 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
   if (PERFETTO_LIKELY(event.id_type == JsonEvent::IdType::kNone)) {
     if (PERFETTO_UNLIKELY(id2_global)) {
       event.async_cookie_type = JsonEvent::AsyncCookieType::kId2Global;
-      event.async_cookie = static_cast<int64_t>(base::FnvHasher::Combine(
+      event.async_cookie = static_cast<int64_t>(base::MurmurHashCombine(
           event.cat.raw_id(),
           id2_global->type == JsonEvent::IdType::kString
               ? static_cast<uint64_t>(id2_global->id.id_str.raw_id())
               : id2_global->id.id_uint64));
     } else if (PERFETTO_UNLIKELY(id2_local)) {
       event.async_cookie_type = JsonEvent::AsyncCookieType::kId2Local;
-      event.async_cookie = static_cast<int64_t>(base::FnvHasher::Combine(
+      event.async_cookie = static_cast<int64_t>(base::MurmurHashCombine(
           event.cat.raw_id(),
           id2_local->type == JsonEvent::IdType::kString
               ? static_cast<uint64_t>(id2_local->id.id_str.raw_id())
@@ -788,20 +790,23 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
   } else if (event.id_type == JsonEvent::IdType::kString) {
     event.async_cookie_type = JsonEvent::AsyncCookieType::kId;
     event.async_cookie = static_cast<int64_t>(
-        base::FnvHasher::Combine(event.cat.raw_id(), event.id.id_str.raw_id()));
+        base::MurmurHashCombine(event.cat.raw_id(), event.id.id_str.raw_id()));
   } else if (event.id_type == JsonEvent::IdType::kUint64) {
     event.async_cookie_type = JsonEvent::AsyncCookieType::kId;
     event.async_cookie = static_cast<int64_t>(
-        base::FnvHasher::Combine(event.cat.raw_id(), event.id.id_uint64));
+        base::MurmurHashCombine(event.cat.raw_id(), event.id.id_uint64));
   }
   if (PERFETTO_UNLIKELY(event.phase == 'P')) {
     if (status = ParseV8SampleEvent(event); !status.ok()) {
-      context_->storage->IncrementStats(stats::json_tokenizer_failure);
+      context_->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
       return true;
     }
     return true;
   }
-  json_stream_->Push(ts, std::move(event));
+  auto trace_ts = context_->clock_tracker->ToTraceTime(trace_file_clock_, ts);
+  if (trace_ts) {
+    json_stream_->Push(*trace_ts, std::move(event));
+  }
   return true;
 }
 
@@ -811,7 +816,7 @@ base::Status JsonTraceTokenizer::ParseV8SampleEvent(const JsonEvent& event) {
     std::optional<uint64_t> id_opt = base::StringToUInt64(
         context_->storage->GetString(event.id.id_str).c_str(), 16);
     if (!id_opt) {
-      context_->storage->IncrementStats(stats::json_tokenizer_failure);
+      context_->stats_tracker->IncrementStats(stats::json_tokenizer_failure);
       return base::OkStatus();
     }
     id = *id_opt;
@@ -820,55 +825,49 @@ base::Status JsonTraceTokenizer::ParseV8SampleEvent(const JsonEvent& event) {
   } else {
     return base::OkStatus();
   }
-  auto args = json::ParseJsonString(
-      base::StringView(event.args.get(), event.args_size));
-  if (!args) {
+
+  auto profile_or =
+      ParseV8ProfileArgs(std::string_view(event.args.get(), event.args_size));
+  if (!profile_or.ok()) {
     return base::OkStatus();
   }
-  const auto& val = (*args)["data"];
-  if (val.isMember("startTime")) {
+  const V8Profile& profile = *profile_or;
+
+  if (profile.start_time) {
     v8_tracker_->SetStartTsForSessionAndPid(id, event.pid,
-                                            val["startTime"].asInt64() * 1000);
+                                            *profile.start_time * 1000);
     return base::OkStatus();
   }
-  const auto& profile = val["cpuProfile"];
-  for (const auto& n : profile["nodes"]) {
-    uint32_t node_id = n["id"].asUInt();
-    std::optional<uint32_t> parent_node_id;
-    if (n.isMember("parent")) {
-      parent_node_id = std::make_optional(n["parent"].asUInt());
-    }
-    std::vector<uint32_t> children;
-    if (n.isMember("children")) {
-      children.reserve(n.size());
-      for (const auto& c : n["children"]) {
-        children.push_back(c.asUInt());
-      }
-    }
-    const auto& frame = n["callFrame"];
-    base::StringView url =
-        frame.isMember("url") ? frame["url"].asCString() : base::StringView();
-    base::StringView function_name = frame["functionName"].asCString();
+
+  for (const auto& node : profile.nodes) {
+    base::StringView url = node.call_frame.url
+                               ? base::StringView(*node.call_frame.url)
+                               : base::StringView();
+    base::StringView function_name =
+        base::StringView(node.call_frame.function_name);
     base::Status status = v8_tracker_->AddCallsite(
-        id, event.pid, node_id, parent_node_id, url, function_name, children);
+        id, event.pid, node.id, node.parent, url, function_name, node.children);
     if (!status.ok()) {
-      context_->storage->IncrementStats(
+      context_->stats_tracker->IncrementStats(
           stats::legacy_v8_cpu_profile_invalid_callsite);
       continue;
     }
   }
-  const auto& samples = profile["samples"];
-  const auto& deltas = val["timeDeltas"];
-  if (samples.size() != deltas.size()) {
+
+  if (profile.samples.size() != profile.time_deltas.size()) {
     return base::ErrStatus(
         "v8 legacy profile: samples and timestamps do not have same size");
   }
-  for (uint32_t i = 0; i < samples.size(); ++i) {
+  for (uint32_t i = 0; i < profile.samples.size(); ++i) {
     ASSIGN_OR_RETURN(int64_t ts,
-                     v8_tracker_->AddDeltaAndGetTs(id, event.pid,
-                                                   deltas[i].asInt64() * 1000));
-    v8_stream_->Push(ts, LegacyV8CpuProfileEvent{id, event.pid, event.tid,
-                                                 samples[i].asUInt()});
+                     v8_tracker_->AddDeltaAndGetTs(
+                         id, event.pid, profile.time_deltas[i] * 1000));
+    auto trace_ts = context_->clock_tracker->ToTraceTime(trace_file_clock_, ts);
+    if (trace_ts) {
+      v8_stream_->Push(*trace_ts,
+                       LegacyV8CpuProfileEvent{id, event.pid, event.tid,
+                                               profile.samples[i]});
+    }
   }
   return base::OkStatus();
 }
@@ -931,7 +930,7 @@ base::Status JsonTraceTokenizer::HandleDictionaryKey(const char* start,
     auto result = ReadOneJsonString(next, end, &time_unit, &next);
     if (result == ReadStringRes::kFatalError)
       return base::ErrStatus("Could not parse displayTimeUnit");
-    context_->storage->IncrementStats(stats::json_display_time_unit);
+    context_->stats_tracker->IncrementStats(stats::json_display_time_unit);
     return ParseInternal(next, end, out);
   }
 
@@ -982,12 +981,17 @@ base::Status JsonTraceTokenizer::HandleSystemTraceEvent(const char* start,
 
     SystraceLine line;
     RETURN_IF_ERROR(systrace_line_tokenizer_.Tokenize(raw_line, &line));
-    systrace_stream_->Push(line.ts, std::move(line));
+    auto trace_ts =
+        context_->clock_tracker->ToTraceTime(trace_file_clock_, line.ts);
+    if (trace_ts) {
+      systrace_stream_->Push(*trace_ts, std::move(line));
+    }
   }
   return SetOutAndReturn(next, out);
 }
 
-base::Status JsonTraceTokenizer::NotifyEndOfFile() {
+base::Status JsonTraceTokenizer::OnPushDataToSorter() {
+  // Phase 1: Validate trace is complete
   return position_ == TracePosition::kEof ||
                  (position_ == TracePosition::kInsideTraceEventsArray &&
                   format_ == TraceFormat::kOnlyTraceEvents)

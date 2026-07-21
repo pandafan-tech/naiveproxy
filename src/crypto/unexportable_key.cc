@@ -8,8 +8,8 @@
 #include "base/functional/bind.h"
 #if BUILDFLAG(IS_WIN)
 #include "crypto/unexportable_key_win.h"
-#elif BUILDFLAG(IS_MAC)
-#include "crypto/apple/unexportable_key_mac.h"
+#elif BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_IOS_TVOS)
+#include "crypto/apple/unexportable_key_apple.h"
 #endif
 
 namespace crypto {
@@ -18,13 +18,30 @@ namespace {
 std::unique_ptr<UnexportableKeyProvider> (*g_mock_provider)() = nullptr;
 }  // namespace
 
-UnexportableSigningKey::~UnexportableSigningKey() = default;
 UnexportableKeyProvider::~UnexportableKeyProvider() = default;
+
+std::unique_ptr<UnexportableAttestationKey>
+UnexportableKeyProvider::GenerateAttestationKeySlowly(
+    base::span<const SignatureVerifier::SignatureAlgorithm>
+        acceptable_algorithms) {
+  return nullptr;
+}
+
+std::unique_ptr<UnexportableAttestationKey>
+UnexportableKeyProvider::FromWrappedAttestationKeySlowly(
+    base::span<const uint8_t> wrapped_key) {
+  return nullptr;
+}
+
 VirtualUnexportableSigningKey::~VirtualUnexportableSigningKey() = default;
 VirtualUnexportableKeyProvider::~VirtualUnexportableKeyProvider() = default;
 
-bool UnexportableSigningKey::IsHardwareBacked() const {
+bool UnexportableKey::IsHardwareBacked() const {
   return false;
+}
+
+const StatefulKey* UnexportableKey::AsStatefulKey() const {
+  return nullptr;
 }
 
 std::unique_ptr<UnexportableKeyProvider> GetUnexportableKeyProvider(
@@ -35,8 +52,8 @@ std::unique_ptr<UnexportableKeyProvider> GetUnexportableKeyProvider(
 
 #if BUILDFLAG(IS_WIN)
   return GetUnexportableKeyProviderWin();
-#elif BUILDFLAG(IS_MAC)
-  return apple::GetUnexportableKeyProviderMac(std::move(config));
+#elif BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_IOS_TVOS)
+  return apple::GetUnexportableKeyProviderApple(std::move(config));
 #else
   return nullptr;
 #endif

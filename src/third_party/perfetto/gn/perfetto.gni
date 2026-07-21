@@ -78,6 +78,10 @@ if (!defined(is_qnx)) {
   is_qnx = false
 }
 
+if (!defined(is_freebsd)) {
+  is_freebsd = false
+}
+
 declare_args() {
   # The Android blueprint file generator set this to true (as well as
   # is_perfetto_build_generator). This is just about being built in the
@@ -93,14 +97,17 @@ declare_args() {
   # based on GN (e.g. v8) should NOT set this and instead directly sets
   # perfetto_build_with_embedder=true in their GN files.
   is_perfetto_embedder = false
+
+  # Comma-separated list of additional CORS origins to allow in trace_processor
+  # and websocket_bridge.
+  perfetto_http_additional_cors_origins = ""
 }
 
 # This can be overridden by embedders (e.g. v8) in their .gn(i) files. This must
 # be different from the GN args flag (is_perfetto_embedder) because of the way
 # GN works.
-# Force embedder mode for naive/cronet builds.
 if (!defined(perfetto_build_with_embedder)) {
-  perfetto_build_with_embedder = true
+  perfetto_build_with_embedder = build_with_chromium || is_perfetto_embedder
 }
 
 # Controls whether the `libperfetto` target bundles the JSON export code in its
@@ -212,6 +219,14 @@ declare_args() {
   enable_perfetto_android_java_sdk =
       perfetto_build_with_android || (is_android && perfetto_build_standalone)
 
+  # Path to a host JDK include directory that contains jni.h. When set,
+  # the host-supported targets that build libperfetto_jni and its Java
+  # proto codegen use this and its platform-specific subdirectory as
+  # additional include paths. Empty (default) on Android / AOSP builds,
+  # where jni.h comes from the NDK / jni_headers; populated by
+  # tools/run_android_sdk_host_test from $JAVA_HOME.
+  jdk_include_path = ""
+
   enable_perfetto_benchmarks = perfetto_build_standalone && !is_win && !is_qnx
 
   enable_perfetto_fuzzers =
@@ -231,7 +246,8 @@ declare_args() {
   # dllexport/import adds extra complexity for little benefit. Te only reason
   # for monolithic_binaries=false is saving binary size, which matters mainly on
   # Android. See also comments on PERFETTO_EXPORT_ENTRYPOINT in compiler.h.
-  monolithic_binaries = !perfetto_build_with_android && (is_win || is_mac)
+  monolithic_binaries =
+      !perfetto_build_with_android && (is_win || is_mac || is_freebsd)
 
   # Whether DLOG should be enabled on debug builds (""), all builds ("on"), or
   # none ("off"). We disable it by default for embedders to avoid spamming their
@@ -271,10 +287,19 @@ declare_args() {
   # Enables the use of priority-inheritance mutexes via PTHREAD_PRIO_INHERIT
   # or wrapper around PI Futexes (dependant on OS).
   # Note that on Android platform (non-standalone) builds this flag is ignored
-  # and Android flags "use_rt_mutex", "use_rt_futex" are used instead (perfetto_flags.aconfig)
+  # and RtFutex is always used unconditionally.
   # This is disabled in chromium, because the BPF-sandbox allows PI-futex only
   # when a field-trial is enabled, which is incompatible with a build time flag.
   enable_perfetto_rt_mutex =
+      !is_wasm && (perfetto_build_standalone || is_perfetto_build_generator) &&
+      !build_with_chromium
+
+  # This flag enables the use of inotify on AF_UNIX sockets to re-connect when
+  # the server disconnects. Disabled in chromium as inotify is not allowed by
+  # Chrome's seccomp sandbox (b/470556120).
+  # On Android platform (non-standalone) builds this flag is ignored. The flag
+  # "use_unix_socket_inotify" is used instead (see perfetto_flags.aconfig).
+  enable_perfetto_sock_inotify =
       !is_wasm && (perfetto_build_standalone || is_perfetto_build_generator) &&
       !build_with_chromium
 
@@ -364,6 +389,15 @@ declare_args() {
   enable_perfetto_zlib =
       enable_perfetto_trace_processor || enable_perfetto_platform_services
 
+  # Enables PCRE2 support. Individual modules that should not pull libpcre2
+  # in (e.g. libperfetto_client_experimental) can opt out by setting
+  # -DPERFETTO_REGEX_FORCE_STD on their compile, which makes base::Regex
+  # fall back to the std::regex backend.
+  enable_perfetto_pcre2 = perfetto_build_with_android
+
+  # Enables RE2 support.
+  enable_perfetto_re2 = perfetto_build_standalone || build_with_chromium
+
   # Enables function name demangling using sources from llvm. Otherwise
   # trace_processor falls back onto using the c++ runtime demangler, which
   # typically handles only itanium mangling.
@@ -396,6 +430,9 @@ declare_args() {
 }
 
 declare_args() {
+  # Enables the protovm_compiler tool.
+  enable_perfetto_protovm_compiler = enable_perfetto_tools
+
   # Enables the traceconv tool.
   enable_perfetto_traceconv =
       enable_perfetto_tools && enable_perfetto_trace_processor_sqlite
@@ -435,6 +472,10 @@ declare_args() {
   perfetto_use_system_sqlite = false
 
   perfetto_use_system_zlib = false
+
+  # Set by the amalgamated SDK build. Defaults the optional zlib/re2 features
+  # to off; the consumer opts in via perfetto_sdk_config.h (see build_config.h).
+  perfetto_amalgamated_sdk = false
 }
 
 if (is_win) {

@@ -9,8 +9,11 @@
 #include <utility>
 
 #include "base/containers/flat_set.h"
+#include "base/memory_coordinator/memory_coordinator_features.h"
+#include "base/memory_coordinator/utils.h"
 #include "base/time/clock.h"
 #include "base/time/default_clock.h"
+#include "net/base/features.h"
 #include "third_party/boringssl/src/include/openssl/ssl.h"
 
 namespace net {
@@ -46,12 +49,14 @@ bool SSLClientSessionCache::Key::operator<(const Key& other) const {
 SSLClientSessionCache::SSLClientSessionCache(const Config& config)
     : clock_(base::DefaultClock::GetInstance()),
       config_(config),
-      cache_(config.max_entries) {
-  memory_pressure_listener_registration_ =
-      std::make_unique<base::AsyncMemoryPressureListenerRegistration>(
-          FROM_HERE, base::MemoryPressureListenerTag::kSSLClientSessionCache,
-          this);
-}
+      cache_(config.max_entries),
+      memory_consumer_registration_(
+          "SSLClientSessionCache",
+          std::nullopt,  // TODO(crbug.com/489671163): Add traits.
+          this,
+          base::AsyncMemoryConsumerRegistration::CheckUnregister::kDisabled,
+          base::AsyncMemoryConsumerRegistration::CheckRegistryExists::
+              kDisabled) {}
 
 SSLClientSessionCache::~SSLClientSessionCache() {
   Flush();
@@ -59,6 +64,10 @@ SSLClientSessionCache::~SSLClientSessionCache() {
 
 size_t SSLClientSessionCache::size() const {
   return cache_.size();
+}
+
+size_t SSLClientSessionCache::max_size() const {
+  return cache_.max_size();
 }
 
 bssl::UniquePtr<SSL_SESSION> SSLClientSessionCache::Lookup(
@@ -92,8 +101,15 @@ void SSLClientSessionCache::Insert(uint64_t generation_number,
     return;
   }
   auto iter = cache_.Get(cache_key);
-  if (iter == cache_.end())
+  if (iter == cache_.end()) {
     iter = cache_.Put(cache_key, Entry());
+  }
+
+  // Insertion can fail if the max size was zero due to memory pressure.
+  if (iter == cache_.end()) {
+    CHECK_EQ(cache_.max_size(), 0U);
+    return;
+  }
   iter->second.Push(std::move(session));
 }
 
@@ -202,17 +218,41 @@ void SSLClientSessionCache::FlushExpiredSessions() {
   }
 }
 
-void SSLClientSessionCache::OnMemoryPressure(
-    base::MemoryPressureLevel memory_pressure_level) {
-  switch (memory_pressure_level) {
-    case base::MEMORY_PRESSURE_LEVEL_NONE:
-      break;
-    case base::MEMORY_PRESSURE_LEVEL_MODERATE:
-      FlushExpiredSessions();
-      break;
-    case base::MEMORY_PRESSURE_LEVEL_CRITICAL:
-      Flush();
-      break;
+void SSLClientSessionCache::OnUpdateMemoryLimit() {
+  if (!base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    return;
+  }
+
+  size_t target_size =
+      base::ScaleByMemoryLimit(config_.max_entries, memory_limit());
+
+  // IMPORTANT: Ensure no memory is released during this call.
+  // By using std::max, we ensure the new limit is at least the current size,
+  // preventing growth without triggering immediate eviction.
+  cache_.UpdateMaxSize(std::max(cache_.size(), target_size));
+}
+
+void SSLClientSessionCache::OnReleaseMemory() {
+  if (base::FeatureList::IsEnabled(
+          features::kIgnoreMemoryPressureForSslClientSessionCache)) {
+    // We don't want to clear the SSL session cache because the entries in it
+    // are highly likely to be used again soon, and it causes more
+    // fragmentation and increases user latency to clear it, then spend
+    // additional roundtrips replacing all of the entries.
+    return;
+  }
+  if (base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    // Now we actually evict entries to reach the target size.
+    cache_.UpdateMaxSize(
+        base::ScaleByMemoryLimit(config_.max_entries, memory_limit()));
+    return;
+  }
+
+  // Preserve the traditional "one-shot" logic for legacy memory pressure.
+  if (memory_limit() <= base::kCriticalMemoryPressureThreshold) {
+    Flush();
+  } else if (memory_limit() <= base::kModerateMemoryPressureThreshold) {
+    FlushExpiredSessions();
   }
 }
 

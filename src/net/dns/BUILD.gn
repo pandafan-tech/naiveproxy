@@ -4,6 +4,8 @@
 
 import("//net/features.gni")
 
+enable_built_in_dns = use_blink
+
 source_set("dns") {
   # Due to circular dependencies, should only be depended on through //net.
   visibility = [
@@ -25,13 +27,18 @@ source_set("dns") {
     "context_host_resolver.h",
     "dns_alias_utility.cc",
     "dns_alias_utility.h",
+    "dns_attempt.cc",
+    "dns_attempt.h",
     "dns_config.cc",
     "dns_config_service.cc",
     "dns_config_service.h",
     "dns_hosts.cc",
     "dns_hosts.h",
+    "dns_http_attempt.cc",
+    "dns_http_attempt.h",
     "dns_names_util.cc",
     "dns_names_util.h",
+    "dns_platform_attempt_factory.h",
     "dns_query.cc",
     "dns_query.h",
     "dns_reloader.cc",
@@ -45,7 +52,11 @@ source_set("dns") {
     "dns_session.h",
     "dns_task_results_manager.cc",
     "dns_task_results_manager.h",
+    "dns_tcp_attempt.cc",
+    "dns_tcp_attempt.h",
     "dns_transaction.cc",
+    "dns_udp_attempt.cc",
+    "dns_udp_attempt.h",
     "dns_udp_tracker.cc",
     "dns_udp_tracker.h",
     "dns_util.cc",
@@ -126,10 +137,25 @@ source_set("dns") {
 
   if (is_android) {
     sources += [
+      "dns_platform_android_attempt.cc",
+      "dns_platform_android_attempt.h",
+      "dns_platform_attempt_factory_android.cc",
+      "dns_platform_attempt_factory_android.h",
+    ]
+  } else {
+    sources += [
+      # These are specific here, instead of the main sources, to make sure they
+      # cannot be references while compiling for Android. Doing so is always a
+      # mistake.
+      "dns_platform_attempt_factory_not_implemented.cc",
+      "dns_platform_attempt_factory_not_implemented.h",
+    ]
+  }
+
+  if (is_android) {
+    sources += [
       "dns_config_service_android.cc",
       "dns_config_service_android.h",
-      "platform_dns_query_executor_android.cc",
-      "platform_dns_query_executor_android.h",
     ]
   } else if (is_linux) {
     sources += [

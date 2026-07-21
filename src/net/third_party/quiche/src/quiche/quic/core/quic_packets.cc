@@ -122,13 +122,13 @@ size_t GetPacketHeaderSize(
     if (include_diversification_nonce) {
       size += kDiversificationNonceSize;
     }
-    if (VersionHasLengthPrefixedConnectionIds(version)) {
+    if (VersionIsIetfQuic(version)) {
       size += kConnectionIdLengthSize;
     }
     QUICHE_DCHECK(
-        QuicVersionHasLongHeaderLengths(version) ||
+        VersionIsIetfQuic(version) ||
         retry_token_length_length + retry_token_length + length_length == 0);
-    if (QuicVersionHasLongHeaderLengths(version)) {
+    if (VersionIsIetfQuic(version)) {
       size += retry_token_length_length + retry_token_length + length_length;
     }
     return size;
@@ -166,9 +166,10 @@ QuicPacketHeader::QuicPacketHeader()
       type_byte(0),
       destination_connection_id_included(CONNECTION_ID_PRESENT),
       source_connection_id_included(CONNECTION_ID_ABSENT),
-      reset_flag(false),
       version_flag(false),
+      reset_flag(false),
       has_possible_stateless_reset_token(false),
+      spin_bit(false),
       version(UnsupportedQuicVersion()),
       source_connection_id(EmptyQuicConnectionId()),
       remaining_packet_length(0),
@@ -202,18 +203,6 @@ QuicVersionNegotiationPacket::QuicVersionNegotiationPacket(
     const QuicVersionNegotiationPacket& other) = default;
 
 QuicVersionNegotiationPacket::~QuicVersionNegotiationPacket() {}
-
-QuicIetfStatelessResetPacket::QuicIetfStatelessResetPacket()
-    : stateless_reset_token({}) {}
-
-QuicIetfStatelessResetPacket::QuicIetfStatelessResetPacket(
-    const QuicPacketHeader& header, StatelessResetToken token)
-    : header(header), stateless_reset_token(token) {}
-
-QuicIetfStatelessResetPacket::QuicIetfStatelessResetPacket(
-    const QuicIetfStatelessResetPacket& other) = default;
-
-QuicIetfStatelessResetPacket::~QuicIetfStatelessResetPacket() {}
 
 std::ostream& operator<<(std::ostream& os, const QuicPacketHeader& header) {
   os << "{ destination_connection_id: " << header.destination_connection_id
@@ -255,7 +244,8 @@ std::ostream& operator<<(std::ostream& os, const QuicPacketHeader& header) {
        << absl::BytesToHexString(
               absl::string_view(header.nonce->data(), header.nonce->size()));
   }
-  os << ", packet_number: " << header.packet_number << " }\n";
+  os << ", packet_number: " << header.packet_number
+     << ", spin_bit: " << header.spin_bit << " }\n";
   return os;
 }
 
@@ -463,6 +453,7 @@ SerializedPacket::SerializedPacket(SerializedPacket&& other)
       has_ack_frame_copy(other.has_ack_frame_copy),
       has_ack_frequency(other.has_ack_frequency),
       has_datagram(other.has_datagram),
+      has_scone_packet(other.has_scone_packet),
       fate(other.fate),
       peer_address(other.peer_address),
       bytes_not_retransmitted(other.bytes_not_retransmitted),
@@ -516,6 +507,7 @@ SerializedPacket* CopySerializedPacket(const SerializedPacket& serialized,
   copy->bytes_not_retransmitted = serialized.bytes_not_retransmitted;
   copy->initial_header = serialized.initial_header;
   copy->has_ack_ecn = serialized.has_ack_ecn;
+  copy->has_scone_packet = serialized.has_scone_packet;
 
   if (copy_buffer) {
     copy->encrypted_buffer = CopyBuffer(serialized);
@@ -604,6 +596,7 @@ bool QuicPacketHeader::operator==(const QuicPacketHeader& other) const {
          form == other.form && long_packet_type == other.long_packet_type &&
          possible_stateless_reset_token ==
              other.possible_stateless_reset_token &&
+         spin_bit == other.spin_bit &&
          retry_token_length_length == other.retry_token_length_length &&
          retry_token == other.retry_token &&
          length_length == other.length_length &&

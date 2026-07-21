@@ -18,6 +18,7 @@ from pylib import constants
 from pylib.constants import host_paths
 from pylib.base import base_test_result
 from pylib.base import test_instance
+from pylib.base import test_run
 from pylib.symbols import deobfuscator
 from pylib.symbols import stack_symbolizer
 from pylib.utils import test_filter
@@ -315,6 +316,42 @@ def ParseGTestJSON(json_content):
       openstack += [("%s.%s" % (name, k), v) for k, v in value.items()]
 
   return results
+
+
+def ParseGTestListTestsJSON(json_content):
+  """Parses the list of tests in JSON format.
+
+  See PrintJsonTestList() in googletest/src/gtest.cc for the format of this
+  JSON.
+
+  Args:
+    json_content: The JSON content as a string.
+
+  Returns:
+    A dict mapping test names to a dict containing 'file' and 'line'.
+  """
+  test_locations = {}
+  if not json_content:
+    return test_locations
+
+  try:
+    json_data = json.loads(json_content)
+  except ValueError:
+    logging.warning('Failed to parse gtest list tests JSON.')
+    return test_locations
+
+  for suite in json_data.get('testsuites', []):
+    suite_name = suite.get('name')
+    for test in suite.get('testsuite', []):
+      test_name = test.get('name')
+      file_name = test.get('file')
+      if suite_name and test_name and file_name:
+        # Gtest JSON 'file' paths are often relative to the build directory.
+        # We want to normalize them to be relative to the source root.
+        if file_name.startswith('../../'):
+          file_name = file_name.replace('../../', '//', 1)
+        test_locations[f'{suite_name}.{test_name}'] = file_name
+  return test_locations
 
 
 def _TestNameWithoutPrefix(full_test_name, prefixes):
@@ -633,11 +670,21 @@ class GtestTestInstance(test_instance.TestInstance):
   #override
   def SetUp(self):
     """Map data dependencies via isolate."""
+    if self.wait_for_java_debugger:
+      if self._apk_helper and not self._apk_helper.GetIsDebuggable():
+        raise Exception('Passed --wait-for-java-debugger flag but did not set '
+                        'debuggable_apks = true in GN args')
     self._data_deps.extend(
         self._data_deps_delegate(self._runtime_deps_path))
     if self._proguard_mapping_path:
       self._deobfuscator = deobfuscator.DeobfuscatorPool(
           self._proguard_mapping_path)
+
+  def GetLogcatPackageNames(self):
+    ret = {x.GetPackageName() for x in self._additional_apks}
+    if pkg := self.package:
+      ret.add(pkg)
+    return ','.join(sorted(ret))
 
   def MaybeDeobfuscateLines(self, lines):
     if not self._deobfuscator:
@@ -675,19 +722,26 @@ class GtestTestInstance(test_instance.TestInstance):
       for gtest_filter_string in gtest_filter_strings:
         logging.debug('Filtering tests using: %s', gtest_filter_string)
         filtered_test_list = unittest_util.FilterTestNames(
-            filtered_test_list, gtest_filter_string)
+            filtered_test_list, gtest_filter_string, TestNameWithoutPrefixes)
 
-      if self._run_disabled and self._gtest_filters:
+      if self._gtest_filters:
         out_filtered_test_list = list(set(test_list)-set(filtered_test_list))
+        disabled_tests = []
         for test in out_filtered_test_list:
           test_name_no_disabled = TestNameWithoutDisabledPrefix(test)
           if test_name_no_disabled == test:
             continue
           if all(
               unittest_util.FilterTestNames([test_name_no_disabled],
-                                            gtest_filter)
+                                            gtest_filter,
+                                            TestNameWithoutPrefixes)
               for gtest_filter in self._gtest_filters):
-            filtered_test_list.append(test)
+            disabled_tests.append(test)
+        if disabled_tests:
+          if self._run_disabled:
+            filtered_test_list += disabled_tests
+          else:
+            test_run.ShowDisabledTestsHint(count=len(disabled_tests))
     return filtered_test_list
 
   def _GenerateDisabledFilterString(self, disabled_prefixes):

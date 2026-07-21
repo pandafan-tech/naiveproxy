@@ -20,7 +20,7 @@
 # zstreamtest32: Same as zstreamtest, but forced to compile in 32-bits mode
 # ##########################################################################
 
-ZSTD_LEGACY_SUPPORT ?= 5
+ZSTD_LEGACY_SUPPORT ?= 0
 export ZSTD_LEGACY_SUPPORT
 
 DEBUGLEVEL ?= 2
@@ -281,7 +281,7 @@ test-valgrind: VALGRIND = valgrind --leak-check=full --show-leak-kinds=all --err
 test-valgrind: zstd datagen fuzzer fullbench
 	@echo "\n ---- valgrind tests : memory analyzer ----"
 	$(VALGRIND) ./datagen -g50M > $(VOID)
-	$(VALGRIND) $(PRGDIR)/zstd ; if [ $$? -eq 0 ] ; then echo "zstd without argument should have failed"; false; fi
+	$(VALGRIND) $(PRGDIR)/zstd --fake-stdin-is-console ; if [ $$? -eq 0 ] ; then echo "zstd without argument should have failed"; false; fi
 	./datagen -g80 | $(VALGRIND) $(PRGDIR)/zstd - -c > $(VOID)
 	./datagen -g16KB | $(VALGRIND) $(PRGDIR)/zstd -vf - -c > $(VOID)
 	./datagen -g2930KB | $(VALGRIND) $(PRGDIR)/zstd -5 -vf - -o tmp

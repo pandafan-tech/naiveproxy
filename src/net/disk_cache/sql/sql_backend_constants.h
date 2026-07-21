@@ -19,6 +19,12 @@ namespace disk_cache {
 // Maximum fraction of the cache that one entry can consume.
 inline constexpr int kSqlBackendMaxFileRatioDenominator = 8;
 
+// This constant defines the denominator for the maximum fraction of the cache
+// that a single entry's sparse data can consume. For example, if this value is
+// 10, a single entry's sparse data can consume at most 1/10th of the total
+// cache size.
+inline constexpr int kSqlBackendMaxSparseDataRatioDenominator = 10;
+
 // A maximum file size when the overall cache size is very small, meaning there
 // is very little free disk space.
 inline constexpr int64_t kSqlBackendMinFileSizeLimit = 5 * 1024 * 1024;
@@ -66,21 +72,23 @@ inline constexpr std::string_view kSqlBackendFakeIndexPrefix = "SQLCache";
 //            breaking change as the previous version used a 64-bit hash.
 // Version 7: https://crrev.com/c/7023771 added `check_sum` column in both of
 //            the `resources` table and the `blobs` table.
+// Version 8: https://crrev.com/c/7171346 added a `hints` column to the
+//            `resources` table to store in-memory data hints.
 // ----------------------------------------------------------------------------
 
 // The oldest database schema version that the current code can read.
 // A database with a version older than this will be razed as it's considered
 // obsolete and the code no longer supports migrating from it.
-inline constexpr int kSqlBackendLowestSupportedDatabaseVersion = 7;
+inline constexpr int kSqlBackendLowestSupportedDatabaseVersion = 8;
 
 // The current version of the database schema. This should be incremented for
 // any schema change.
-inline constexpr int kSqlBackendCurrentDatabaseVersion = 7;
+inline constexpr int kSqlBackendCurrentDatabaseVersion = 8;
 
 // The oldest application version that can use a database with the current
 // schema. If a schema change is not backward-compatible, this must be set to
 // the same value as `kSqlBackendCurrentDatabaseVersion`.
-inline constexpr int kSqlBackendCompatibleDatabaseVersion = 7;
+inline constexpr int kSqlBackendCompatibleDatabaseVersion = 8;
 
 // Estimated static size overhead for a resource entry in the database,
 // excluding the key and any blob data. This is a conservative estimate based on
@@ -118,6 +126,10 @@ inline constexpr base::TimeDelta kSqlBackendPostInitializationTasksDelay =
 // The prefix for histograms related to the SQL disk cache backend.
 inline constexpr std::string_view kSqlDiskCacheBackendHistogramPrefix =
     "Net.SqlDiskCache.Backend.";
+
+// The name of the shared cache index database file.
+inline constexpr base::FilePath::CharType
+    kSqlBackendSharedCacheIndexFileName[] = FILE_PATH_LITERAL("shared_index");
 
 }  // namespace disk_cache
 

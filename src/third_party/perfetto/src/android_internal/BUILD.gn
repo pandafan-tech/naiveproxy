@@ -40,7 +40,7 @@ if (perfetto_build_with_android) {
     ]
     libs = [
       "android.hardware.health@2.0",
-      "android.hardware.health-V2-ndk",
+      "android.hardware.health-V5-ndk",
       "android.hardware.power.stats@1.0",
       "android.hardware.power.stats-V1-cpp",
       "android.hardware.atrace@1.0",
@@ -68,6 +68,8 @@ if (perfetto_build_with_android) {
       "../../src/base/*",
       "../../src/tracing/*",
     ]
+
+    assert_no_deps += [ "../../buildtools:abseil_cpp" ]
   }
 }  # if (perfetto_build_with_android)
 

@@ -10,13 +10,16 @@
 #include <string>
 #include <utility>
 
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/notimplemented.h"
 #include "base/rand_util.h"
 #include "base/values.h"
+#include "net/base/features.h"
 #include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
 #include "net/dns/address_sorter.h"
@@ -24,6 +27,7 @@
 #include "net/dns/dns_transaction.h"
 #include "net/dns/dns_util.h"
 #include "net/dns/public/dns_over_https_config.h"
+#include "net/dns/public/dns_protocol.h"
 #include "net/dns/public/secure_dns_mode.h"
 #include "net/dns/resolve_context.h"
 #include "net/log/net_log.h"
@@ -63,11 +67,12 @@ bool IsEqual(const std::optional<DnsConfig>& c1, const DnsConfig* c2) {
 }
 
 void UpdateConfigForDohUpgrade(DnsConfig* config) {
+  config->should_perform_doh_fallback_upgrade = false;
   bool has_doh_servers = !config->doh_config.servers().empty();
   // Do not attempt upgrade when there are already DoH servers specified or
   // when there are aspects of the system DNS config that are unhandled.
-  if (!config->unhandled_options && config->allow_dns_over_https_upgrade &&
-      !has_doh_servers &&
+  if (!config->unhandled_options && !has_doh_servers &&
+      config->allow_dns_over_https_upgrade &&
       config->secure_dns_mode == SecureDnsMode::kAutomatic) {
     // If we're in strict mode on Android, only attempt to upgrade the
     // specified DoT hostname.
@@ -89,13 +94,15 @@ void UpdateConfigForDohUpgrade(DnsConfig* config) {
                             !all_local);
       config->doh_config = DnsOverHttpsConfig(
           GetDohUpgradeServersFromNameservers(config->nameservers));
+      // If the DoH upgrade fails because there aren't matching providers
+      // in the hardcoded list use a well-known DoH provider as a fallback.
+      //
+      // Note: we don't apply this upgrade if the DNS config has a local
+      // nameserver to give local resolvers priority over fallback DoH.
       has_doh_servers = !config->doh_config.servers().empty();
-      UMA_HISTOGRAM_BOOLEAN("Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded",
-                            has_doh_servers);
-
-      // We only emit these metrics if auto-upgrade fails.
-      // TODO: crbug.com/448683318 - add DoH fallback here.
       if (!has_doh_servers) {
+        bool fallback_doh_nameservers_provided =
+            !config->fallback_doh_nameservers.empty();
         bool has_loopback_nameserver = false;
         bool has_local_non_loopback_nameserver = false;
         for (const auto& server : config->nameservers) {
@@ -110,7 +117,27 @@ void UpdateConfigForDohUpgrade(DnsConfig* config) {
             "Net.DNS.UpgradeConfigFailed.LocalNameserverState",
             GetDnsConfigLocalNameserverState(
                 has_loopback_nameserver, has_local_non_loopback_nameserver));
+        bool has_local_nameserver =
+            has_loopback_nameserver || has_local_non_loopback_nameserver;
+        if ((!has_local_nameserver ||
+             base::FeatureList::IsEnabled(
+                 features::kDohFallbackAllowedWithLocalNameservers)) &&
+            fallback_doh_nameservers_provided &&
+            base::FeatureList::IsEnabled(
+                net::features::kAddAutomaticWithDohFallbackMode)) {
+          config->doh_config =
+              DnsOverHttpsConfig(GetDohUpgradeServersFromNameservers(
+                  config->fallback_doh_nameservers));
+          config->should_perform_doh_fallback_upgrade =
+              !config->doh_config.servers().empty();
+        }
+        has_doh_servers = !config->doh_config.servers().empty();
       }
+      UMA_HISTOGRAM_BOOLEAN(
+          "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded",
+          config->should_perform_doh_fallback_upgrade);
+      UMA_HISTOGRAM_BOOLEAN("Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded",
+                            has_doh_servers);
     }
   } else {
     UMA_HISTOGRAM_BOOLEAN("Net.DNS.UpgradeConfig.Ineligible.DohSpecified",
@@ -155,13 +182,35 @@ class DnsClientImpl : public DnsClient {
     can_query_additional_types_via_insecure_ = additional_types_enabled;
   }
 
+  void RecordFallbackFromSecureTransactionPreferred(
+      FallbackFromSecureTransactionPreferredReason reason) const {
+    base::UmaHistogramEnumeration(
+        "Net.DNS.FallbackFromSecureTransactionPreferred", reason);
+  }
+
   bool FallbackFromSecureTransactionPreferred(
       ResolveContext* context) const override {
-    if (!CanUseSecureDnsTransactions())
+    if (!CanUseSecureDnsTransactions()) {
+      RecordFallbackFromSecureTransactionPreferred(
+          FallbackFromSecureTransactionPreferredReason::
+              kFallbackPreferredCannotUseSecureDns);
       return true;
+    }
 
     DCHECK(session_);  // Should be true if CanUseSecureDnsTransactions() true.
-    return context->NumAvailableDohServers(session_.get()) == 0;
+
+    // Otherwise, fall back to insecure DNS if there are no available DoH
+    // servers.
+    if (context->NumAvailableDohServers(session_.get()) == 0) {
+      RecordFallbackFromSecureTransactionPreferred(
+          FallbackFromSecureTransactionPreferredReason::
+              kFallbackPreferredNoAvailableDohServers);
+      return true;
+    }
+
+    RecordFallbackFromSecureTransactionPreferred(
+        FallbackFromSecureTransactionPreferredReason::kFallbackNotPreferred);
+    return false;
   }
 
   bool FallbackFromInsecureTransactionPreferred() const override {
@@ -251,11 +300,11 @@ class DnsClientImpl : public DnsClient {
     insecure_fallback_failures_ = 0;
   }
 
-  base::Value::Dict GetDnsConfigAsValueForNetLog() const override {
+  base::DictValue GetDnsConfigAsValueForNetLog() const override {
     const DnsConfig* config = GetEffectiveConfig();
     if (config == nullptr)
-      return base::Value::Dict();
-    base::Value::Dict dict = config->ToDict();
+      return base::DictValue();
+    base::DictValue dict = config->ToDict();
     dict.Set("can_use_secure_dns_transactions", CanUseSecureDnsTransactions());
     dict.Set("can_use_insecure_dns_transactions",
              CanUseInsecureDnsTransactions());
@@ -277,7 +326,7 @@ class DnsClientImpl : public DnsClient {
 
   void SetAddressSorterForTesting(
       std::unique_ptr<AddressSorter> address_sorter) override {
-    NOTIMPLEMENTED();
+    address_sorter_ = std::move(address_sorter);
   }
 
  private:
@@ -299,8 +348,9 @@ class DnsClientImpl : public DnsClient {
     // while still being able to fallback to system config for DoH.
     // For now, clear the nameservers for extra security if parts of the system
     // config are unhandled.
-    if (config.unhandled_options)
+    if (config.unhandled_options) {
       config.nameservers.clear();
+    }
 
     if (!config.IsValid())
       return std::nullopt;
@@ -310,7 +360,6 @@ class DnsClientImpl : public DnsClient {
 
   bool UpdateDnsConfig() {
     std::optional<DnsConfig> new_effective_config = BuildEffectiveConfig();
-
     if (IsEqual(new_effective_config, GetEffectiveConfig()))
       return false;
 
@@ -336,6 +385,7 @@ class DnsClientImpl : public DnsClient {
       session_ = base::MakeRefCounted<DnsSession>(
           std::move(new_effective_config).value(), rand_int_callback_,
           net_log_);
+
       factory_ = DnsTransactionFactory::CreateFactory(session_.get());
     }
   }
@@ -361,8 +411,8 @@ class DnsClientImpl : public DnsClient {
 
 // static
 std::unique_ptr<DnsClient> DnsClient::CreateClient(NetLog* net_log) {
-  return std::make_unique<DnsClientImpl>(net_log,
-                                         base::BindRepeating(&base::RandInt));
+  return std::make_unique<DnsClientImpl>(
+      net_log, base::BindRepeating(&base::RandIntInclusive));
 }
 
 // static

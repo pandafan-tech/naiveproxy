@@ -116,13 +116,6 @@ SerializedPacket QuicPacketCreatorPeer::SerializeAllFrames(
 
 // static
 std::unique_ptr<SerializedPacket>
-QuicPacketCreatorPeer::SerializeConnectivityProbingPacket(
-    QuicPacketCreator* creator) {
-  return creator->SerializeConnectivityProbingPacket();
-}
-
-// static
-std::unique_ptr<SerializedPacket>
 QuicPacketCreatorPeer::SerializePathChallengeConnectivityProbingPacket(
     QuicPacketCreator* creator, const QuicPathFrameBuffer& payload) {
   return creator->SerializePathChallengeConnectivityProbingPacket(payload);
@@ -153,6 +146,12 @@ QuicFrames& QuicPacketCreatorPeer::QueuedFrames(QuicPacketCreator* creator) {
 void QuicPacketCreatorPeer::SetRandom(QuicPacketCreator* creator,
                                       QuicRandom* random) {
   creator->random_ = random;
+}
+
+// static
+bool QuicPacketCreatorPeer::WillAttachSconeIndicator(
+    const QuicPacketCreator& creator) {
+  return creator.append_scone_indicator_;
 }
 
 }  // namespace test

@@ -24,7 +24,7 @@ namespace perfetto {
 namespace trace_processor {
 namespace {
 
-std::array<FtraceMessageDescriptor, 596> descriptors{{
+std::array<FtraceMessageDescriptor, 613> descriptors{{
     {nullptr, 0, {}},
     {nullptr, 0, {}},
     {nullptr, 0, {}},
@@ -222,7 +222,7 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "i2c_write",
-        6,
+        7,
         {
             {},
             {"adapter_nr", ProtoSchemaType::kInt32},
@@ -230,7 +230,8 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
             {"addr", ProtoSchemaType::kUint32},
             {"flags", ProtoSchemaType::kUint32},
             {"len", ProtoSchemaType::kUint32},
-            {"buf", ProtoSchemaType::kUint32},
+            {},
+            {"buf", ProtoSchemaType::kBytes},
         },
     },
     {
@@ -245,7 +246,7 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "i2c_reply",
-        6,
+        7,
         {
             {},
             {"adapter_nr", ProtoSchemaType::kInt32},
@@ -253,7 +254,8 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
             {"addr", ProtoSchemaType::kUint32},
             {"flags", ProtoSchemaType::kUint32},
             {"len", ProtoSchemaType::kUint32},
-            {"buf", ProtoSchemaType::kUint32},
+            {},
+            {"buf", ProtoSchemaType::kBytes},
         },
     },
     {
@@ -522,10 +524,11 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "workqueue_activate_work",
-        1,
+        2,
         {
             {},
             {"work", ProtoSchemaType::kUint64},
+            {"function", ProtoSchemaType::kUint64},
         },
     },
     {
@@ -548,14 +551,15 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "workqueue_queue_work",
-        5,
+        6,
         {
             {},
             {"work", ProtoSchemaType::kUint64},
             {"function", ProtoSchemaType::kUint64},
-            {"workqueue", ProtoSchemaType::kUint64},
-            {"req_cpu", ProtoSchemaType::kUint32},
-            {"cpu", ProtoSchemaType::kUint32},
+            {},
+            {"req_cpu", ProtoSchemaType::kInt32},
+            {"cpu", ProtoSchemaType::kInt32},
+            {"workqueue", ProtoSchemaType::kString},
         },
     },
     {
@@ -2968,13 +2972,14 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "f2fs_write_checkpoint",
-        4,
+        5,
         {
             {},
             {"dev", ProtoSchemaType::kUint64},
             {"is_umount", ProtoSchemaType::kUint32},
             {"msg", ProtoSchemaType::kString},
             {"reason", ProtoSchemaType::kInt32},
+            {"phase", ProtoSchemaType::kUint32},
         },
     },
     {
@@ -4742,21 +4747,23 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "dsi_rx",
-        2,
+        3,
         {
             {},
             {"cmd", ProtoSchemaType::kUint32},
-            {"rx_buf", ProtoSchemaType::kUint32},
+            {},
+            {"rx_buf", ProtoSchemaType::kBytes},
         },
     },
     {
         "dsi_tx",
-        3,
+        4,
         {
             {},
             {"last", ProtoSchemaType::kUint32},
-            {"tx_buf", ProtoSchemaType::kUint32},
+            {},
             {"type", ProtoSchemaType::kUint32},
+            {"tx_buf", ProtoSchemaType::kBytes},
         },
     },
     {
@@ -5440,22 +5447,24 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "dpu_dsi_rx",
-        2,
+        3,
         {
             {},
             {"cmd", ProtoSchemaType::kUint32},
-            {"rx_buf", ProtoSchemaType::kUint32},
+            {},
+            {"rx_buf", ProtoSchemaType::kBytes},
         },
     },
     {
         "dpu_dsi_tx",
-        4,
+        5,
         {
             {},
             {"type", ProtoSchemaType::kUint32},
-            {"tx_buf", ProtoSchemaType::kUint32},
+            {},
             {"last", ProtoSchemaType::kUint32},
             {"delay_ms", ProtoSchemaType::kUint32},
+            {"tx_buf", ProtoSchemaType::kBytes},
         },
     },
     {
@@ -5966,11 +5975,13 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
     },
     {
         "pixel_mm_kswapd_done",
-        2,
+        4,
         {
             {},
             {"delta_nr_scanned", ProtoSchemaType::kUint64},
             {"delta_nr_reclaimed", ProtoSchemaType::kUint64},
+            {"delta_nr_allocated", ProtoSchemaType::kUint64},
+            {"duration_ns", ProtoSchemaType::kUint64},
         },
     },
     {
@@ -6602,6 +6613,224 @@ std::array<FtraceMessageDescriptor, 596> descriptors{{
             {"fence_seqno", ProtoSchemaType::kUint64},
             {"ctx", ProtoSchemaType::kUint64},
             {"seqno", ProtoSchemaType::kUint64},
+        },
+    },
+    {
+        "fwtp_perfetto_counter",
+        5,
+        {
+            {},
+            {"timestamp", ProtoSchemaType::kUint64},
+            {"track_id", ProtoSchemaType::kUint32},
+            {"category", ProtoSchemaType::kString},
+            {"name", ProtoSchemaType::kString},
+            {"value", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "scsi_dispatch_cmd_error",
+        14,
+        {
+            {},
+            {"host_no", ProtoSchemaType::kUint32},
+            {"channel", ProtoSchemaType::kUint32},
+            {"id", ProtoSchemaType::kUint32},
+            {"lun", ProtoSchemaType::kUint32},
+            {"rtn", ProtoSchemaType::kInt32},
+            {"opcode", ProtoSchemaType::kUint32},
+            {"cmd_len", ProtoSchemaType::kUint32},
+            {"data_sglen", ProtoSchemaType::kUint32},
+            {"prot_sglen", ProtoSchemaType::kUint32},
+            {"prot_op", ProtoSchemaType::kUint32},
+            {},
+            {"driver_tag", ProtoSchemaType::kInt32},
+            {"scheduler_tag", ProtoSchemaType::kInt32},
+            {"cmnd", ProtoSchemaType::kBytes},
+        },
+    },
+    {
+        "scsi_dispatch_cmd_timeout",
+        17,
+        {
+            {},
+            {"host_no", ProtoSchemaType::kUint32},
+            {"channel", ProtoSchemaType::kUint32},
+            {"id", ProtoSchemaType::kUint32},
+            {"lun", ProtoSchemaType::kUint32},
+            {"result", ProtoSchemaType::kInt32},
+            {"opcode", ProtoSchemaType::kUint32},
+            {"cmd_len", ProtoSchemaType::kUint32},
+            {"data_sglen", ProtoSchemaType::kUint32},
+            {"prot_sglen", ProtoSchemaType::kUint32},
+            {"prot_op", ProtoSchemaType::kUint32},
+            {},
+            {"driver_tag", ProtoSchemaType::kInt32},
+            {"scheduler_tag", ProtoSchemaType::kInt32},
+            {"sense_key", ProtoSchemaType::kUint32},
+            {"asc", ProtoSchemaType::kUint32},
+            {"ascq", ProtoSchemaType::kUint32},
+            {"cmnd", ProtoSchemaType::kBytes},
+        },
+    },
+    {
+        "scsi_eh_wakeup",
+        1,
+        {
+            {},
+            {"host_no", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "fwtp_perfetto_slice",
+        5,
+        {
+            {},
+            {"timestamp", ProtoSchemaType::kUint64},
+            {"track_id", ProtoSchemaType::kUint32},
+            {"category", ProtoSchemaType::kString},
+            {"name", ProtoSchemaType::kString},
+            {"begin", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "gpu_power_state",
+        2,
+        {
+            {},
+            {"old_state", ProtoSchemaType::kInt32},
+            {"new_state", ProtoSchemaType::kInt32},
+        },
+    },
+    {
+        "gram_collision",
+        2,
+        {
+            {},
+            {"panel_index", ProtoSchemaType::kInt32},
+            {"collision_cnt", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "f2fs_lock_elapsed_time",
+        13,
+        {
+            {},
+            {"dev", ProtoSchemaType::kUint64},
+            {"comm", ProtoSchemaType::kString},
+            {"pid", ProtoSchemaType::kInt32},
+            {"prio", ProtoSchemaType::kInt32},
+            {"ioprio_class", ProtoSchemaType::kInt32},
+            {"ioprio_data", ProtoSchemaType::kInt32},
+            {"lock_name", ProtoSchemaType::kUint32},
+            {"is_write", ProtoSchemaType::kUint32},
+            {"total_time", ProtoSchemaType::kUint64},
+            {"running_time", ProtoSchemaType::kUint64},
+            {"runnable_time", ProtoSchemaType::kUint64},
+            {"io_sleep_time", ProtoSchemaType::kUint64},
+            {"other_time", ProtoSchemaType::kUint64},
+        },
+    },
+    {
+        "sched_group_tracker",
+        4,
+        {
+            {},
+            {"comm", ProtoSchemaType::kString},
+            {"pid", ProtoSchemaType::kInt32},
+            {"group", ProtoSchemaType::kString},
+            {"group_num", ProtoSchemaType::kInt32},
+        },
+    },
+    {
+        "dpu_disp_frame_done_timeout",
+        5,
+        {
+            {},
+            {"display_id", ProtoSchemaType::kInt32},
+            {"output_id", ProtoSchemaType::kUint32},
+            {"frames_pending", ProtoSchemaType::kInt32},
+            {"te_count", ProtoSchemaType::kInt32},
+            {"during_disable", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "dpu_disp_frame_start_timeout",
+        4,
+        {
+            {},
+            {"display_id", ProtoSchemaType::kInt32},
+            {"output_id", ProtoSchemaType::kUint32},
+            {"frames_pending", ProtoSchemaType::kInt32},
+            {"te_count", ProtoSchemaType::kInt32},
+        },
+    },
+    {
+        "mm_vmscan_memcg_reclaim_begin",
+        3,
+        {
+            {},
+            {"order", ProtoSchemaType::kInt32},
+            {"may_writepage", ProtoSchemaType::kInt32},
+            {"gfp_flags", ProtoSchemaType::kUint64},
+        },
+    },
+    {
+        "mm_vmscan_memcg_reclaim_end",
+        1,
+        {
+            {},
+            {"nr_reclaimed", ProtoSchemaType::kUint64},
+        },
+    },
+    {
+        "dpu_disp_frame_done_missing",
+        4,
+        {
+            {},
+            {"display_id", ProtoSchemaType::kInt32},
+            {"output_id", ProtoSchemaType::kUint32},
+            {"frames_pending", ProtoSchemaType::kInt32},
+            {"te_count", ProtoSchemaType::kInt32},
+        },
+    },
+    {
+        "dpu_disp_frame_start_missing",
+        4,
+        {
+            {},
+            {"display_id", ProtoSchemaType::kInt32},
+            {"output_id", ProtoSchemaType::kUint32},
+            {"frames_pending", ProtoSchemaType::kInt32},
+            {"te_count", ProtoSchemaType::kInt32},
+        },
+    },
+    {
+        "panel_settings_full",
+        10,
+        {
+            {},
+            {"panel_index", ProtoSchemaType::kInt32},
+            {"hbm", ProtoSchemaType::kUint32},
+            {"irc", ProtoSchemaType::kUint32},
+            {"h_pwm", ProtoSchemaType::kUint32},
+            {"fi_auto", ProtoSchemaType::kUint32},
+            {"fi_manual", ProtoSchemaType::kUint32},
+            {"early_exit", ProtoSchemaType::kUint32},
+            {"min_rr", ProtoSchemaType::kUint32},
+            {"max_rr", ProtoSchemaType::kUint32},
+            {"te_freq", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "panel_settings_lite",
+        5,
+        {
+            {},
+            {"panel_index", ProtoSchemaType::kInt32},
+            {"vrr", ProtoSchemaType::kUint32},
+            {"min_rr", ProtoSchemaType::kUint32},
+            {"max_rr", ProtoSchemaType::kUint32},
+            {"te_freq", ProtoSchemaType::kUint32},
         },
     },
 }};

@@ -10,7 +10,6 @@
 #include <tuple>
 #include <utility>
 
-#include "base/containers/enum_set.h"
 #include "base/notreached.h"
 #include "base/strings/strcat.h"
 #include "url/gurl.h"
@@ -259,6 +258,9 @@ std::string CookieInclusionStatus::GetDebugString() const {
        "EXCLUDE_THIRD_PARTY_PHASEOUT"},
       {ExclusionReason::EXCLUDE_NO_COOKIE_CONTENT, "EXCLUDE_NO_COOKIE_CONTENT"},
       {ExclusionReason::EXCLUDE_ANONYMOUS_CONTEXT, "EXCLUDE_ANONYMOUS_CONTEXT"},
+      {ExclusionReason::EXCLUDE_INVALID_PATH, "EXCLUDE_INVALID_PATH"},
+      {ExclusionReason::EXCLUDE_AMBIGUOUS_SERIALIZATION,
+       "EXCLUDE_AMBIGUOUS_SERIALIZATION"},
   };
   static_assert(
       std::size(exclusion_reasons) == ExclusionReasonBitset::kValueCount,
@@ -329,18 +331,6 @@ std::string CookieInclusionStatus::GetDebugString() const {
       break;
     case ExemptionReason::kUserSetting:
       reason = "ExemptionUserSetting";
-      break;
-    case ExemptionReason::k3PCDMetadata:
-      reason = "Exemption3PCDMetadata";
-      break;
-    case ExemptionReason::k3PCDDeprecationTrial:
-      reason = "Exemption3PCDDeprecationTrial";
-      break;
-    case ExemptionReason::kTopLevel3PCDDeprecationTrial:
-      reason = "ExemptionTopLevel3PCDDeprecationTrial";
-      break;
-    case ExemptionReason::k3PCDHeuristics:
-      reason = "Exemption3PCDHeuristics";
       break;
     case ExemptionReason::kEnterprisePolicy:
       reason = "ExemptionEnterprisePolicy";

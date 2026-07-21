@@ -386,6 +386,13 @@ class MockHostResolverBase::RequestImpl
   void ChangeRequestPriority(RequestPriority priority) override {
     priority_ = priority;
   }
+
+  std::optional<ResolutionDetails> GetResolutionDetails() const override {
+    if (resolver_) {
+      return resolver_->default_resolution_details_;
+    }
+    return std::nullopt;
+  }
 };
 
 class MockHostResolverBase::ServiceEndpointRequestImpl
@@ -454,6 +461,13 @@ class MockHostResolverBase::ServiceEndpointRequestImpl
 
   void ChangeRequestPriority(RequestPriority priority) override {
     priority_ = priority;
+  }
+
+  std::optional<ResolutionDetails> GetResolutionDetails() const override {
+    if (resolver_) {
+      return resolver_->default_resolution_details_;
+    }
+    return std::nullopt;
   }
 
  private:
@@ -836,6 +850,7 @@ MockHostResolverBase::CreateRequest(
     NetworkAnonymizationKey network_anonymization_key,
     NetLogWithSource net_log,
     std::optional<ResolveHostParameters> optional_parameters) {
+  last_observed_host_ = Host(host);
   return std::make_unique<RequestImpl>(
       Host(std::move(host)), network_anonymization_key, optional_parameters,
       weak_ptr_factory_.GetWeakPtr());
@@ -847,6 +862,7 @@ MockHostResolverBase::CreateRequest(
     const NetworkAnonymizationKey& network_anonymization_key,
     const NetLogWithSource& source_net_log,
     const std::optional<ResolveHostParameters>& optional_parameters) {
+  last_observed_host_ = Host(host);
   return std::make_unique<RequestImpl>(Host(host), network_anonymization_key,
                                        optional_parameters,
                                        weak_ptr_factory_.GetWeakPtr());
@@ -858,6 +874,7 @@ MockHostResolverBase::CreateServiceEndpointRequest(
     NetworkAnonymizationKey network_anonymization_key,
     NetLogWithSource net_log,
     ResolveHostParameters parameters) {
+  last_observed_host_ = host;
   return std::make_unique<ServiceEndpointRequestImpl>(
       std::move(host), network_anonymization_key, parameters,
       weak_ptr_factory_.GetWeakPtr());
@@ -960,6 +977,11 @@ void MockHostResolverBase::DetachRequest(size_t id) {
 std::string_view MockHostResolverBase::request_host(size_t id) {
   DCHECK(request(id));
   return request(id)->request_endpoint().GetHostnameWithoutBrackets();
+}
+
+const HostResolver::Host& MockHostResolverBase::request_full_host(size_t id) {
+  DCHECK(request(id));
+  return request(id)->request_endpoint();
 }
 
 RequestPriority MockHostResolverBase::request_priority(size_t id) {
@@ -1600,6 +1622,10 @@ class HangingHostResolver::RequestImpl
   }
 
   void ChangeRequestPriority(RequestPriority priority) override {}
+
+  std::optional<ResolutionDetails> GetResolutionDetails() const override {
+    return std::nullopt;
+  }
 
  private:
   // Use a WeakPtr as the resolver may be destroyed while there are still

@@ -28,23 +28,59 @@ class MockUnexportableKeyService : public UnexportableKeyService {
       (base::span<const crypto::SignatureVerifier::SignatureAlgorithm>
            acceptable_algorithms,
        BackgroundTaskPriority priority,
-       base::OnceCallback<void(ServiceErrorOr<UnexportableKeyId>)> callback),
+       base::OnceCallback<void(ServiceErrorOr<UnexportableSigningKeyId>)>
+           callback),
       (override));
   MOCK_METHOD(
       void,
       FromWrappedSigningKeySlowlyAsync,
       (base::span<const uint8_t> wrapped_key,
        BackgroundTaskPriority priority,
-       base::OnceCallback<void(ServiceErrorOr<UnexportableKeyId>)> callback),
+       base::OnceCallback<void(ServiceErrorOr<UnexportableSigningKeyId>)>
+           callback),
+      (override));
+  MOCK_METHOD(
+      void,
+      GenerateAttestationKeySlowlyAsync,
+      (base::span<const crypto::SignatureVerifier::SignatureAlgorithm>
+           acceptable_algorithms,
+       BackgroundTaskPriority priority,
+       base::OnceCallback<void(ServiceErrorOr<UnexportableAttestationKeyId>)>
+           callback),
+      (override));
+  MOCK_METHOD(
+      void,
+      FromWrappedAttestationKeySlowlyAsync,
+      (base::span<const uint8_t> wrapped_key,
+       BackgroundTaskPriority priority,
+       base::OnceCallback<void(ServiceErrorOr<UnexportableAttestationKeyId>)>
+           callback),
+      (override));
+  MOCK_METHOD(
+      void,
+      GetAllKeysForGarbageCollectionSlowlyAsync,
+      (BackgroundTaskPriority priority,
+       base::OnceCallback<void(ServiceErrorOr<std::vector<UnexportableKeyId>>)>
+           callback),
       (override));
   MOCK_METHOD(
       void,
       SignSlowlyAsync,
-      (const UnexportableKeyId& key_id,
+      (UnexportableSigningKeyId key_id,
        base::span<const uint8_t> data,
        BackgroundTaskPriority priority,
        base::OnceCallback<void(ServiceErrorOr<std::vector<uint8_t>>)> callback),
       (override));
+  MOCK_METHOD(void,
+              DeleteKeysSlowlyAsync,
+              (base::span<const UnexportableKeyId> key_ids,
+               BackgroundTaskPriority priority,
+               base::OnceCallback<void(ServiceErrorOr<size_t>)> callback),
+              (override));
+  MOCK_METHOD(void,
+              DeleteAllKeysSlowlyAsync,
+              (base::OnceCallback<void(ServiceErrorOr<size_t>)> callback),
+              (override));
   MOCK_METHOD(ServiceErrorOr<std::vector<uint8_t>>,
               GetSubjectPublicKeyInfo,
               (UnexportableKeyId key_id),
@@ -55,6 +91,14 @@ class MockUnexportableKeyService : public UnexportableKeyService {
               (const, override));
   MOCK_METHOD(ServiceErrorOr<crypto::SignatureVerifier::SignatureAlgorithm>,
               GetAlgorithm,
+              (UnexportableKeyId key_id),
+              (const, override));
+  MOCK_METHOD(ServiceErrorOr<std::string>,
+              GetKeyTag,
+              (UnexportableKeyId key_id),
+              (const, override));
+  MOCK_METHOD(ServiceErrorOr<base::Time>,
+              GetCreationTime,
               (UnexportableKeyId key_id),
               (const, override));
 };

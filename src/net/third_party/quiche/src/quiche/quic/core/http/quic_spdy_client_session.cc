@@ -76,6 +76,11 @@ void QuicSpdyClientSession::OnProofValid(
 void QuicSpdyClientSession::OnProofVerifyDetailsAvailable(
     const ProofVerifyDetails& /*verify_details*/) {}
 
+bool QuicSpdyClientSession::OnCertificateRequested(
+    const std::vector<std::string>& /*cert_authorities*/) {
+  return false;
+}
+
 bool QuicSpdyClientSession::ShouldCreateOutgoingBidirectionalStream() {
   if (!crypto_stream_->encryption_established()) {
     QUIC_DLOG(INFO) << "Encryption not active so no outgoing stream created.";
@@ -175,7 +180,7 @@ bool QuicSpdyClientSession::ShouldCreateIncomingStream(QuicStreamId id) {
     return false;
   }
 
-  if (VersionHasIetfQuicFrames(transport_version()) &&
+  if (VersionIsIetfQuic(transport_version()) &&
       QuicUtils::IsBidirectionalStreamId(id, version()) &&
       !WillNegotiateWebTransport()) {
     connection()->CloseConnection(
@@ -188,19 +193,12 @@ bool QuicSpdyClientSession::ShouldCreateIncomingStream(QuicStreamId id) {
   return true;
 }
 
-QuicSpdyStream* QuicSpdyClientSession::CreateIncomingStream(
-    PendingStream* pending) {
-  QuicSpdyStream* stream = new QuicSpdyClientStream(pending, this);
-  ActivateStream(absl::WrapUnique(stream));
-  return stream;
-}
-
 QuicSpdyStream* QuicSpdyClientSession::CreateIncomingStream(QuicStreamId id) {
   if (!ShouldCreateIncomingStream(id)) {
     return nullptr;
   }
   QuicSpdyStream* stream;
-  if (version().UsesHttp3() &&
+  if (version().IsIetfQuic() &&
       QuicUtils::IsBidirectionalStreamId(id, version())) {
     QUIC_BUG_IF(QuicServerInitiatedSpdyStream but no WebTransport support,
                 !WillNegotiateWebTransport())
@@ -218,7 +216,7 @@ QuicSpdyClientSession::CreateQuicCryptoStream() {
   return std::make_unique<QuicCryptoClientStream>(
       server_id_, this,
       crypto_config_->proof_verifier()->CreateDefaultContext(), crypto_config_,
-      this, /*has_application_state = */ version().UsesHttp3());
+      this, /*has_application_state = */ version().IsIetfQuic());
 }
 
 QuicNetworkHandle QuicSpdyClientSession::FindAlternateNetwork(

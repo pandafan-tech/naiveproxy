@@ -11,6 +11,8 @@
 #include <bit>
 #include <string_view>
 
+#include "base/strings/string_view_util.h"
+
 namespace base::internal {
 
 // Determines the minimum unsigned integer type needed to hold `kSize`.
@@ -73,6 +75,9 @@ namespace base::subtle {
 //
 // While this has a small runtime cost (typically a PC-relative load), modern
 // CPUs are quite good at this sort of math.
+//
+// See also IndexPointer, which can be used as IndexPointer<char, ...> for
+// C-style strings without an explicitly stored length.
 template <size_t N, const char (&kData)[N]>
 struct StringSlice {
   using IndexType = typename internal::IndexTypeForSize<N>::Type;
@@ -87,11 +92,7 @@ struct StringSlice {
     return std::string_view(lhs) <=> std::string_view(rhs);
   }
   constexpr operator std::string_view() const {
-    // Note 1: using as_string_view() or span() can cause issues with constexpr
-    // evaluation limits.
-    // Note 2: Subtract 1 from kData since this is intended for use with string
-    // literals, and the terminating nul should not be included.
-    return std::string_view(kData, sizeof(kData) - 1).substr(offset, length);
+    return base::MakeStringViewWithNulChars(kData).substr(offset, length);
   }
 };
 

@@ -150,7 +150,12 @@ class ProtoImporterModule {
   // stage, on all existing modules.
   virtual void ParseTraceConfig(const protos::pbzero::TraceConfig_Decoder&);
 
-  virtual void NotifyEndOfFile() {}
+  // Phase 3 - called after sorter extraction for cleanup.
+  // Modules do post-extraction processing here (e.g., finalizing heap profiles,
+  // flushing shell transitions).
+  virtual void OnEventsFullyExtracted() {
+    // Default: no-op
+  }
 
  protected:
   void RegisterForField(uint32_t field_id);
@@ -162,7 +167,7 @@ class ProtoImporterModule {
 //
 // Used to store per-trace state in a place where everyone can access it.
 struct ProtoImporterModuleContext {
-  void PushFtraceEvent(uint32_t cpu, int64_t ts, TracePacketData data);
+  void PushFtraceEvent(uint32_t cpu, int64_t ts, FtraceData data);
   void PushEtwEvent(uint32_t cpu, int64_t ts, TracePacketData data);
   void PushInlineSchedSwitch(uint32_t cpu, int64_t ts, InlineSchedSwitch data);
   void PushInlineSchedWaking(uint32_t cpu, int64_t ts, InlineSchedWaking data);
@@ -179,10 +184,9 @@ struct ProtoImporterModuleContext {
   std::unique_ptr<TraceSorter::Stream<TrackEventData>> track_event_stream;
 
   using FtraceStreamFactory =
-      std::function<std::unique_ptr<TraceSorter::Stream<TracePacketData>>(
-          uint32_t)>;
+      std::function<std::unique_ptr<TraceSorter::Stream<FtraceData>>(uint32_t)>;
   FtraceStreamFactory ftrace_stream_factory;
-  std::vector<std::unique_ptr<TraceSorter::Stream<TracePacketData>>>
+  std::vector<std::unique_ptr<TraceSorter::Stream<FtraceData>>>
       ftrace_event_streams;
 
   using EtwStreamFactory =

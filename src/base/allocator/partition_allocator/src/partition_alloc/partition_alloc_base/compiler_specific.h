@@ -8,6 +8,10 @@
 #include "partition_alloc/build_config.h"
 #include "partition_alloc/buildflags.h"
 
+#if defined(MEMORY_SANITIZER)
+#include <sanitizer/msan_interface.h>
+#endif
+
 // A wrapper around `__has_cpp_attribute()`, which is in C++20 and thus not yet
 // available for all targets PA supports (since PA's minimum C++ version is 17).
 // This works similarly to `PA_HAS_ATTRIBUTE()` below, in that where it's
@@ -99,6 +103,26 @@
 #endif  // !PA_BUILDFLAG(IS_DEBUG)
 #if !defined(PA_ALWAYS_INLINE)
 #define PA_ALWAYS_INLINE inline
+#endif
+
+// Annotates a member function of a class template to prevent it from being
+// instantiated during the explicit instantiation of the enclosing class.
+//
+// Usage:
+// ```
+//   template <typename T>
+//   struct S {
+//     PA_EXCLUDE_FROM_EXPLICIT_INSTANTIATION void Func() requires ...;
+//   };
+// ```
+#if PA_HAS_CPP_ATTRIBUTE(clang::exclude_from_explicit_instantiation)
+#define PA_EXCLUDE_FROM_EXPLICIT_INSTANTIATION \
+  [[clang::exclude_from_explicit_instantiation]]
+#elif PA_HAS_ATTRIBUTE(exclude_from_explicit_instantiation)
+#define PA_EXCLUDE_FROM_EXPLICIT_INSTANTIATION \
+  __attribute__((exclude_from_explicit_instantiation))
+#else
+#define PA_EXCLUDE_FROM_EXPLICIT_INSTANTIATION
 #endif
 
 // Annotates a function indicating it should never be tail called. Useful to
@@ -238,10 +262,27 @@
 //   PA_MSAN_UNPOISON(ptr, sizeof(T));
 // ```
 #if defined(MEMORY_SANITIZER)
-#include <sanitizer/msan_interface.h>
 #define PA_MSAN_UNPOISON(p, size) __msan_unpoison(p, size)
 #else
 #define PA_MSAN_UNPOISON(p, size)
+#endif
+
+// Checks if the pointer `p` and the `size` bytes after it are initialized or
+// not.
+//
+// See also:
+//   https://github.com/google/sanitizers/wiki/MemorySanitizer
+//
+// Usage:
+//   Currently used in raw_ptr destructor to catch use-after-destruct
+// ```
+//   PA_MSAN_CHECK_MEM_IS_INITIALIZED(&ptr, sizeof(ptr));
+// ```
+#if defined(MEMORY_SANITIZER)
+#define PA_MSAN_CHECK_MEM_IS_INITIALIZED(p, size) \
+  __msan_check_mem_is_initialized(p, size)
+#else
+#define PA_MSAN_CHECK_MEM_IS_INITIALIZED(p, size)
 #endif
 
 // Annotates a codepath suppressing static analysis along that path. Useful when
@@ -507,5 +548,11 @@ inline constexpr bool AnalyzerAssumeTrue(bool arg) {
 // Annotates code indicating that it should be temporarily exempted from
 // `-Wunsafe-buffer-usage`.
 #define PA_UNSAFE_TODO(...) PA_UNSAFE_BUFFERS(__VA_ARGS__)
+
+#if PA_HAS_ATTRIBUTE(enable_if)
+#define PA_ENABLE_IF_ATTR(cond, msg) __attribute__((enable_if(cond, msg)))
+#else
+#define PA_ENABLE_IF_ATTR(cond, msg)
+#endif
 
 #endif  // PARTITION_ALLOC_PARTITION_ALLOC_BASE_COMPILER_SPECIFIC_H_

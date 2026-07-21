@@ -21,21 +21,27 @@
 // override in order to create a custom data source that gets tracing Start/Stop
 // notifications and emits tracing data.
 
-#include <assert.h>
-#include <stddef.h>
-#include <stdint.h>
-
 #include <array>
 #include <atomic>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <type_traits>
+#include <utility>
 
+#include "perfetto/base/build_config.h"
+#include "perfetto/base/compiler.h"
+#include "perfetto/base/export.h"
+#include "perfetto/base/logging.h"
 #include "perfetto/protozero/message_handle.h"
+#include "perfetto/public/compiler.h"
+#include "perfetto/tracing/backend_type.h"
 #include "perfetto/tracing/buffer_exhausted_policy.h"
 #include "perfetto/tracing/core/flush_flags.h"
 #include "perfetto/tracing/core/forward_decls.h"
-#include "perfetto/tracing/internal/basic_types.h"
 #include "perfetto/tracing/internal/data_source_internal.h"
 #include "perfetto/tracing/internal/data_source_type.h"
 #include "perfetto/tracing/internal/tracing_muxer.h"
@@ -222,23 +228,38 @@ struct DefaultDataSourceTraits {
     // static_state.
     return ds_tls;
   }
+
+  // Allows clearing incremental state without destroying and recreating it.
+  // This is useful for data sources that use large data structures (e.g., hash
+  // maps) which are expensive to reallocate. Return true if clearing was
+  // successful. If the method is not defined or returns false, the incremental
+  // state will be destroyed and recreated.
+  static bool ClearIncrementalState(IncrementalStateType*) { return false; }
 };
 
-// Holds the type for a DataSource. Accessed by the static Trace() method
-// fastpaths. This allows redefinitions under a component where a component
-// specific export macro is used.
-// Due to C2086 (redefinition) error on MSVC/clang-cl, internal::DataSourceType
-// can't be a static data member. To avoid explicit specialization after
-// instantiation error, type() needs to be in a template helper class that's
-// instantiated independently from DataSource. See b/280777748.
+// Holds the DataSourceType for a DataSource, accessed by Trace()'s fastpaths.
+// Lives on a separate helper (not as a static member on DataSource) so
+// per-component export macros can redefine it, and because MSVC/clang-cl reject
+// the static-data-member design with a redefinition error (C2086) and an
+// explicit-specialization-after-instantiation error. See b/280777748.
+//
+// type() must be defined out-of-line: defining it in the class body makes it
+// implicitly inline ([dcl.inline]/4), which MSVC then propagates to every
+// explicit specialization from PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS and
+// silently drops the body (C4506), so callers fail to link with an unresolved
+// external symbol (LNK2019). GCC/Clang are unaffected.
 template <typename DerivedDataSource,
           typename DataSourceTraits = DefaultDataSourceTraits>
 struct DataSourceHelper {
-  static internal::DataSourceType& type() {
-    static perfetto::internal::DataSourceType type_;
-    return type_;
-  }
+  static internal::DataSourceType& type();
 };
+
+template <typename DerivedDataSource, typename DataSourceTraits>
+internal::DataSourceType&
+DataSourceHelper<DerivedDataSource, DataSourceTraits>::type() {
+  static perfetto::internal::DataSourceType type_;
+  return type_;
+}
 
 // Templated base class meant to be derived by embedders to create a custom data
 // source. DerivedDataSource must be the type of the derived class itself, e.g.:
@@ -258,6 +279,12 @@ class DataSource : public DataSourceBase {
   // drop data on shared memory overruns.
   constexpr static BufferExhaustedPolicy kBufferExhaustedPolicy =
       BufferExhaustedPolicy::kDrop;
+
+  // Returns the effective buffer exhausted policy. Derived classes can
+  // override this to provide a runtime value (e.g. from TracingInitArgs).
+  static BufferExhaustedPolicy GetDefaultBufferExhaustedPolicy() {
+    return DerivedDataSource::kBufferExhaustedPolicy;
+  }
 
   // Whether the kBufferExhaustedPolicy policy above is overridable via config.
   constexpr static bool kBufferExhaustedPolicyConfigurable = false;
@@ -485,7 +512,7 @@ class DataSource : public DataSourceBase {
     params.supports_multiple_instances =
         DerivedDataSource::kSupportsMultipleInstances;
     params.default_buffer_exhausted_policy =
-        DerivedDataSource::kBufferExhaustedPolicy;
+        DerivedDataSource::GetDefaultBufferExhaustedPolicy();
     params.buffer_exhausted_policy_configurable =
         DerivedDataSource::kBufferExhaustedPolicyConfigurable;
     return Helper::type().Register(
@@ -493,6 +520,9 @@ class DataSource : public DataSourceBase {
         GetCreateTlsFn(
             static_cast<typename DataSourceTraits::TlsStateType*>(nullptr)),
         GetCreateIncrementalStateFn(
+            static_cast<typename DataSourceTraits::IncrementalStateType*>(
+                nullptr)),
+        GetClearIncrementalStateFn(
             static_cast<typename DataSourceTraits::IncrementalStateType*>(
                 nullptr)),
         nullptr);
@@ -546,6 +576,44 @@ class DataSource : public DataSourceBase {
 
   static internal::DataSourceType::CreateIncrementalStateFn
   GetCreateIncrementalStateFn(const void*) {
+    return nullptr;
+  }
+
+  // Detection idiom for checking if DataSourceTraits::ClearIncrementalState(T*)
+  // exists. Supports traits that don't inherit from DefaultDataSourceTraits.
+  template <typename Traits, typename T, typename = void>
+  struct HasClearIncrementalState : std::false_type {};
+
+  template <typename Traits, typename T>
+  struct HasClearIncrementalState<
+      Traits,
+      T,
+      std::void_t<decltype(Traits::ClearIncrementalState(std::declval<T*>()))>>
+      : std::true_type {};
+
+  // Wrapper that calls DataSourceTraits::ClearIncrementalState if it exists.
+  // Returns false if the method is not defined in the traits.
+  template <typename T>
+  static bool ClearIncrementalStateWrapper(void* incremental_state, void*) {
+    if constexpr (HasClearIncrementalState<DataSourceTraits, T>::value) {
+      return DataSourceTraits::ClearIncrementalState(
+          reinterpret_cast<T*>(incremental_state));
+    } else {
+      base::ignore_result(incremental_state);
+      return false;
+    }
+  }
+
+  // The second parameter here is used to specialize the case where there is no
+  // incremental state type.
+  template <typename T>
+  static internal::DataSourceType::ClearIncrementalStateFn
+  GetClearIncrementalStateFn(const T*) {
+    return &ClearIncrementalStateWrapper<T>;
+  }
+
+  static internal::DataSourceType::ClearIncrementalStateFn
+  GetClearIncrementalStateFn(const void*) {
     return nullptr;
   }
 

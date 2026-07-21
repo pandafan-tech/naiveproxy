@@ -99,11 +99,11 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
   // Called only when |perspective_| is IS_CLIENT and a retry packet has been
   // parsed. |new_connection_id| contains the value of the Source Connection
   // ID field, and |retry_token| contains the value of the Retry Token field.
-  // On versions where UsesTls() is false,
+  // On versions where IsIetfQuic() is false,
   // |original_connection_id| contains the value of the Original Destination
   // Connection ID field, and both |retry_integrity_tag| and
   // |retry_without_tag| are empty.
-  // On versions where UsesTls() is true,
+  // On versions where IsIetfQuic() is true,
   // |original_connection_id| is empty, |retry_integrity_tag| contains the
   // value of the Retry Integrity Tag field, and |retry_without_tag| contains
   // the entire RETRY packet except the Retry Integrity Tag field.
@@ -242,8 +242,7 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
 
   // Called when an IETF stateless reset packet has been parsed and validated
   // with the stateless reset token.
-  virtual void OnAuthenticatedIetfStatelessResetPacket(
-      const QuicIetfStatelessResetPacket& packet) = 0;
+  virtual void OnAuthenticatedIetfStatelessResetPacket() = 0;
 
   // Called when an IETF MaxStreams frame has been parsed.
   virtual bool OnMaxStreamsFrame(const QuicMaxStreamsFrame& frame) = 0;
@@ -259,6 +258,13 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
   // Called on the first decrypted packet in each key phase (including the
   // first key phase.)
   virtual void OnDecryptedFirstPacketInKeyPhase() = 0;
+
+  // Called when a Scone packet arrives. When called, the framer has not
+  // verified that a packet in the UDP datagram is decryptable. |signal| is the
+  // 7-bit signal carried in the first byte of the packet. 127 means there is no
+  // feedback. The value will never be more than 127; overrides are free to
+  // QUIC_BUG if this happens.
+  virtual void OnSconePacket(uint8_t signal) = 0;
 
   // Called when the framer needs to generate a decrypter for the next key
   // phase. Each call should generate the key for phase n+1.
@@ -557,6 +563,10 @@ class QUICHE_EXPORT QuicFramer {
       QuicConnectionId client_connection_id,
       const ParsedQuicVersionVector& versions);
 
+  // Writes a SCONE header to the packet, using the connection IDs in |header|.
+  static bool AppendSconeHeader(const QuicPacketHeader& header,
+                                QuicDataWriter* writer);
+
   // If header.version_flag is set, the version in the
   // packet will be set -- but it will be set from version_ not
   // header.versions.
@@ -767,6 +777,10 @@ class QUICHE_EXPORT QuicFramer {
     drop_incoming_retry_packets_ = drop_incoming_retry_packets;
   }
 
+  void set_parse_scone_packets(bool parse_scone_packets) {
+    parse_scone_packets_ = parse_scone_packets;
+  }
+
  private:
   friend class test::QuicFramerPeer;
 
@@ -776,7 +790,7 @@ class QUICHE_EXPORT QuicFramer {
   // AckTimestampRange is a data structure derived from a QuicAckFrame. It is
   // used to serialize timestamps in a IETF_ACK_RECEIVE_TIMESTAMPS frame.
   struct QUICHE_EXPORT AckTimestampRange {
-    QuicPacketCount gap;
+    QuicPacketCount delta_from_largest_acked;
     // |range_begin| and |range_end| are index(es) in
     // QuicAckFrame.received_packet_times, representing a continuous range of
     // packet numbers in descending order. |range_begin| >= |range_end|.
@@ -868,8 +882,11 @@ class QUICHE_EXPORT QuicFramer {
 
   bool ProcessIetfHeaderTypeByte(QuicDataReader* reader,
                                  QuicPacketHeader* header);
-  bool ProcessIetfPacketHeader(QuicDataReader* reader,
-                               QuicPacketHeader* header);
+  // If the packet header is a SCONE packet, and parse_scone_packets_ is true,
+  // |scone_value| will be set to the value encoded in the first two bytes.
+  // Otherwise it will be nullopt.
+  bool ProcessIetfPacketHeader(QuicDataReader* reader, QuicPacketHeader* header,
+                               std::optional<uint8_t>& scone_value);
 
   // First processes possibly truncated packet number. Calculates the full
   // packet number from the truncated one and the last seen packet number, and
@@ -1108,7 +1125,7 @@ class QUICHE_EXPORT QuicFramer {
   // Determine whether the given QuicAckFrame should be serialized with a
   // IETF_ACK_RECEIVE_TIMESTAMPS frame type.
   bool UseIetfAckWithReceiveTimestamp(const QuicAckFrame& frame) const {
-    return VersionHasIetfQuicFrames(version_.transport_version) &&
+    return VersionIsIetfQuic(version_.transport_version) &&
            process_timestamps_ &&
            std::min<uint64_t>(max_receive_timestamps_per_ack_,
                               frame.received_packet_times.size()) > 0;
@@ -1236,6 +1253,9 @@ class QUICHE_EXPORT QuicFramer {
   // The type of the IETF frame preceding the frame currently being processed. 0
   // when not processing a frame or only 1 frame has been processed.
   uint64_t previously_received_frame_type_;
+
+  // The QUIC connection is configured to process SCONE packets.
+  bool parse_scone_packets_ = false;
 };
 
 // Look for and parse the error code from the "<quic_error_code>:" text that

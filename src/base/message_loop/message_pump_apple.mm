@@ -22,6 +22,7 @@
 #include "base/auto_reset.h"
 #include "base/check_op.h"
 #include "base/feature_list.h"
+#include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_policy.h"
 #include "base/memory/stack_allocated.h"
@@ -65,6 +66,23 @@ bool g_not_using_cr_app = false;
 // The MessagePump controlling [NSApp run].
 MessagePumpNSApplication* g_app_pump;
 #endif  // !BUILDFLAG(IS_IOS)
+
+#if BUILDFLAG(IS_IOS)
+constexpr int kDefaultInitialNestingLevel = 1;
+// Tracks the initial loop nesting level for the current thread's message pump.
+// It is used to synchronize the pump's internal nesting state with the host app's
+// run loop depth on startup to prevent work item stack mismatches and crashes.
+//
+// Requires thread_local storage because platform agnostic task plumbing
+// prevents passing host specific state via arguments during initialization.
+//
+// Note: This state is strictly consumable. The pump resets it to
+// std::nullopt upon reading so subsequent loops start clean.
+//
+// TODO(crbug.com/516847270): Pass this via OnAttach() if we can avoid
+// subclass specific parameter pollution on MessagePumpCFRunLoopBase.
+thread_local std::optional<int> g_initial_nesting_level;
+#endif  // BUILDFLAG(IS_IOS)
 
 }  // namespace
 
@@ -313,12 +331,41 @@ void MessagePumpCFRunLoopBase::InitializeFeatures() {
 #if BUILDFLAG(IS_IOS)
 void MessagePumpCFRunLoopBase::OnAttach() {
   CHECK_EQ(nesting_level_, 0);
-  // On iOS: the MessagePump is attached while it's already running.
-  nesting_level_ = 1;
 
-  // There could be some native work done after attaching to the loop and before
-  // |work_source_| is invoked.
-  PushWorkItemScope();
+  // TODO(crbug.com/516847270): Consider passing the initial nesting level down
+  // as a parameter to OnAttach() if a clean way is found to avoid subclass specific
+  // parameter pollution on the parent MessagePumpCFRunLoopBase class (which is shared
+  // by other message pumps that do not support custom nesting synchronization).
+  std::optional<int> initial_depth =
+      std::exchange(g_initial_nesting_level, std::nullopt);
+  int depth =
+      initial_depth.value_or(kDefaultInitialNestingLevel);
+  CHECK_GE(depth, kDefaultInitialNestingLevel);
+  if (depth == kDefaultInitialNestingLevel) {
+    // On iOS: the MessagePump is attached while it's already running.
+    nesting_level_ = 1;
+
+    // There could be some native work done after attaching to the loop and before
+    // |work_source_| is invoked.
+    PushWorkItemScope();
+    return;
+  }
+
+  // Host app custom depth flow.
+  for (int i = 0; i < depth; ++i) {
+    ++nesting_level_;
+
+    // Pre-populates the `stack_` with placeholder frames to match the host's
+    // nesting level. Since the delegate is already attached (see Attach()),
+    // these frames correctly inform the delegate of the host's run loop nesting
+    // depth, ensuring system-wide state stability.
+    PushWorkItemScope();
+  }
+
+  // Initialize the nesting state to match the host's run loop depth we just
+  // reconstructed. Chromium on iOS treats the main loop as nested by default
+  // (delta of 1), so we maintain that invariant here.
+  deepest_nesting_level_ = nesting_level_;
 }
 
 void MessagePumpCFRunLoopBase::OnDetach() {
@@ -541,6 +588,8 @@ void MessagePumpCFRunLoopBase::PreWaitObserver(CFRunLoopObserverRef observer,
     // amount of matching Pop/Push in between when running work items).
     self->PopWorkItemScope();
 
+    self->sleeping_nesting_levels_.push(self->nesting_level_);
+
     // Attempt to do some idle work before going to sleep.
     self->RunIdleWork();
 
@@ -565,6 +614,11 @@ void MessagePumpCFRunLoopBase::AfterWaitObserver(CFRunLoopObserverRef observer,
     // Emerging from sleep, any work happening after this (outside of a
     // RunWork()) should be considered native work. Matching PopWorkItemScope()
     // is in BeforeWait().
+    if (self->sleeping_nesting_levels_.empty() ||
+        self->sleeping_nesting_levels_.top() != self->nesting_level_) {
+      return;
+    }
+    self->sleeping_nesting_levels_.pop();
     self->PushWorkItemScope();
   });
 }
@@ -628,6 +682,12 @@ void MessagePumpCFRunLoopBase::EnterExitObserver(CFRunLoopObserverRef observer,
 
       // Current work item tracking needs to go away since execution will stop.
       self->PopWorkItemScope();
+
+      // If the loop is exiting, it can't be sleeping anymore.
+      if (!self->sleeping_nesting_levels_.empty() &&
+          self->sleeping_nesting_levels_.top() == self->nesting_level_) {
+        self->sleeping_nesting_levels_.pop();
+      }
 
       --self->nesting_level_;
       break;
@@ -739,13 +799,30 @@ bool MessagePumpUIApplication::DoQuit() {
   NOTREACHED();
 }
 
+// static
+// This is separate from Attach() because the MessagePump instance is
+// instantiated and owned by Chromium's internal task plumbing. The generic
+// callers of Attach() are platform-agnostic and cannot pass host-specific
+// state. This static method allows embedders to "prime" the nesting state for
+// the UI pump before Chromium's task system is fully initialized.
+void MessagePumpUIApplication::SetNextInitialNestingLevelForCurrentThread(
+    int depth) {
+  CHECK(!g_initial_nesting_level.has_value());
+  CHECK_GE(depth, kDefaultInitialNestingLevel);
+  g_initial_nesting_level = depth;
+}
+
+// static
+void MessagePumpUIApplication::ResetNextInitialNestingLevelForTesting() {
+  g_initial_nesting_level.reset();
+}
+
 void MessagePumpUIApplication::Attach(Delegate* delegate) {
   DCHECK(!run_loop_);
   run_loop_.emplace();
 
   CHECK(run_loop_->BeforeRun());
   SetDelegate(delegate);
-
   OnAttach();
 }
 
@@ -792,7 +869,7 @@ MessagePumpNSApplication::~MessagePumpNSApplication() {
 }
 
 void MessagePumpNSApplication::DoRun(Delegate* delegate) {
-  bool last_running_own_loop_ = running_own_loop_;
+  bool last_running_own_loop = running_own_loop_;
 
   // NSApp must be initialized by calling:
   // [{some class which implements CrAppProtocol} sharedApplication]
@@ -819,7 +896,7 @@ void MessagePumpNSApplication::DoRun(Delegate* delegate) {
     }
   }
 
-  running_own_loop_ = last_running_own_loop_;
+  running_own_loop_ = last_running_own_loop;
 }
 
 bool MessagePumpNSApplication::DoQuit() {

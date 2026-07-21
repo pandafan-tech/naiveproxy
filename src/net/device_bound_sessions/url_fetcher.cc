@@ -4,6 +4,8 @@
 
 #include "net/device_bound_sessions/url_fetcher.h"
 
+#include "base/feature_list.h"
+#include "net/base/features.h"
 #include "net/base/io_buffer.h"
 #include "net/device_bound_sessions/session_binding_utils.h"
 #include "net/url_request/url_request_context.h"
@@ -51,14 +53,23 @@ constexpr int kBufferSize = 4096;
 
 URLFetcher::URLFetcher(const URLRequestContext* context,
                        GURL url,
-                       std::optional<net::NetLogSource> net_log_source)
+                       std::optional<net::NetLogSource> net_log_source,
+                       bool is_refresh)
     : request_(context->CreateRequest(url,
                                       IDLE,
                                       this,
                                       kRegistrationTrafficAnnotation,
                                       /*is_for_websockets=*/false,
                                       net_log_source)),
-      buf_(base::MakeRefCounted<IOBufferWithSize>(kBufferSize)) {}
+      buf_(base::MakeRefCounted<IOBufferWithSize>(kBufferSize)) {
+  if (is_refresh &&
+      base::FeatureList::IsEnabled(
+          net::features::
+              kDeviceBoundSessionsBypassDeferralsForRefreshRequests)) {
+    request_->set_device_bound_session_mode(
+        net::DeviceBoundSessionMode::kBypassDeferral);
+  }
+}
 
 URLFetcher::~URLFetcher() = default;
 
@@ -70,15 +81,6 @@ void URLFetcher::Start(base::OnceClosure complete_callback) {
 void URLFetcher::OnResponseStarted(URLRequest* request, int net_error) {
   net_error_ = net_error;
   if (net_error != OK) {
-    std::move(callback_).Run();
-    // `this` may be deleted.
-    return;
-  }
-
-  HttpResponseHeaders* headers = request->response_headers();
-  const int response_code = headers ? headers->response_code() : 0;
-
-  if (response_code < 200 || response_code >= 300) {
     std::move(callback_).Run();
     // `this` may be deleted.
     return;
@@ -99,7 +101,9 @@ void URLFetcher::OnResponseStarted(URLRequest* request, int net_error) {
 }
 
 void URLFetcher::OnReadCompleted(URLRequest* request, int bytes_read_or_error) {
-  data_received_.append(buf_->data(), bytes_read_or_error);
+  if (bytes_read_or_error > 0) {
+    data_received_.append(buf_->data(), bytes_read_or_error);
+  }
 
   while (bytes_read_or_error > 0) {
     bytes_read_or_error = request->Read(buf_.get(), kBufferSize);
@@ -117,6 +121,10 @@ void URLFetcher::OnReadCompleted(URLRequest* request, int bytes_read_or_error) {
     // `this` may be deleted.
     return;
   }
+}
+
+std::string URLFetcher::TakeDataReceived() {
+  return std::move(data_received_);
 }
 
 }  // namespace net::device_bound_sessions

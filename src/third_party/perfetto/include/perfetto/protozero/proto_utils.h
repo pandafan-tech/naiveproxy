@@ -117,6 +117,42 @@ inline const char* ProtoSchemaToString(ProtoSchemaType v) {
   return "";
 }
 
+// Returns the wire type used on the wire to encode a field of the given
+// schema type. This is the single source of truth for the proto-type ->
+// wire-type grouping. kGroup is a deprecated proto2-only feature that
+// protozero does not support and that ProtoWireType cannot represent; it,
+// like kUnknown, maps to kLengthDelimited as a safe opaque default.
+inline ProtoWireType ProtoSchemaToWireType(ProtoSchemaType v) {
+  switch (v) {
+    case ProtoSchemaType::kInt32:
+    case ProtoSchemaType::kInt64:
+    case ProtoSchemaType::kUint32:
+    case ProtoSchemaType::kUint64:
+    case ProtoSchemaType::kBool:
+    case ProtoSchemaType::kEnum:
+    case ProtoSchemaType::kSint32:
+    case ProtoSchemaType::kSint64:
+      return ProtoWireType::kVarInt;
+    case ProtoSchemaType::kDouble:
+    case ProtoSchemaType::kFixed64:
+    case ProtoSchemaType::kSfixed64:
+      return ProtoWireType::kFixed64;
+    case ProtoSchemaType::kFloat:
+    case ProtoSchemaType::kFixed32:
+    case ProtoSchemaType::kSfixed32:
+      return ProtoWireType::kFixed32;
+    case ProtoSchemaType::kString:
+    case ProtoSchemaType::kBytes:
+    case ProtoSchemaType::kMessage:
+    case ProtoSchemaType::kGroup:
+    case ProtoSchemaType::kUnknown:
+      return ProtoWireType::kLengthDelimited;
+  }
+  // For gcc:
+  PERFETTO_DCHECK(false);
+  return ProtoWireType::kLengthDelimited;
+}
+
 // Maximum message size supported: 256 MiB (4 x 7-bit due to varint encoding).
 constexpr size_t kMessageLengthFieldSize = 4;
 constexpr size_t kMaxMessageLength = (1u << (kMessageLengthFieldSize * 7)) - 1;
@@ -127,6 +163,21 @@ constexpr size_t kMaxOneByteMessageLength = (1 << 7) - 1;
 // (10 bytes at most). 15 bytes buffer is enough to store a simple field.
 constexpr size_t kMaxTagEncodedSize = 5;
 constexpr size_t kMaxSimpleFieldEncodedSize = kMaxTagEncodedSize + 10;
+
+constexpr uint8_t kFieldTypeNumBits = 3;
+
+constexpr uint64_t GetTagFieldId(uint64_t tag) {
+  // Since, the least 3 significant bits determine the field type. Skip them and
+  // return the id.
+  return (tag >> kFieldTypeNumBits);
+}
+
+constexpr uint64_t GetTagFieldType(uint64_t tag) {
+  // The least 3 significant bits determine the field type.
+  constexpr uint64_t kFieldTypeMask =
+      (1 << kFieldTypeNumBits) - 1;  // 0000 0111;
+  return (tag & kFieldTypeMask);
+}
 
 // Proto types: (int|uint|sint)(32|64), bool, enum.
 constexpr uint32_t MakeTagVarInt(uint32_t field_id) {

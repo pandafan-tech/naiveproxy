@@ -83,17 +83,6 @@ bool SkipCompletionPortOnSuccessIsSupported() {
   return false;
 }
 
-// Returns true for 1/1000 calls, indicating if a subsampled histogram should be
-// recorded.
-bool ShouldRecordSubsampledHistogram() {
-  // Not using `base::MetricsSubSampler` because it's not thread-safe sockets
-  // could be used from multiple threads.
-  static std::atomic<uint64_t> counter = base::RandUint64();
-  // Relaxed memory order since there is no dependent memory access.
-  uint64_t val = counter.fetch_add(1, std::memory_order_relaxed);
-  return val % 1000 == 0;
-}
-
 class WSAEventHandleTraits {
  public:
   using Handle = WSAEVENT;
@@ -386,7 +375,7 @@ bool TcpSocketIoCompletionPortWin::EnsureOverlappedIOInitialized() {
 
   // Report the outcome of activating an option to skip the completion port when
   // an operation completes immediately to UMA. Subsampled for efficiency.
-  if (ShouldRecordSubsampledHistogram()) {
+  if (base::ShouldRecordSubsampledMetric(0.001)) {
     SkipCompletionPortOnSuccessOutcome outcome;
     if (skip_completion_port_on_success_) {
       outcome = SkipCompletionPortOnSuccessOutcome::kSuccess;
@@ -620,7 +609,7 @@ void TcpSocketIoCompletionPortWin::CoreImpl::Detach() {
 }
 
 HANDLE TcpSocketIoCompletionPortWin::CoreImpl::GetConnectEvent() {
-  if (!connect_event_.IsValid()) {
+  if (!connect_event_.is_valid()) {
     // Lazy-initialize the event.
     connect_event_.Set(::WSACreateEvent());
     ::WSAEventSelect(socket_->socket_, connect_event_.get(), FD_CONNECT);
@@ -629,7 +618,7 @@ HANDLE TcpSocketIoCompletionPortWin::CoreImpl::GetConnectEvent() {
 }
 
 void TcpSocketIoCompletionPortWin::CoreImpl::WatchForConnect() {
-  CHECK(connect_event_.IsValid());
+  CHECK(connect_event_.is_valid());
   connect_watcher_.StartWatchingOnce(connect_event_.get(), this);
 }
 
@@ -671,7 +660,7 @@ void TcpSocketIoCompletionPortWin::CoreImpl::OnIOCompleted(
 
 void TcpSocketIoCompletionPortWin::CoreImpl::
     StopWatchingAndCloseConnectEvent() {
-  if (connect_event_.IsValid()) {
+  if (connect_event_.is_valid()) {
     connect_watcher_.StopWatching();
     connect_event_.Close();
   }

@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_SPINNING_MUTEX_H_
 #define PARTITION_ALLOC_SPINNING_MUTEX_H_
 
@@ -107,13 +102,20 @@ class PA_LOCKABLE PA_COMPONENT_EXPORT(PARTITION_ALLOC) SpinningMutex {
   PA_NOINLINE void AcquireSpinThenBlock() PA_EXCLUSIVE_LOCK_FUNCTION();
   void LockSlow() PA_EXCLUSIVE_LOCK_FUNCTION();
 
+#if PA_BUILDFLAG(IS_ANDROID) && PA_BUILDFLAG(PA_ARCH_CPU_ARM64)
+  // On ARM64, 2048 cycles results in spinning for 500-1500 nanoseconds on
+  // most Android devices which overlaps with the time spent on a futex
+  // syscall.
+  static constexpr int kSpinCount = 2048;
+#else
   // See below, the latency of PA_YIELD_PROCESSOR can be as high as ~150
   // cycles. Meanwhile, sleeping costs a few us. Spinning 64 times at 3GHz would
   // cost 150 * 64 / 3e9 ~= 3.2us.
   //
-  // This applies to Linux kernels, on x86_64. On ARM we might want to spin
-  // more.
+  // This applies to Linux kernels, on x86_64. On ARM64, the yield instruction
+  // is a NOP, so we need to spin more. (See crbug.com/458028996)
   static constexpr int kSpinCount = 64;
+#endif  // PA_BUILDFLAG(IS_ANDROID) && PA_BUILDFLAG(PA_ARCH_CPU_ARM64)
 
 #if PA_CONFIG(HAS_LINUX_KERNEL)
   void FutexWait();

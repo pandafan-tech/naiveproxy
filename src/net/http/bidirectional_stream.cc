@@ -11,9 +11,9 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/notreached.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "base/values.h"
 #include "net/base/load_flags.h"
@@ -37,18 +37,18 @@ namespace net {
 
 namespace {
 
-base::Value::Dict NetLogHeadersParams(const quiche::HttpHeaderBlock* headers,
-                                      NetLogCaptureMode capture_mode) {
-  base::Value::Dict dict;
+base::DictValue NetLogHeadersParams(const quiche::HttpHeaderBlock* headers,
+                                    NetLogCaptureMode capture_mode) {
+  base::DictValue dict;
   dict.Set("headers", ElideHttpHeaderBlockForNetLog(*headers, capture_mode));
   return dict;
 }
 
-base::Value::Dict NetLogParams(const GURL& url,
-                               const std::string& method,
-                               const HttpRequestHeaders* headers,
-                               NetLogCaptureMode capture_mode) {
-  base::Value::Dict dict;
+base::DictValue NetLogParams(const GURL& url,
+                             const std::string& method,
+                             const HttpRequestHeaders* headers,
+                             NetLogCaptureMode capture_mode) {
+  base::DictValue dict;
   dict.Set("url", url.possibly_invalid_spec());
   dict.Set("method", method);
   base::Value headers_param(
@@ -201,51 +201,11 @@ void BidirectionalStream::PopulateNetErrorDetails(NetErrorDetails* details) {
     stream_impl_->PopulateNetErrorDetails(details);
 }
 
-// cronet-reality: HTTP/3 datagram passthrough to the impl layer.
-int BidirectionalStream::SendHttp3Datagram(base::span<const uint8_t> payload) {
-  if (!stream_impl_) {
-    return ERR_FAILED;
-  }
-  return stream_impl_->SendHttp3Datagram(payload);
-}
-
-void BidirectionalStream::RegisterHttp3DatagramVisitor() {
-  if (stream_impl_) {
-    stream_impl_->RegisterHttp3DatagramVisitor();
-  }
-}
-
-void BidirectionalStream::UnregisterHttp3DatagramVisitor() {
-  if (stream_impl_) {
-    stream_impl_->UnregisterHttp3DatagramVisitor();
-  }
-}
-
-void BidirectionalStream::OnHttp3DatagramReceived(
-    base::span<const uint8_t> payload) {
-  delegate_->OnHttp3DatagramReceived(payload);
-}
-
 void BidirectionalStream::StartRequest() {
   DCHECK(!stream_request_);
   HttpRequestInfo http_request_info;
   http_request_info.url = request_info_->url;
   http_request_info.method = request_info_->method;
-  if (auto network_isolation_key_header =
-          request_info_->extra_headers.GetHeader("-network-isolation-key")) {
-    request_info_->extra_headers.RemoveHeader("-network-isolation-key");
-    net::SchemefulSite site(GURL{*network_isolation_key_header});
-    CHECK(!site.opaque());
-    http_request_info.network_isolation_key = NetworkIsolationKey(site, site);
-    http_request_info.network_anonymization_key =
-        NetworkAnonymizationKey::CreateFromNetworkIsolationKey(
-            http_request_info.network_isolation_key);
-  }
-  if (auto force_quic_header =
-          request_info_->extra_headers.GetHeader("-force-quic")) {
-    request_info_->extra_headers.RemoveHeader("-force-quic");
-    http_request_info.force_quic = (*force_quic_header == "true");
-  }
   http_request_info.extra_headers = request_info_->extra_headers;
   http_request_info.socket_tag = request_info_->socket_tag;
   stream_request_ =
@@ -301,7 +261,7 @@ void BidirectionalStream::OnHeadersReceived(
   session_->http_stream_factory()->ProcessAlternativeServices(
       session_, NetworkAnonymizationKey(), response_info.headers.get(),
       url::SchemeHostPort(request_info_->url));
-  delegate_->OnHeadersReceived(response_headers);
+  delegate_->OnHeadersReceived(response_headers, used_proxy_info_);
 }
 
 void BidirectionalStream::OnDataRead(int bytes_read) {
@@ -397,6 +357,8 @@ void BidirectionalStream::OnBidirectionalStreamImplReady(
             "This feature is not used in Chrome."
         }
     )");
+
+  used_proxy_info_ = used_proxy_info;
 
   stream_request_.reset();
   stream_impl_ = std::move(stream);

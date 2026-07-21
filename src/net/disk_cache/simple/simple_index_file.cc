@@ -112,13 +112,14 @@ class SimpleIndexPickle : public base::Pickle {
 bool WritePickleFile(BackendFileOperations* file_operations,
                      base::Pickle* pickle,
                      const base::FilePath& file_name) {
-  base::File file = file_operations->OpenFile(
+  std::unique_ptr<CacheFile> file = file_operations->OpenFile(
       file_name, base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE |
                      base::File::FLAG_WIN_SHARE_DELETE);
-  if (!file.IsValid())
+  if (!file->IsValid()) {
     return false;
+  }
 
-  bool write_ok = file.WriteAndCheck(0, *pickle);
+  bool write_ok = file->WriteAndCheck(0, *pickle);
   if (!write_ok) {
     file_operations->DeleteFile(
         file_name,
@@ -295,7 +296,7 @@ bool SimpleIndexFile::IndexMetadata::Deserialize(base::PickleIterator* it) {
   return true;
 }
 
-void SimpleIndexFile::SyncWriteToDisk(
+SimpleIndexFile::IndexWriteResult SimpleIndexFile::SyncWriteToDiskInternal(
     std::unique_ptr<BackendFileOperations> file_operations,
     net::CacheType cache_type,
     const base::FilePath& cache_directory,
@@ -308,7 +309,7 @@ void SimpleIndexFile::SyncWriteToDisk(
   if (!file_operations->DirectoryExists(index_file_directory) &&
       !file_operations->CreateDirectory(index_file_directory)) {
     LOG(ERROR) << "Could not create a directory to hold the index file";
-    return;
+    return IndexWriteResult::kFailedToCreateDir;
   }
 
   // There is a chance that the index containing all the necessary data about
@@ -321,21 +322,37 @@ void SimpleIndexFile::SyncWriteToDisk(
       file_operations->GetFileInfo(cache_directory);
   if (!file_info) {
     LOG(ERROR) << "Could not obtain information about cache age";
-    return;
+    return IndexWriteResult::kFailedToGetFileInfo;
   }
   cache_dir_mtime = file_info->last_modified;
   SerializeFinalData(cache_dir_mtime, pickle.get());
   if (!WritePickleFile(file_operations.get(), pickle.get(),
                        temp_index_filename)) {
     LOG(ERROR) << "Failed to write the temporary index file";
-    return;
+    return IndexWriteResult::kFailedToWritePickle;
   }
 
   // Atomically rename the temporary index file to become the real one.
   if (!file_operations->ReplaceFile(temp_index_filename, index_filename,
                                     nullptr)) {
-    return;
+    return IndexWriteResult::kFailedToReplaceFile;
   }
+  return IndexWriteResult::kSuccess;
+}
+
+// static
+void SimpleIndexFile::SyncWriteToDisk(
+    std::unique_ptr<BackendFileOperations> file_operations,
+    net::CacheType cache_type,
+    const base::FilePath& cache_directory,
+    const base::FilePath& index_filename,
+    const base::FilePath& temp_index_filename,
+    std::unique_ptr<base::Pickle> pickle) {
+  IndexWriteResult result = SyncWriteToDiskInternal(
+      std::move(file_operations), cache_type, cache_directory, index_filename,
+      temp_index_filename, std::move(pickle));
+  SIMPLE_CACHE_UMA(ENUMERATION, "IndexWriteResult", cache_type, result,
+                   IndexWriteResult::kMaxValue);
 }
 
 bool SimpleIndexFile::IndexMetadata::CheckIndexMetadata() {
@@ -481,16 +498,17 @@ void SimpleIndexFile::SyncLoadFromDisk(BackendFileOperations* file_operations,
                                        SimpleIndexLoadResult* out_result) {
   out_result->Reset();
 
-  base::File file = file_operations->OpenFile(
+  std::unique_ptr<CacheFile> file = file_operations->OpenFile(
       index_filename, base::File::FLAG_OPEN | base::File::FLAG_READ |
                           base::File::FLAG_WIN_SHARE_DELETE |
                           base::File::FLAG_WIN_SEQUENTIAL_SCAN);
-  if (!file.IsValid())
+  if (!file->IsValid()) {
     return;
+  }
 
   // Sanity-check the length. We don't want to crash trying to read some corrupt
   // 10GiB file or such.
-  int64_t file_length = file.GetLength();
+  int64_t file_length = file->GetLength();
   if (file_length < 0 || file_length > kMaxIndexFileSizeBytes) {
     file_operations->DeleteFile(
         index_filename,
@@ -502,7 +520,7 @@ void SimpleIndexFile::SyncLoadFromDisk(BackendFileOperations* file_operations,
   // reallocating a growing buffer.
   auto buffer = base::HeapArray<uint8_t>::Uninit(file_length);
 
-  bool read_ok = file.ReadAndCheck(0, buffer.as_span());
+  bool read_ok = file->ReadAndCheck(0, buffer.as_span());
   if (!read_ok) {
     file_operations->DeleteFile(
         index_filename,

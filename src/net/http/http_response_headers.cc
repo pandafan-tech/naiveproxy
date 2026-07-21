@@ -39,6 +39,7 @@
 #include "net/http/structured_headers.h"
 #include "net/log/net_log_capture_mode.h"
 #include "net/log/net_log_values.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "third_party/abseil-cpp/absl/strings/ascii.h"
 
 using base::Time;
@@ -195,10 +196,6 @@ int ParseStatus(std::string_view status, std::string& append_to) {
 
 }  // namespace
 
-const char HttpResponseHeaders::kContentRange[] = "Content-Range";
-const char HttpResponseHeaders::kLastModified[] = "Last-Modified";
-const char HttpResponseHeaders::kVary[] = "Vary";
-
 struct HttpResponseHeaders::ParsedHeader {
   // A header "continuation" contains only a subsequent value for the
   // preceding header.  (Header values are comma separated.)
@@ -229,6 +226,9 @@ scoped_refptr<HttpResponseHeaders> HttpResponseHeaders::Builder::Build() {
   return base::MakeRefCounted<HttpResponseHeaders>(BuilderPassKey(), version_,
                                                    status_, headers_);
 }
+
+class HttpResponseHeaders::HeaderSet : public absl::flat_hash_set<std::string> {
+};
 
 HttpResponseHeaders::HttpResponseHeaders(std::string_view raw_input)
     : response_code_(-1) {
@@ -377,58 +377,14 @@ void HttpResponseHeaders::Persist(base::Pickle* pickle,
                                   PersistOptions options) {
   if (options == PERSIST_RAW) {
     pickle->WriteString(raw_headers_);
-    return;  // Done.
+    return;
   }
+  std::vector<uint8_t> serialized = Serialize(options);
+  pickle->WriteData(serialized);
+}
 
-  HeaderSet filter_headers;
-
-  // Construct set of headers to filter out based on options.
-  if ((options & PERSIST_SANS_NON_CACHEABLE) == PERSIST_SANS_NON_CACHEABLE)
-    AddNonCacheableHeaders(&filter_headers);
-
-  if ((options & PERSIST_SANS_COOKIES) == PERSIST_SANS_COOKIES)
-    AddCookieHeaders(&filter_headers);
-
-  if ((options & PERSIST_SANS_CHALLENGES) == PERSIST_SANS_CHALLENGES)
-    AddChallengeHeaders(&filter_headers);
-
-  if ((options & PERSIST_SANS_HOP_BY_HOP) == PERSIST_SANS_HOP_BY_HOP)
-    AddHopByHopHeaders(&filter_headers);
-
-  if ((options & PERSIST_SANS_RANGES) == PERSIST_SANS_RANGES)
-    AddHopContentRangeHeaders(&filter_headers);
-
-  if ((options & PERSIST_SANS_SECURITY_STATE) == PERSIST_SANS_SECURITY_STATE)
-    AddSecurityStateHeaders(&filter_headers);
-
-  std::string blob;
-  blob.reserve(raw_headers_.size());
-
-  // This copies the status line w/ terminator null.
-  // Note raw_headers_ has embedded nulls instead of \n,
-  // so this just copies the first header line.
-  blob.assign(raw_headers_.c_str(), strlen(raw_headers_.c_str()) + 1);
-
-  for (size_t i = 0; i < parsed_.size(); ++i) {
-    DCHECK(!parsed_[i].is_continuation());
-
-    // Locate the start of the next header.
-    size_t k = i;
-    while (++k < parsed_.size() && parsed_[k].is_continuation()) {}
-    --k;
-
-    std::string header = base::ToLowerASCII(header_name(parsed_[i]));
-    if (filter_headers.find(header) == filter_headers.end()) {
-      // Make sure there is a null after the value.
-      blob.append(subrange(parsed_[i].name_begin, parsed_[k].value_end));
-      blob.push_back('\0');
-    }
-
-    i = k;
-  }
-  blob.push_back('\0');
-
-  pickle->WriteString(blob);
+std::vector<uint8_t> HttpResponseHeaders::SerializeForMojoIpc() const {
+  return Serialize(PERSIST_SANS_COOKIES);
 }
 
 void HttpResponseHeaders::Update(const HttpResponseHeaders& new_headers) {
@@ -512,7 +468,7 @@ void HttpResponseHeaders::RemoveHeader(std::string_view name) {
 }
 
 void HttpResponseHeaders::RemoveHeaders(
-    const std::unordered_set<std::string>& header_names) {
+    const std::vector<std::string>& header_names) {
   // Copy up to the null byte.  This just copies the status line.
   std::string new_raw_headers(raw_headers_.c_str());
   new_raw_headers.push_back('\0');
@@ -918,6 +874,68 @@ std::string_view HttpResponseHeaders::subrange(size_t begin, size_t end) const {
   return std::string_view(raw_headers_).substr(begin, end - begin);
 }
 
+std::vector<uint8_t> HttpResponseHeaders::Serialize(
+    PersistOptions options) const {
+  CHECK(options != PERSIST_RAW);
+
+  HeaderSet filter_headers;
+
+  // Construct set of headers to filter out based on options.
+  if ((options & PERSIST_SANS_NON_CACHEABLE) == PERSIST_SANS_NON_CACHEABLE) {
+    AddNonCacheableHeaders(&filter_headers);
+  }
+
+  if ((options & PERSIST_SANS_COOKIES) == PERSIST_SANS_COOKIES) {
+    AddCookieHeaders(&filter_headers);
+  }
+
+  if ((options & PERSIST_SANS_CHALLENGES) == PERSIST_SANS_CHALLENGES) {
+    AddChallengeHeaders(&filter_headers);
+  }
+
+  if ((options & PERSIST_SANS_HOP_BY_HOP) == PERSIST_SANS_HOP_BY_HOP) {
+    AddHopByHopHeaders(&filter_headers);
+  }
+
+  if ((options & PERSIST_SANS_RANGES) == PERSIST_SANS_RANGES) {
+    AddHopContentRangeHeaders(&filter_headers);
+  }
+
+  if ((options & PERSIST_SANS_SECURITY_STATE) == PERSIST_SANS_SECURITY_STATE) {
+    AddSecurityStateHeaders(&filter_headers);
+  }
+
+  std::string blob;
+  blob.reserve(raw_headers_.size());
+
+  // This copies the status line w/ terminator null.
+  // Note raw_headers_ has embedded nulls instead of \n,
+  // so this just copies the first header line.
+  blob.assign(raw_headers_.c_str(), strlen(raw_headers_.c_str()) + 1);
+
+  for (size_t i = 0; i < parsed_.size(); ++i) {
+    DCHECK(!parsed_[i].is_continuation());
+
+    // Locate the start of the next header.
+    size_t k = i;
+    while (++k < parsed_.size() && parsed_[k].is_continuation()) {
+    }
+    --k;
+
+    std::string header = base::ToLowerASCII(header_name(parsed_[i]));
+    if (filter_headers.find(header) == filter_headers.end()) {
+      // Make sure there is a null after the value.
+      blob.append(subrange(parsed_[i].name_begin, parsed_[k].value_end));
+      blob.push_back('\0');
+    }
+
+    i = k;
+  }
+  blob.push_back('\0');
+
+  return std::vector<uint8_t>(blob.begin(), blob.end());
+}
+
 std::string_view HttpResponseHeaders::header_name(
     const ParsedHeader& parsed) const {
   return subrange(parsed.name_begin, parsed.name_end);
@@ -932,9 +950,10 @@ std::optional<base::TimeDelta>
 HttpResponseHeaders::GetCacheControlHeaderValueForTesting(
     const std::string_view directive) const {
   for (size_t iter = 0; auto value = EnumerateHeader(&iter, kCacheControl);) {
-    if (base::StartsWith(*value, directive,
-                         base::CompareCase::INSENSITIVE_ASCII)) {
-      const auto delta = ParseSeconds(value->substr(directive.size()));
+    const std::optional<std::string_view> directive_value = base::RemovePrefix(
+        *value, directive, base::CompareCase::INSENSITIVE_ASCII);
+    if (directive_value.has_value()) {
+      const auto delta = ParseSeconds(*directive_value);
       if (delta.has_value()) {
         return delta;
       }
@@ -1184,18 +1203,20 @@ HttpResponseHeaders::CacheControlFreshnessDirectives
 HttpResponseHeaders::ParseCacheControlDirectivesForFreshness() const {
   CacheControlFreshnessDirectives directives;
   for (size_t iter = 0; auto value = EnumerateHeader(&iter, kCacheControl);) {
+    // Result of calling base::RemovePrefix() for values that have prefixes.
+    // nullopt if the prefix that is searched for is not present.
+    std::optional<std::string_view> with_prefix_removed;
     if (base::EqualsCaseInsensitiveASCII(*value, kMustRevalidate)) {
       directives.must_revalidate = true;
     } else if (!directives.max_age &&
-               base::StartsWith(*value, kMaxAge,
-                                base::CompareCase::INSENSITIVE_ASCII)) {
-      // Extract just the value part after "max-age="
-      directives.max_age = ParseSeconds(value->substr(kMaxAge.size()));
+               (with_prefix_removed = base::RemovePrefix(
+                    *value, kMaxAge, base::CompareCase::INSENSITIVE_ASCII))) {
+      directives.max_age = ParseSeconds(*with_prefix_removed);
     } else if (!directives.stale_while_revalidate &&
-               base::StartsWith(*value, kStaleWhileRevalidate,
-                                base::CompareCase::INSENSITIVE_ASCII)) {
-      directives.stale_while_revalidate =
-          ParseSeconds(value->substr(kStaleWhileRevalidate.size()));
+               (with_prefix_removed =
+                    base::RemovePrefix(*value, kStaleWhileRevalidate,
+                                       base::CompareCase::INSENSITIVE_ASCII))) {
+      directives.stale_while_revalidate = ParseSeconds(*with_prefix_removed);
     }
   }
   return directives;
@@ -1564,10 +1585,10 @@ bool HttpResponseHeaders::GetContentRangeFor206(
       *content_range, first_byte_position, last_byte_position, instance_length);
 }
 
-base::Value::Dict HttpResponseHeaders::NetLogParams(
+base::DictValue HttpResponseHeaders::NetLogParams(
     NetLogCaptureMode capture_mode) const {
-  base::Value::Dict dict;
-  base::Value::List headers;
+  base::DictValue dict;
+  base::ListValue headers;
   headers.Append(NetLogStringValue(GetStatusLine()));
   size_t iterator = 0;
   std::string name;

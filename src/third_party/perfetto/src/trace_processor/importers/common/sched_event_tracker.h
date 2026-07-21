@@ -23,6 +23,7 @@
 #include "src/trace_processor/importers/common/cpu_tracker.h"
 #include "src/trace_processor/importers/common/event_tracker.h"
 #include "src/trace_processor/storage/trace_storage.h"
+#include "src/trace_processor/tables/sched_tables_py.h"
 #include "src/trace_processor/types/destructible.h"
 #include "src/trace_processor/types/trace_processor_context.h"
 
@@ -52,7 +53,7 @@ class SchedEventTracker : public Destructible {
     auto row_and_id = sched->Insert(
         {ts, /* duration */ -1, next_utid, kNullStringId, next_prio, ucpu});
     SchedId sched_id = row_and_id.id;
-    return sched->FindById(sched_id)->ToRowNumber().row_number();
+    return (*sched)[sched_id].ToRowNumber().row_number();
   }
 
   PERFETTO_ALWAYS_INLINE

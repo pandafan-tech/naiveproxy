@@ -60,7 +60,7 @@ class BASE_EXPORT SparseHistogram : public HistogramBase {
   void MarkSamplesAsLogged(const HistogramSamples& samples) override;
   std::unique_ptr<HistogramSamples> SnapshotDelta() override;
   std::unique_ptr<HistogramSamples> SnapshotFinalDelta() const override;
-  base::Value::Dict ToGraphDict() const override;
+  base::DictValue ToGraphDict() const override;
 
  protected:
   // HistogramBase:
@@ -68,11 +68,8 @@ class BASE_EXPORT SparseHistogram : public HistogramBase {
 
  private:
   // Clients should always use FactoryGet to create SparseHistogram.
-  explicit SparseHistogram(DurableStringView name);
 
-  // Same as above, but takes a pre-computed `name_hash`. This function is more
-  // efficient as it avoids recomputing the hash if it's already known. The
-  // `name_hash` must be the hash of `name`, this is enforced with a DCHECK.
+  // The `name_hash` must be the hash of `name`, this is enforced with a DCHECK.
   SparseHistogram(DurableStringView name, uint64_t name_hash);
 
   SparseHistogram(PersistentHistogramAllocator* allocator,
@@ -81,12 +78,14 @@ class BASE_EXPORT SparseHistogram : public HistogramBase {
                   HistogramSamples::Metadata* meta,
                   HistogramSamples::Metadata* logged_meta);
 
-  friend BASE_EXPORT HistogramBase* DeserializeHistogramInfo(
-      base::PickleIterator* iter);
-  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter);
+  friend HistogramBase* HistogramBase::DeserializeInfo(
+      base::PickleIterator* iter,
+      NameMapper mapper);
+  static HistogramBase* DeserializeInfoImpl(base::PickleIterator* iter,
+                                            NameMapper mapper);
 
   // Writes the type of the sparse histogram in the |params|.
-  Value::Dict GetParameters() const override;
+  DictValue GetParameters() const override;
 
   // For constructor calling.
   friend class SparseHistogramTest;

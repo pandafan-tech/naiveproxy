@@ -18,6 +18,7 @@
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
+#include "openssl/ssl.h"
 #include "quiche/quic/core/quic_connection_id.h"
 #include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_packet_number.h"
@@ -455,8 +456,8 @@ enum CongestionControlType {
   kBBR,
   kPCC,
   kGoogCC,
-  kBBRv2,  // TODO(rch): This is effectively BBRv3. We should finish the
-           // implementation and rename this enum.
+  kBBRv2,  // This has some changes from BBRv3 as well.
+  kBBRv3,
   kPragueCubic,
 };
 
@@ -581,6 +582,11 @@ enum PacketHeaderFormat : uint8_t {
 
 QUICHE_EXPORT std::string PacketHeaderFormatToString(PacketHeaderFormat format);
 
+template <typename Sink>
+void AbslStringify(Sink& sink, PacketHeaderFormat format) {
+  sink.Append(PacketHeaderFormatToString(format));
+}
+
 // Information about a newly acknowledged packet.
 struct QUICHE_EXPORT AckedPacket {
   constexpr AckedPacket(QuicPacketNumber packet_number,
@@ -644,9 +650,10 @@ enum QuicPacketHeaderTypeFlags : uint8_t {
   // bit to 0, allowing to distinguish Google QUIC packets from short header
   // packets.
   FLAGS_DEMULTIPLEXING_BIT = 1 << 3,
-  // Bits 4 and 5: Reserved bits for short header.
+  // Bits 4: Reserved bit for short header.
   FLAGS_SHORT_HEADER_RESERVED_1 = 1 << 4,
-  FLAGS_SHORT_HEADER_RESERVED_2 = 1 << 5,
+  // Bit 5: the spin bit.
+  FLAGS_SPIN_BIT = 1 << 5,
   // Bit 6: the 'QUIC' bit.
   FLAGS_FIXED_BIT = 1 << 6,
   // Bit 7: Indicates the header is long or short header.
@@ -884,6 +891,11 @@ struct QUICHE_EXPORT QuicSSLConfig {
   // signal support for the extension without advertising particular trust
   // anchors. If nullopt, the Trust Anchor IDs extension will not be sent.
   std::optional<std::string> trust_anchor_ids;
+
+  // If not nullopt, the number of bytes of padding to add to the TLS handshake.
+  // Only used by the client.
+  // This is experimental, and will be removed once the experiment is complete.
+  std::optional<uint16_t> server_padding_to_request = std::nullopt;
 };
 
 QUICHE_EXPORT bool operator==(const QuicSSLConfig& lhs,
@@ -895,9 +907,15 @@ QUICHE_EXPORT bool operator==(const QuicSSLConfig& lhs,
 struct QUICHE_EXPORT QuicDelayedSSLConfig {
   // Client certificate mode for mTLS support. Only used at server side.
   // std::nullopt means do not change client certificate mode.
-  std::optional<ClientCertMode> client_cert_mode;
+  std::optional<ClientCertMode> client_cert_mode = std::nullopt;
   // QUIC transport parameters as serialized by ProofSourceHandle.
-  std::optional<std::vector<uint8_t>> quic_transport_parameters;
+  std::optional<std::vector<uint8_t>> quic_transport_parameters = std::nullopt;
+  // If not nullopt, the SSL compliance policy to use. See documentation for
+  // ssl_compliance_policy_t values in BoringSSL:
+  // https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#Compliance-policy-configurations
+  std::optional<ssl_compliance_policy_t> ssl_compliance_policy = std::nullopt;
+
+  bool operator==(const QuicDelayedSSLConfig& other) const = default;
 };
 
 // ParsedClientHello contains client hello information extracted from a fully

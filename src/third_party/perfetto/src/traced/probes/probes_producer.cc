@@ -18,10 +18,17 @@
 #include <stdio.h>
 #include <sys/stat.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 
 #include "perfetto/base/logging.h"
+#include "perfetto/ext/base/crash_keys.h"
+#include "perfetto/ext/base/file_utils.h"
+#include "perfetto/ext/base/metatrace.h"
+#include "perfetto/ext/base/metatrace_events.h"
+#include "perfetto/ext/base/unix_socket.h"
 #include "perfetto/ext/base/utils.h"
 #include "perfetto/ext/base/watchdog.h"
 #include "perfetto/ext/base/weak_ptr.h"
@@ -32,6 +39,7 @@
 #include "perfetto/tracing/core/data_source_config.h"
 #include "perfetto/tracing/core/data_source_descriptor.h"
 #include "perfetto/tracing/core/forward_decls.h"
+#include "src/traced/probes/android_aflags/android_aflags_data_source.h"
 #include "src/traced/probes/android_cpu_per_uid/android_cpu_per_uid_data_source.h"
 #include "src/traced/probes/android_game_intervention_list/android_game_intervention_list_data_source.h"
 #include "src/traced/probes/android_kernel_wakelocks/android_kernel_wakelocks_data_source.h"
@@ -52,6 +60,8 @@
 #include "src/traced/probes/system_info/system_info_data_source.h"
 #include "src/traced/probes/user_list/user_list_data_source.h"
 
+#include "src/traced/probes/journald/journald_data_source.h"
+
 namespace perfetto {
 namespace {
 
@@ -61,8 +71,18 @@ constexpr uint32_t kMaxConnectionBackoffMs = 30 * 1000;
 // Should be larger than FtraceController::kControllerFlushTimeoutMs.
 constexpr uint32_t kFlushTimeoutMs = 1000;
 
-constexpr size_t kTracingSharedMemSizeHintBytes = 1024 * 1024;
+// Floor for the kTraceDidntStop watchdog timeout. When the system is busy
+// (ftrace is loaded, draining takes time) the calculated timeout can be too
+// tight on short traces and trip the watchdog even though the producer can
+// recover. 5 minutes gives enough slack while still killing genuinely stuck
+// producers.
+constexpr uint32_t kMinTraceDidntStopTimeoutMs = 5 * 60 * 1000;
+
+constexpr size_t kTracingSharedMemSizeHintBytes = 2 * 1024 * 1024;
 constexpr size_t kTracingSharedMemPageSizeHintBytes = 32 * 1024;
+
+base::CrashKey g_crash_key_ds_count("ds_instance_count");
+base::CrashKey g_crash_key_session_count("tracing_session_count");
 
 }  // namespace
 
@@ -185,6 +205,17 @@ ProbesProducer::CreateDSInstance<StatsdBinderDataSource>(
 
 template <>
 std::unique_ptr<ProbesDataSource>
+ProbesProducer::CreateDSInstance<AndroidAflagsDataSource>(
+    TracingSessionID session_id,
+    const DataSourceConfig& config) {
+  auto buffer_id = static_cast<BufferID>(config.target_buffer());
+  return std::make_unique<AndroidAflagsDataSource>(
+      config, task_runner_, session_id,
+      endpoint_->CreateTraceWriter(buffer_id, BufferExhaustedPolicy::kStall));
+}
+
+template <>
+std::unique_ptr<ProbesDataSource>
 ProbesProducer::CreateDSInstance<AndroidPowerDataSource>(
     TracingSessionID session_id,
     const DataSourceConfig& config) {
@@ -292,7 +323,7 @@ ProbesProducer::CreateDSInstance<SystemInfoDataSource>(
   return std::make_unique<SystemInfoDataSource>(
       session_id,
       endpoint_->CreateTraceWriter(buffer_id, BufferExhaustedPolicy::kStall),
-      std::make_unique<CpuFreqInfo>());
+      std::make_unique<CpuFreqInfo>(), config);
 }
 
 template <>
@@ -304,7 +335,7 @@ ProbesProducer::CreateDSInstance<UserListDataSource>(
   return std::unique_ptr<ProbesDataSource>(new UserListDataSource(
       config, session_id,
       endpoint_->CreateTraceWriter(buffer_id,
-                                   perfetto::BufferExhaustedPolicy::kDrop)));
+                                   perfetto::BufferExhaustedPolicy::kStall)));
 }
 
 template <>
@@ -340,6 +371,17 @@ ProbesProducer::CreateDSInstance<FrozenFtraceDataSource>(
       endpoint_->CreateTraceWriter(buffer_id, BufferExhaustedPolicy::kStall));
 }
 
+template <>
+std::unique_ptr<ProbesDataSource>
+ProbesProducer::CreateDSInstance<JournaldDataSource>(
+    TracingSessionID session_id,
+    const DataSourceConfig& config) {
+  auto buffer_id = static_cast<BufferID>(config.target_buffer());
+  return std::make_unique<JournaldDataSource>(
+      config, task_runner_, session_id,
+      endpoint_->CreateTraceWriter(buffer_id, BufferExhaustedPolicy::kStall));
+}
+
 // Another anonymous namespace. This cannot be moved into the anonymous
 // namespace on top (it would fail to compile), because the CreateDSInstance
 // methods need to be fully declared before.
@@ -359,6 +401,7 @@ constexpr DataSourceTraits Ds() {
 }
 
 constexpr const DataSourceTraits kAllDataSources[] = {
+    Ds<AndroidAflagsDataSource>(),
     Ds<AndroidGameInterventionListDataSource>(),
     Ds<AndroidCpuPerUidDataSource>(),
     Ds<AndroidKernelWakelocksDataSource>(),
@@ -369,6 +412,7 @@ constexpr const DataSourceTraits kAllDataSources[] = {
     Ds<FtraceDataSource>(),
     Ds<InitialDisplayStateDataSource>(),
     Ds<InodeFileDataSource>(),
+    Ds<JournaldDataSource>(),
     Ds<LinuxPowerSysfsDataSource>(),
     Ds<MetatraceDataSource>(),
     Ds<PackagesListDataSource>(),
@@ -386,6 +430,7 @@ constexpr const DataSourceTraits kAllDataSources[] = {
 void ProbesProducer::OnConnect() {
   PERFETTO_DCHECK(state_ == kConnecting);
   state_ = kConnected;
+  sock_inotify_.reset();
   ResetConnectionBackoff();
   PERFETTO_LOG("Connected to the service");
 
@@ -429,13 +474,23 @@ void ProbesProducer::OnConnect() {
 void ProbesProducer::OnDisconnect() {
   PERFETTO_DCHECK(state_ == kConnected || state_ == kConnecting);
   PERFETTO_LOG("Disconnected from tracing service");
+
   if (state_ == kConnected)
     return task_runner_->PostTask([this] { this->Restart(); });
 
   state_ = kNotConnected;
   IncreaseConnectionBackoff();
-  task_runner_->PostDelayedTask([this] { this->Connect(); },
-                                connection_backoff_ms_);
+
+  auto reconnect_task = [weak_this = weak_factory_.GetWeakPtr()] {
+    if (weak_this && weak_this->state_ == kNotConnected)
+      weak_this->Connect();
+  };
+
+  task_runner_->PostDelayedTask(reconnect_task, connection_backoff_ms_);
+  if (!sock_inotify_) {
+    sock_inotify_ = base::WatchUnixSocketCreation(task_runner_, socket_name_,
+                                                  reconnect_task);
+  }
 }
 
 void ProbesProducer::SetupDataSource(DataSourceInstanceID instance_id,
@@ -480,6 +535,11 @@ void ProbesProducer::SetupDataSource(DataSourceInstanceID instance_id,
   session_data_sources_[session_id].emplace(data_source->descriptor,
                                             data_source.get());
   data_sources_[instance_id] = std::move(data_source);
+
+  // Set crash keys for debugging overload crashes.
+  g_crash_key_ds_count.Set(static_cast<int64_t>(data_sources_.size()));
+  g_crash_key_session_count.Set(
+      static_cast<int64_t>(session_data_sources_.size()));
 }
 
 void ProbesProducer::StartDataSource(DataSourceInstanceID instance_id,
@@ -503,9 +563,12 @@ void ProbesProducer::StartDataSource(DataSourceInstanceID instance_id,
     // might be < timeout measured in in wall time. But this is fine
     // because the resulting timeout will be conservative (it will be accurate
     // if the device never suspends, and will be more lax if it does).
-    uint32_t timeout =
+    // kMinTraceDidntStopTimeoutMs floors it so short traces don't trip the
+    // watchdog when the system is busy.
+    uint32_t timeout = std::max<uint32_t>(
         2 * (kDefaultFlushTimeoutMs + config.trace_duration_ms() +
-             config.stop_timeout_ms());
+             config.stop_timeout_ms()),
+        kMinTraceDidntStopTimeoutMs);
     watchdogs_.emplace(
         instance_id, base::Watchdog::GetInstance()->CreateFatalTimer(
                          timeout, base::WatchdogCrashReason::kTraceDidntStop));
@@ -555,6 +618,15 @@ void ProbesProducer::StopDataSource(DataSourceInstanceID id) {
   // were acked), and therefore the kill would race against the tracefs
   // cleanup.
   endpoint_->NotifyDataSourceStopped(id);
+
+  // This is to reduce the noise in Android performance benchmarks that measure
+  // the memory of perfetto processes.
+  base::MaybeReleaseAllocatorMemToOS();
+
+  // Set crash keys for debugging overload crashes.
+  g_crash_key_ds_count.Set(static_cast<int64_t>(data_sources_.size()));
+  g_crash_key_session_count.Set(
+      static_cast<int64_t>(session_data_sources_.size()));
 }
 
 void ProbesProducer::OnTracingSetup() {
@@ -642,6 +714,59 @@ void ProbesProducer::OnFlushTimeout(FlushRequestID flush_request_id) {
   PERFETTO_ELOG("Flush(%" PRIu64 ") timed out", flush_request_id);
   pending_flushes_.erase(flush_request_id);
   endpoint_->NotifyFlushComplete(flush_request_id);
+}
+
+// Called when the watchdog is about to kill us. This is to better debug
+// traced_probes' wdog crashes. This function has nothing to do with
+// protocol-level flushes.
+void ProbesProducer::FlushForWatchdogAndCrash(base::WatchdogCrashInfo info) {
+  PERFETTO_METATRACE_COUNTER(TAG_PRODUCER, WATCHDOG_CRASH_REASON,
+                             static_cast<int32_t>(info.reason));
+  PERFETTO_METATRACE_COUNTER(TAG_PRODUCER, WATCHDOG_CRASH_ACTUAL_MONO,
+                             info.actual_mono_s);
+  PERFETTO_METATRACE_COUNTER(TAG_PRODUCER, WATCHDOG_CRASH_ACTUAL_BOOT,
+                             info.actual_boot_s);
+  PERFETTO_METATRACE_COUNTER(TAG_PRODUCER, WATCHDOG_CRASH_ACTUAL_CPU,
+                             info.actual_cpu_s);
+  PERFETTO_METATRACE_COUNTER(TAG_PRODUCER, WATCHDOG_CRASH_TIME_BOOT_MS,
+                             info.alarm_time_ms);
+
+  std::vector<ProbesDataSource*> ds_to_flush;
+
+  // We are only interested in ftrace data sources. Trying to flush other data
+  // sources might cause cascading problems.
+  int ftrace_sessions = 0;
+  for (auto& kv : data_sources_) {
+    ProbesDataSource* ds = kv.second.get();
+    if (!ds || !ds->started ||
+        (ds->descriptor != &FtraceDataSource::descriptor &&
+         ds->descriptor != &MetatraceDataSource::descriptor)) {
+      continue;
+    }
+    ds_to_flush.emplace_back(ds);
+    ftrace_sessions += ds->descriptor == &FtraceDataSource::descriptor ? 1 : 0;
+  }
+
+  PERFETTO_METATRACE_COUNTER(TAG_FTRACE, FTRACE_SESSIONS, ftrace_sessions);
+
+  if (ds_to_flush.empty()) {
+    PERFETTO_FATAL("No active data sources found. Crashing now.");
+  }
+
+  PERFETTO_LOG("FlushWatchdogAndCrash(): Flushing %zu ftrace data sources",
+               ds_to_flush.size());
+  // shared_ptr as this is passed around the various callbacks.
+  auto flushes_pending = std::make_shared<size_t>(ds_to_flush.size());
+  auto flush_callback = [flushes_pending]() {
+    if (--*(flushes_pending) == 0) {
+      PERFETTO_FATAL("Done flushing data sources. Crashing now.");
+    }
+  };
+
+  for (ProbesDataSource* ds : ds_to_flush) {
+    constexpr FlushRequestID kFlushId = UINT64_MAX;
+    ds->Flush(kFlushId, flush_callback);
+  }
 }
 
 void ProbesProducer::ClearIncrementalState(

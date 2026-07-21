@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifdef PARTITION_ALLOC_SHIM_ALLOCATOR_SHIM_FUNCTIONS_H_
 #error This header is meant to be included only once by allocator_shim*.cc except allocator_shim_win_component.cc
 #endif
@@ -19,10 +14,12 @@
 #include <new>
 
 #include "partition_alloc/build_config.h"
+#include "partition_alloc/buildflags.h"
 #include "partition_alloc/partition_alloc_base/compiler_specific.h"
 #include "partition_alloc/partition_alloc_check.h"
 #include "partition_alloc/shim/allocator_dispatch.h"
 #include "partition_alloc/shim/allocator_shim.h"
+#include "partition_alloc/shim/allocator_shim_default_dispatch_to_partition_alloc.h"
 #include "partition_alloc/shim/allocator_shim_internals.h"
 
 #if PA_BUILDFLAG(IS_WIN)
@@ -30,6 +27,7 @@
 #endif
 
 namespace allocator_shim {
+
 namespace internal {
 
 std::atomic<const allocator_shim::AllocatorDispatch*> g_chain_head{
@@ -54,7 +52,7 @@ bool CallNewHandler(size_t size) {
 #endif
 }
 
-#if !(PA_BUILDFLAG(IS_WIN) && defined(COMPONENT_BUILD))
+#if !(PA_BUILDFLAG(IS_WIN) && PA_BUILDFLAG(IS_COMPONENT_BUILD))
 PA_ALWAYS_INLINE
 #endif
 const allocator_shim::AllocatorDispatch* GetChainHead() {
@@ -69,18 +67,20 @@ void SetCallNewHandlerOnMallocFailure(bool value) {
 
 void* UncheckedAlloc(size_t size) {
   const AllocatorDispatch* const chain_head = internal::GetChainHead();
-  return chain_head->alloc_unchecked_function(size, nullptr);
+  return chain_head->alloc_unchecked_function(
+      size, AllocToken(kDefaultPartitionIndex), nullptr);
 }
 
 void* UncheckedCalloc(size_t n, size_t size) {
   const AllocatorDispatch* const chain_head = internal::GetChainHead();
-  return chain_head->alloc_zero_initialized_unchecked_function(n, size,
-                                                               nullptr);
+  return chain_head->alloc_zero_initialized_unchecked_function(
+      n, size, AllocToken(kDefaultPartitionIndex), nullptr);
 }
 
 void* UncheckedRealloc(void* ptr, size_t size) {
   const AllocatorDispatch* const chain_head = internal::GetChainHead();
-  return chain_head->realloc_unchecked_function(ptr, size, nullptr);
+  return chain_head->realloc_unchecked_function(
+      ptr, size, AllocToken(kDefaultPartitionIndex), nullptr);
 }
 
 void UncheckedFree(void* ptr) {
@@ -90,13 +90,14 @@ void UncheckedFree(void* ptr) {
 
 void* UncheckedAlignedAlloc(size_t size, size_t align) {
   const AllocatorDispatch* const chain_head = internal::GetChainHead();
-  return chain_head->aligned_malloc_unchecked_function(size, align, nullptr);
+  return chain_head->aligned_malloc_unchecked_function(
+      size, align, AllocToken(kDefaultPartitionIndex), nullptr);
 }
 
 void* UncheckedAlignedRealloc(void* ptr, size_t size, size_t align) {
   const AllocatorDispatch* const chain_head = internal::GetChainHead();
-  return chain_head->aligned_realloc_unchecked_function(ptr, size, align,
-                                                        nullptr);
+  return chain_head->aligned_realloc_unchecked_function(
+      ptr, size, align, AllocToken(kDefaultPartitionIndex), nullptr);
 }
 
 void UncheckedAlignedFree(void* ptr) {

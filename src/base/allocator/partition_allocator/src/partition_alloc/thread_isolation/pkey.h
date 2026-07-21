@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_THREAD_ISOLATION_PKEY_H_
 #define PARTITION_ALLOC_THREAD_ISOLATION_PKEY_H_
 
@@ -43,9 +38,6 @@ uint32_t Rdpkru();
 // Write the pkru register (the current pkey state).
 void Wrpkru(uint32_t pkru);
 
-#if PA_BUILDFLAG(DCHECKS_ARE_ON) || \
-    PA_BUILDFLAG(ENABLE_PARTITION_LOCK_REENTRANCY_CHECK)
-
 class PA_COMPONENT_EXPORT(PARTITION_ALLOC) LiftPkeyRestrictionsScope {
  public:
   static constexpr uint32_t kDefaultPkeyValue = 0x55555554;
@@ -57,9 +49,6 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) LiftPkeyRestrictionsScope {
  private:
   uint32_t saved_pkey_value_;
 };
-
-#endif  // PA_BUILDFLAG(DCHECKS_ARE_ON) ||
-        // PA_BUILDFLAG(ENABLE_PARTITION_LOCK_REENTRANCY_CHECK)
 
 }  // namespace partition_alloc::internal
 

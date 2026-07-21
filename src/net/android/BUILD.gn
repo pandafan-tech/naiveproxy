@@ -13,6 +13,7 @@ android_library("net_java") {
     "java/src/org/chromium/net/AndroidNetworkLibrary.java",
     "java/src/org/chromium/net/AndroidTrafficStats.java",
     "java/src/org/chromium/net/ChromiumNetworkAdapter.java",
+    "java/src/org/chromium/net/ConnectivityManagerWrapper.java",
     "java/src/org/chromium/net/DnsStatus.java",
     "java/src/org/chromium/net/GURLUtils.java",
     "java/src/org/chromium/net/HttpNegotiateAuthenticator.java",
@@ -261,6 +262,7 @@ java_cpp_enum("net_java_test_support_enums_srcjar") {
 
 java_cpp_enum("net_android_java_enums_srcjar") {
   sources = [
+    "../base/ech_mode.h",
     "../base/network_change_notifier.h",
     "../socket/socket_tag.cc",
     "cert_verify_result_android.h",
@@ -271,6 +273,7 @@ java_cpp_enum("net_android_java_enums_srcjar") {
 }
 
 robolectric_binary("net_junit_tests") {
+  enable_android_resources = false
   sources = [
     "junit/src/org/chromium/net/HttpNegotiateAuthenticatorTest.java",
     "junit/src/org/chromium/net/NetworkTrafficAnnotationTagTest.java",
@@ -280,7 +283,7 @@ robolectric_binary("net_junit_tests") {
     "//base:base_java",
     "//base:base_java_test_support",
     "//base:base_junit_test_support",
-    "//third_party/hamcrest:hamcrest_java",
+    "//third_party/google-truth:google_truth_java",
     "//third_party/jni_zero:jni_zero_java",
   ]
 }

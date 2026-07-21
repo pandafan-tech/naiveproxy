@@ -21,29 +21,22 @@
 #include <string.h>
 
 #include <algorithm>
-#include <map>
-#include <string>
 #include <utility>
 
 #include <openssl/aead.h>
 #include <openssl/bn.h>
 #include <openssl/bytestring.h>
-#include <openssl/crypto.h>
-#include <openssl/curve25519.h>
 #include <openssl/ec_key.h>
 #include <openssl/ecdsa.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
-#include <openssl/hkdf.h>
-#include <openssl/hmac.h>
 #include <openssl/hpke.h>
 #include <openssl/md5.h>
 #include <openssl/mem.h>
-#include <openssl/pool.h>
-#include <openssl/x509.h>
 #include <openssl/rand.h>
 #include <openssl/sha2.h>
 
+#include "../crypto/bytestring/internal.h"
 #include "../crypto/internal.h"
 #include "internal.h"
 
@@ -223,301 +216,6 @@ bool ssl_write_client_hello_without_extensions(const SSL_HANDSHAKE *hs,
   return true;
 }
 
-// Forward declarations for the REALITY support functions defined below.
-static enum ssl_verify_result_t reality_verify_cert(SSL *ssl,
-                                                    uint8_t *out_alert);
-
-// Process-global REALITY config. Server-name entries are checked first; the
-// fallback config is used only when no SNI-specific entry exists. This keeps
-// multiple Cronet naive proxy engines isolated inside one process: a REALITY
-// proxy registers its proxy SNI while plain TLS proxies have no matching entry
-// and therefore never inherit that REALITY state.
-struct RealityGlobalConfig {
-  bool enabled = false;
-  uint8_t server_pubkey[32] = {0};
-  uint8_t short_id[8] = {0};
-  uint8_t client_version[4] = {0};
-};
-
-static CRYPTO_MUTEX g_reality_global_lock = CRYPTO_MUTEX_INIT;
-static RealityGlobalConfig g_reality_global;
-static std::map<std::string, RealityGlobalConfig>
-    *g_reality_global_by_server_name = nullptr;
-static std::map<std::string, RealityGlobalConfig>
-    *g_reality_global_by_authority = nullptr;
-
-static std::string reality_authority_key(const char *server_name,
-                                         uint16_t port) {
-  std::string key(server_name);
-  key.push_back('\0');
-  key.push_back(static_cast<char>(port >> 8));
-  key.push_back(static_cast<char>(port));
-  return key;
-}
-
-static void reality_fill_global_config(RealityGlobalConfig *out,
-                                       const uint8_t public_key[32],
-                                       const uint8_t *short_id,
-                                       size_t short_id_len,
-                                       const uint8_t client_version[4]) {
-  out->enabled = true;
-  OPENSSL_memcpy(out->server_pubkey, public_key, 32);
-  OPENSSL_memset(out->short_id, 0, sizeof(out->short_id));
-  if (short_id != nullptr && short_id_len > 0) {
-    OPENSSL_memcpy(out->short_id, short_id, short_id_len);
-  }
-  if (client_version != nullptr) {
-    OPENSSL_memcpy(out->client_version, client_version, 4);
-  } else {
-    OPENSSL_memset(out->client_version, 0, 4);
-  }
-}
-
-extern "C" int SSL_set_reality_global_config(const uint8_t public_key[32],
-                                             const uint8_t *short_id,
-                                             size_t short_id_len,
-                                             const uint8_t client_version[4]) {
-  if (short_id_len > 8) return 0;
-  CRYPTO_MUTEX_lock_write(&g_reality_global_lock);
-  if (public_key == nullptr) {
-    g_reality_global.enabled = false;
-  } else {
-    reality_fill_global_config(&g_reality_global, public_key, short_id,
-                               short_id_len, client_version);
-  }
-  CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
-  return 1;
-}
-
-extern "C" int SSL_set_reality_global_config_for_server_name(
-    const char *server_name,
-    const uint8_t public_key[32],
-    const uint8_t *short_id,
-    size_t short_id_len,
-    const uint8_t client_version[4]) {
-  if (server_name == nullptr || server_name[0] == '\0' || short_id_len > 8) {
-    return 0;
-  }
-  CRYPTO_MUTEX_lock_write(&g_reality_global_lock);
-  if (g_reality_global_by_server_name == nullptr) {
-    g_reality_global_by_server_name =
-        new std::map<std::string, RealityGlobalConfig>();
-  }
-  std::string key(server_name);
-  if (public_key == nullptr) {
-    g_reality_global_by_server_name->erase(key);
-  } else {
-    RealityGlobalConfig cfg;
-    reality_fill_global_config(&cfg, public_key, short_id, short_id_len,
-                               client_version);
-    (*g_reality_global_by_server_name)[key] = cfg;
-  }
-  CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
-  return 1;
-}
-
-extern "C" int SSL_set_reality_global_config_for_authority(
-    const char *server_name,
-    uint16_t port,
-    const uint8_t public_key[32],
-    const uint8_t *short_id,
-    size_t short_id_len,
-    const uint8_t client_version[4]) {
-  if (server_name == nullptr || server_name[0] == '\0' || port == 0 ||
-      short_id_len > 8) {
-    return 0;
-  }
-  CRYPTO_MUTEX_lock_write(&g_reality_global_lock);
-  if (g_reality_global_by_authority == nullptr) {
-    g_reality_global_by_authority =
-        new std::map<std::string, RealityGlobalConfig>();
-  }
-  std::string key = reality_authority_key(server_name, port);
-  if (public_key == nullptr) {
-    g_reality_global_by_authority->erase(key);
-  } else {
-    RealityGlobalConfig cfg;
-    reality_fill_global_config(&cfg, public_key, short_id, short_id_len,
-                               client_version);
-    (*g_reality_global_by_authority)[key] = cfg;
-  }
-  CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
-  return 1;
-}
-
-extern "C" int SSL_apply_reality_global_config_for_authority(
-    SSL *ssl, const char *server_name, uint16_t port) {
-  if (ssl == nullptr || server_name == nullptr || server_name[0] == '\0' ||
-      port == 0) {
-    return 0;
-  }
-  RealityGlobalConfig snap;
-  bool found = false;
-  CRYPTO_MUTEX_lock_read(&g_reality_global_lock);
-  if (g_reality_global_by_authority != nullptr) {
-    auto it = g_reality_global_by_authority->find(
-        reality_authority_key(server_name, port));
-    if (it != g_reality_global_by_authority->end()) {
-      snap = it->second;
-      found = true;
-    }
-  }
-  CRYPTO_MUTEX_unlock_read(&g_reality_global_lock);
-  if (!found) {
-    return 1;
-  }
-  return SSL_set_reality_config(ssl, snap.server_pubkey, snap.short_id,
-                                sizeof(snap.short_id), snap.client_version);
-}
-
-// Snapshot the global config under the read lock so callers don't hold the
-// mutex during downstream BoringSSL calls.
-static bool reality_global_snapshot(SSL *ssl, RealityGlobalConfig *out) {
-  CRYPTO_MUTEX_lock_read(&g_reality_global_lock);
-  const char *server_name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-  if (server_name != nullptr && g_reality_global_by_server_name != nullptr) {
-    auto it = g_reality_global_by_server_name->find(server_name);
-    if (it != g_reality_global_by_server_name->end()) {
-      *out = it->second;
-      CRYPTO_MUTEX_unlock_read(&g_reality_global_lock);
-      return out->enabled;
-    }
-  }
-  *out = g_reality_global;
-  CRYPTO_MUTEX_unlock_read(&g_reality_global_lock);
-  return out->enabled;
-}
-
-// reality_extract_x25519_priv finds the X25519 SSLKeyShare in |hs->key_shares|
-// and returns its 32-byte private key in |out|. Returns true on success.
-// REALITY requires a single X25519 key share to be present at this point
-// (the ECDH against the server's pre-shared pub key reuses the TLS 1.3
-// key_share rather than a separate ephemeral keypair).
-static bool reality_extract_x25519_priv(SSL_HANDSHAKE *hs,
-                                        uint8_t out[32]) {
-  for (const auto &ks : hs->key_shares) {
-    if (ks == nullptr) continue;
-    if (ks->GroupID() != SSL_GROUP_X25519) continue;
-    ScopedCBB cbb;
-    if (!CBB_init(cbb.get(), 32) ||
-        !ks->SerializePrivateKey(cbb.get())) {
-      return false;
-    }
-    if (CBB_len(cbb.get()) != 32) {
-      return false;
-    }
-    OPENSSL_memcpy(out, CBB_data(cbb.get()), 32);
-    return true;
-  }
-  return false;
-}
-
-// reality_apply_to_client_hello rewrites the session_id field of the
-// serialized ClientHello in |msg| to carry the REALITY authenticated
-// payload. Must be called AFTER finish_message but BEFORE add_message,
-// because add_message also updates the transcript hash and we need the
-// transcript to reflect the patched bytes.
-//
-// On entry, the session_id slot in |msg| MUST already contain 32 zero
-// bytes (we arranged that earlier by setting hs->session_id to zeros).
-// The 32 zero bytes are part of the AAD for AES-256-GCM Seal, matching
-// what the server will reconstruct on receive.
-//
-// Layout of msg:
-//   [0]      handshake type (0x01)
-//   [1..3]   handshake body length (24-bit)
-//   [4..5]   legacy_version
-//   [6..37]  ClientHello.random (32 bytes)
-//   [38]     session_id_length (must be 32)
-//   [39..70] session_id (32 zero bytes on entry; ciphertext on exit)
-//   [71..]   cipher suites, compression methods, extensions...
-static bool reality_apply_to_client_hello(SSL_HANDSHAKE *hs,
-                                          Span<uint8_t> msg) {
-  // Sanity: msg must be large enough to contain a session_id at offset 39
-  // and the layout we expect.
-  if (msg.size() < 71) {
-    return false;
-  }
-  if (msg[0] != SSL3_MT_CLIENT_HELLO) {
-    return false;
-  }
-  if (msg[38] != 32) {
-    // Some Chrome fingerprints may set session_id_length != 32; in that
-    // case REALITY can't be used because we'd lose fingerprint fidelity
-    // by extending the field. Bail loudly so misconfiguration is visible.
-    return false;
-  }
-
-  // 1. Derive AuthKey = HKDF-SHA256(X25519(client_priv, server_pub),
-  //                                 salt = ClientHello.random[0:20],
-  //                                 info = "REALITY")
-  uint8_t client_priv[32];
-  if (!reality_extract_x25519_priv(hs, client_priv)) {
-    return false;
-  }
-  uint8_t shared[32];
-  if (!X25519(shared, client_priv, hs->reality_server_pubkey)) {
-    OPENSSL_cleanse(client_priv, sizeof(client_priv));
-    return false;
-  }
-  OPENSSL_cleanse(client_priv, sizeof(client_priv));
-
-  Span<const uint8_t> ch_random = msg.subspan(6, 32);  // bytes [6, 38)
-  static const char kInfo[] = "REALITY";
-  if (!HKDF(hs->reality_auth_key, sizeof(hs->reality_auth_key), EVP_sha256(),
-            shared, sizeof(shared),
-            /*salt=*/ch_random.data(), /*salt_len=*/20,
-            /*info=*/reinterpret_cast<const uint8_t *>(kInfo),
-            /*info_len=*/sizeof(kInfo) - 1)) {
-    OPENSSL_cleanse(shared, sizeof(shared));
-    return false;
-  }
-  OPENSSL_cleanse(shared, sizeof(shared));
-  hs->reality_auth_key_ready = true;
-
-  // 2. Build 16-byte plaintext: [version:4][timestamp_be:4][short_id:8]
-  uint8_t plaintext[16];
-  OPENSSL_memcpy(plaintext, hs->reality_client_version, 4);
-  uint32_t now = static_cast<uint32_t>(time(nullptr));
-  plaintext[4] = static_cast<uint8_t>(now >> 24);
-  plaintext[5] = static_cast<uint8_t>(now >> 16);
-  plaintext[6] = static_cast<uint8_t>(now >> 8);
-  plaintext[7] = static_cast<uint8_t>(now);
-  OPENSSL_memcpy(plaintext + 8, hs->reality_short_id, 8);
-
-  // 3. AES-256-GCM Seal with nonce = ClientHello.random[20:32] (12 bytes),
-  //    AAD = msg (with session_id slot still zeroed; we haven't touched it).
-  bssl::ScopedEVP_AEAD_CTX aead;
-  if (!EVP_AEAD_CTX_init(aead.get(), EVP_aead_aes_256_gcm(),
-                         hs->reality_auth_key, sizeof(hs->reality_auth_key),
-                         /*tag_len=*/EVP_AEAD_DEFAULT_TAG_LENGTH,
-                         /*impl=*/nullptr)) {
-    return false;
-  }
-  uint8_t out[32];
-  size_t out_len = 0;
-  Span<const uint8_t> nonce = msg.subspan(26, 12);  // random[20:32]
-  if (!EVP_AEAD_CTX_seal(aead.get(), out, &out_len, sizeof(out),
-                         nonce.data(), nonce.size(),
-                         plaintext, sizeof(plaintext),
-                         /*ad=*/msg.data(), /*ad_len=*/msg.size())) {
-    return false;
-  }
-  if (out_len != 32) {
-    return false;
-  }
-
-  // 4. Patch ciphertext into session_id slot (bytes [39, 71)) on the wire.
-  OPENSSL_memcpy(msg.data() + 39, out, 32);
-  // 5. ALSO update hs->session_id to the ciphertext. TLS 1.3 requires that
-  //    ServerHello.legacy_session_id_echo == ClientHello.legacy_session_id;
-  //    BoringSSL's tls13_client.cc compares the echoed value against
-  //    hs->session_id, so if we leave hs->session_id at the zero placeholder
-  //    we set pre-serialization, the check fails with SSL_R_DECODE_ERROR.
-  OPENSSL_memcpy(hs->session_id.data(), out, 32);
-  return true;
-}
-
 bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
   SSL *const ssl = hs->ssl;
   ScopedCBB cbb;
@@ -525,279 +223,16 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
   ssl_client_hello_type_t type = hs->selected_ech_config
                                      ? ssl_client_hello_outer
                                      : ssl_client_hello_unencrypted;
-
-  // If per-SSL REALITY was not explicitly configured but a global is set,
-  // apply the global to this SSL. This is how embedders that don't have
-  // direct access to SSL objects (e.g., cronet via cronet-go) opt every
-  // outgoing TLS connection into REALITY for the proxy server's session.
-  if (!hs->reality_enabled) {
-    RealityGlobalConfig snap;
-    if (reality_global_snapshot(ssl, &snap)) {
-      hs->reality_enabled = true;
-      OPENSSL_memcpy(hs->reality_server_pubkey, snap.server_pubkey, 32);
-      OPENSSL_memcpy(hs->reality_short_id, snap.short_id, 8);
-      OPENSSL_memcpy(hs->reality_client_version, snap.client_version, 4);
-    }
-  }
-
-  if (hs->reality_enabled) {
-    // NOTE: do NOT install SSL_set_custom_verify here. The Cronet net stack
-    // registers its own custom_verify on the SSL_CTX (see
-    // ssl_client_socket_impl.cc::SSLContext()), which gates additional
-    // bookkeeping in SSLClientSocketImpl::DoHandshakeComplete (server_cert_
-    // population, SSLInfo). Overriding the callback skips that bookkeeping
-    // and CHECK(GetSSLInfo()) fires later. Instead, the net stack patch
-    // calls SSL_reality_is_enabled / SSL_reality_verify_peer_cert from
-    // inside its VerifyCert() function so both paths converge.
-    static const uint16_t kRealityVerifySigalgs[] = {
-        SSL_SIGN_ED25519,
-        SSL_SIGN_ECDSA_SECP256R1_SHA256,
-        SSL_SIGN_ECDSA_SECP384R1_SHA384,
-        SSL_SIGN_RSA_PSS_RSAE_SHA256,
-        SSL_SIGN_RSA_PSS_RSAE_SHA384,
-        SSL_SIGN_RSA_PSS_RSAE_SHA512,
-        SSL_SIGN_RSA_PKCS1_SHA256,
-        SSL_SIGN_RSA_PKCS1_SHA384,
-        SSL_SIGN_RSA_PKCS1_SHA512,
-    };
-    SSL_set_verify_algorithm_prefs(
-        ssl, kRealityVerifySigalgs,
-        sizeof(kRealityVerifySigalgs) / sizeof(kRealityVerifySigalgs[0]));
-
-    // REALITY ALPN injection: cronet's HttpProxyConnectJob uses
-    // AlpnMode::kDisabled for proxy CONNECT TLS handshakes (see
-    // net/socket/connect_job_factory.cc), which clears alpn_protos. But
-    // naive proxy SERVER expects h2 (it serves via H2 CONNECT inside TLS).
-    // Apply this to both global and explicit per-SSL REALITY configuration.
-    // QUIC sets its own h3 ALPN and must not be overridden here.
-    if (!SSL_is_quic(ssl)) {
-      static const uint8_t kRealityAlpnProtos[] = {
-          0x02, 'h', '2',
-          0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
-      };
-      SSL_set_alpn_protos(ssl, kRealityAlpnProtos,
-                          sizeof(kRealityAlpnProtos));
-    }
-  }
-
-  // REALITY: force session_id to 32 zero bytes BEFORE serialization so the
-  // AAD-bound bytes match what the server will reconstruct. We patch in
-  // the encrypted payload AFTER finish_message but BEFORE add_message.
-  if (hs->reality_enabled) {
-    hs->session_id.clear();
-    if (!hs->session_id.TryResize(32)) {
-      return false;
-    }
-    OPENSSL_memset(hs->session_id.data(), 0, hs->session_id.size());
-  }
-
-  bool needs_psk_binder;
   Array<uint8_t> msg;
   if (!ssl->method->init_message(ssl, cbb.get(), &body, SSL3_MT_CLIENT_HELLO) ||
       !ssl_write_client_hello_without_extensions(hs, &body, type,
                                                  /*empty_session_id=*/false) ||
-      !ssl_add_clienthello_tlsext(hs, &body, /*out_encoded=*/nullptr,
-                                  &needs_psk_binder, type, CBB_len(&body)) ||
+      !ssl_add_clienthello_tlsext(hs, &body, /*out_encoded=*/nullptr, type) ||
       !ssl->method->finish_message(ssl, cbb.get(), &msg)) {
     return false;
   }
 
-  // Now that the length prefixes have been computed, fill in the placeholder
-  // PSK binder.
-  if (needs_psk_binder) {
-    // ClientHelloOuter cannot have a PSK binder. Otherwise the
-    // ClientHellOuterAAD computation would break.
-    assert(type != ssl_client_hello_outer);
-    if (!tls13_write_psk_binder(hs, hs->transcript, Span(msg),
-                                /*out_binder_len=*/nullptr)) {
-      return false;
-    }
-  }
-
-  // REALITY transform happens after PSK binder is finalized (so the binder
-  // doesn't cover our REALITY payload — the server doesn't expect it to)
-  // but before add_message updates the transcript hash with the patched
-  // session_id bytes.
-  if (hs->reality_enabled) {
-    assert(type != ssl_client_hello_outer);
-    if (!reality_apply_to_client_hello(hs, Span(msg))) {
-      OPENSSL_PUT_ERROR(SSL, SSL_R_HANDSHAKE_FAILURE_ON_CLIENT_HELLO);
-      return false;
-    }
-  }
-
   return ssl->method->add_message(ssl, std::move(msg));
-}
-
-// reality_verify_cert is installed via SSL_set_custom_verify when REALITY
-// is enabled. It implements the REALITY cert authentication step:
-//
-//   if leaf.public_key is Ed25519
-//      and HMAC-SHA512(reality_auth_key, leaf.public_key) == leaf.signature:
-//     accept (skip chain verify; the borrowed cert is what REALITY guarantees)
-//   else:
-//     reject (we treat fall-through to standard chain verify as failure,
-//             because a successful chain verify against the borrowed SNI
-//             would mean we got proxied to the real site — useless for us)
-//
-// Matches xray-core's UConn.VerifyPeerCertificate (Xray-core/transport/
-// internet/reality/reality.go).
-static enum ssl_verify_result_t reality_verify_cert(SSL *ssl,
-                                                    uint8_t *out_alert) {
-  *out_alert = SSL_AD_BAD_CERTIFICATE;
-  if (ssl->s3 == nullptr || ssl->s3->hs == nullptr) {
-    return ssl_verify_invalid;
-  }
-  SSL_HANDSHAKE *hs = ssl->s3->hs.get();
-  if (!hs->reality_enabled || !hs->reality_auth_key_ready) {
-    return ssl_verify_invalid;
-  }
-
-  const STACK_OF(CRYPTO_BUFFER) *certs = SSL_get0_peer_certificates(ssl);
-  if (certs == nullptr || sk_CRYPTO_BUFFER_num(certs) == 0) {
-    return ssl_verify_invalid;
-  }
-  CRYPTO_BUFFER *leaf = sk_CRYPTO_BUFFER_value(certs, 0);
-  if (leaf == nullptr) {
-    return ssl_verify_invalid;
-  }
-
-  const uint8_t *cert_data = CRYPTO_BUFFER_data(leaf);
-  long cert_len = static_cast<long>(CRYPTO_BUFFER_len(leaf));
-  bssl::UniquePtr<X509> x509(d2i_X509(nullptr, &cert_data, cert_len));
-  if (x509 == nullptr) {
-    return ssl_verify_invalid;
-  }
-
-  EVP_PKEY *pkey = X509_get0_pubkey(x509.get());
-  if (pkey == nullptr || EVP_PKEY_id(pkey) != EVP_PKEY_ED25519) {
-    return ssl_verify_invalid;
-  }
-  uint8_t ed25519_pub[32];
-  size_t ed25519_pub_len = sizeof(ed25519_pub);
-  if (!EVP_PKEY_get_raw_public_key(pkey, ed25519_pub, &ed25519_pub_len) ||
-      ed25519_pub_len != 32) {
-    return ssl_verify_invalid;
-  }
-
-  uint8_t expected[64];
-  unsigned int expected_len = 0;
-  if (HMAC(EVP_sha512(), hs->reality_auth_key, sizeof(hs->reality_auth_key),
-           ed25519_pub, sizeof(ed25519_pub), expected, &expected_len) ==
-          nullptr ||
-      expected_len != 64) {
-    return ssl_verify_invalid;
-  }
-
-  const ASN1_BIT_STRING *sig = nullptr;
-  const X509_ALGOR *sig_alg = nullptr;
-  X509_get0_signature(&sig, &sig_alg, x509.get());
-  if (sig == nullptr) {
-    return ssl_verify_invalid;
-  }
-  int sig_len = ASN1_STRING_length(sig);
-  const uint8_t *sig_bytes = ASN1_STRING_get0_data(sig);
-  if (sig_bytes == nullptr || sig_len != 64) {
-    return ssl_verify_invalid;
-  }
-
-  if (CRYPTO_memcmp(expected, sig_bytes, 64) != 0) {
-    return ssl_verify_invalid;
-  }
-
-  *out_alert = 0;
-  return ssl_verify_ok;
-}
-
-extern "C" int SSL_reality_is_enabled(const SSL *ssl) {
-  if (ssl == nullptr || ssl->s3 == nullptr || ssl->s3->hs == nullptr) {
-    return 0;
-  }
-  SSL_HANDSHAKE *hs = ssl->s3->hs.get();
-  return (hs->reality_enabled && hs->reality_auth_key_ready) ? 1 : 0;
-}
-
-extern "C" int SSL_reality_verify_peer_cert(SSL *ssl) {
-  uint8_t alert = 0;
-  return reality_verify_cert(ssl, &alert) == ssl_verify_ok ? 1 : 0;
-}
-
-// Thread-local SSL* set by the QUIC TLS handshaker (third_party/quiche/
-// quic/core/tls_client_handshaker.cc) immediately before invoking
-// proof_verifier_->VerifyCertChain, and cleared right after. The
-// Chromium-side QUIC ProofVerifier (net/quic/crypto/proof_verifier_
-// chromium.cc) reads it via SSL_reality_pending_verify_ssl to perform
-// the REALITY HMAC short-circuit — analogous to what
-// SSLClientSocketImpl::VerifyCertCallback does for the TCP path.
-//
-// Why thread-local: ProofVerifierChromium has no direct access to the
-// SSL handle and is shared across many connections, so we cannot store
-// per-session state on the verifier itself. QUIC sessions are
-// single-threaded (each runs on its own task runner) and VerifyCertChain
-// is called synchronously on that thread, so the thread-local handoff
-// is race-free.
-static thread_local SSL *tls_reality_pending_verify_ssl = nullptr;
-
-extern "C" void SSL_reality_register_pending_verify(SSL *ssl) {
-  tls_reality_pending_verify_ssl = ssl;
-}
-
-extern "C" void SSL_reality_clear_pending_verify(void) {
-  tls_reality_pending_verify_ssl = nullptr;
-}
-
-extern "C" SSL *SSL_reality_pending_verify_ssl(void) {
-  return tls_reality_pending_verify_ssl;
-}
-
-extern "C" int SSL_set_reality_config(SSL *ssl,
-                                      const uint8_t public_key[32],
-                                      const uint8_t *short_id,
-                                      size_t short_id_len,
-                                      const uint8_t client_version[4]) {
-  if (ssl == nullptr || public_key == nullptr || short_id_len > 8) {
-    return 0;
-  }
-  if (ssl->s3 == nullptr || ssl->s3->hs == nullptr) {
-    // Must be called after SSL_new but before the handshake starts.
-    return 0;
-  }
-  SSL_HANDSHAKE *hs = ssl->s3->hs.get();
-  hs->reality_enabled = true;
-  OPENSSL_memcpy(hs->reality_server_pubkey, public_key, 32);
-  OPENSSL_memset(hs->reality_short_id, 0, sizeof(hs->reality_short_id));
-  if (short_id != nullptr && short_id_len > 0) {
-    OPENSSL_memcpy(hs->reality_short_id, short_id, short_id_len);
-  }
-  if (client_version != nullptr) {
-    OPENSSL_memcpy(hs->reality_client_version, client_version, 4);
-  } else {
-    OPENSSL_memset(hs->reality_client_version, 0, 4);
-  }
-  // NOTE: do NOT install SSL_set_custom_verify here either (see note in the
-  // global-config branch in ssl_add_client_hello above). For embedders like
-  // Cronet, the net stack's SSL_CTX-level custom_verify is what should fire;
-  // it then calls SSL_reality_verify_peer_cert from the patched VerifyCert().
-  // REALITY uses Ed25519 leaf certs; ensure the client advertises Ed25519
-  // among accepted verification sigalgs so the TLS 1.3 CertificateVerify
-  // (signed with Ed25519 by the server) is acceptable. Keep the common
-  // RSA-PSS/ECDSA defaults alongside in case future REALITY variants ship
-  // non-Ed25519 borrowed certs.
-  static const uint16_t kRealityVerifySigalgs[] = {
-      SSL_SIGN_ED25519,
-      SSL_SIGN_ECDSA_SECP256R1_SHA256,
-      SSL_SIGN_ECDSA_SECP384R1_SHA384,
-      SSL_SIGN_RSA_PSS_RSAE_SHA256,
-      SSL_SIGN_RSA_PSS_RSAE_SHA384,
-      SSL_SIGN_RSA_PSS_RSAE_SHA512,
-      SSL_SIGN_RSA_PKCS1_SHA256,
-      SSL_SIGN_RSA_PKCS1_SHA384,
-      SSL_SIGN_RSA_PKCS1_SHA512,
-  };
-  SSL_set_verify_algorithm_prefs(ssl, kRealityVerifySigalgs,
-                                 sizeof(kRealityVerifySigalgs) /
-                                     sizeof(kRealityVerifySigalgs[0]));
-  return 1;
 }
 
 static bool parse_server_version(const SSL_HANDSHAKE *hs, uint16_t *out_version,
@@ -892,6 +327,29 @@ void ssl_done_writing_client_hello(SSL_HANDSHAKE *hs) {
   hs->pake_share_bytes.Reset();
 }
 
+bool ssl_accepts_server_certificate_auth(const SSL_HANDSHAKE *hs) {
+  assert(!hs->ssl->server);
+  // In PAKE mode, the server must respond with a PAKE. We do not support
+  // accepting both PAKE and certificates together.
+  if (hs->pake_prover != nullptr) {
+    return false;
+  }
+
+  // If the caller has explicitly asked for certificate verification, it is
+  // willing to accept a certificate, even if it has non-certificate
+  // credentials, such as a PSK.
+  if (hs->config->verify_mode != SSL_VERIFY_NONE) {
+    return true;
+  }
+
+  // Otherwise, we fall back to default behavior: if there is at least one
+  // non-certificate credential configured, assume by default that the caller is
+  // only willing to use that non-certificate mode.
+  return std::none_of(hs->config->cert->credentials.begin(),
+                      hs->config->cert->credentials.end(),
+                      [](const auto &cred) { return !cred->UsesPrivateKey(); });
+}
+
 static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
   SSL *const ssl = hs->ssl;
 
@@ -983,7 +441,9 @@ static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
     hs->early_data_offered = true;
   }
 
-  if (!ssl_setup_key_shares(hs, /*override_group_id=*/0) ||
+  ssl_setup_client_certificate_type(hs);
+  if (!ssl_setup_pre_shared_keys(hs) ||  //
+      !ssl_setup_key_shares(hs, /*override_group_id=*/0) ||
       !ssl_setup_extension_permutation(hs) ||
       !ssl_encrypt_client_hello(hs, Span(ech_enc, ech_enc_len)) ||
       !ssl_add_client_hello(hs)) {
@@ -1208,9 +668,9 @@ static enum ssl_hs_wait_t do_read_server_hello(SSL_HANDSHAKE *hs) {
     return ssl_hs_ok;
   }
 
-  // If this client is configured to use a PAKE, then the server must support
-  // TLS 1.3.
-  if (hs->pake_prover) {
+  // If this client only accepts non-certificate modes, then the server must
+  // support TLS 1.3.
+  if (!ssl_accepts_server_certificate_auth(hs)) {
     OPENSSL_PUT_ERROR(SSL, SSL_R_UNSUPPORTED_PROTOCOL);
     ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_PROTOCOL_VERSION);
     return ssl_hs_error;
@@ -1218,6 +678,7 @@ static enum ssl_hs_wait_t do_read_server_hello(SSL_HANDSHAKE *hs) {
 
   // Clear some TLS 1.3 state that no longer needs to be retained.
   hs->key_shares.clear();
+  hs->pre_shared_keys.clear();
   ssl_done_writing_client_hello(hs);
 
   // TLS 1.2 handshakes cannot accept ECH.
@@ -1399,13 +860,26 @@ static enum ssl_hs_wait_t do_read_server_certificate(SSL_HANDSHAKE *hs) {
 
   CBS body = msg.body;
   uint8_t alert = SSL_AD_DECODE_ERROR;
-  if (!ssl_parse_cert_chain(&alert, &hs->new_session->certs, &hs->peer_pubkey,
-                            nullptr, &body, ssl->ctx->pool)) {
+
+  bool parse_ok;
+  if (hs->peer_cert_type == TLSEXT_cert_type_rpk) {
+    hs->new_session->peer_cert_type = TLSEXT_cert_type_rpk;
+    parse_ok = ssl_parse_rpk_cert(&alert, &hs->new_session->peer_raw_public_key,
+                                  &hs->peer_pubkey, nullptr, &body);
+  } else {
+    assert(hs->new_session->peer_cert_type == TLSEXT_cert_type_x509);
+    hs->new_session->peer_cert_type = TLSEXT_cert_type_x509;
+    parse_ok =
+        ssl_parse_cert_chain(&alert, &hs->new_session->certs, &hs->peer_pubkey,
+                             nullptr, &body, ssl->ctx->pool.get());
+  }
+
+  if (!parse_ok) {
     ssl_send_alert(ssl, SSL3_AL_FATAL, alert);
     return ssl_hs_error;
   }
 
-  if (sk_CRYPTO_BUFFER_num(hs->new_session->certs.get()) == 0 ||
+  if (!ssl_session_has_peer_cred(hs->new_session.get()) ||
       CBS_len(&body) != 0 ||
       !ssl->ctx->x509_method->session_cache_objects(hs->new_session.get())) {
     OPENSSL_PUT_ERROR(SSL, SSL_R_DECODE_ERROR);
@@ -1463,7 +937,7 @@ static enum ssl_hs_wait_t do_read_certificate_status(SSL_HANDSHAKE *hs) {
   }
 
   hs->new_session->ocsp_response.reset(
-      CRYPTO_BUFFER_new_from_CBS(&ocsp_response, ssl->ctx->pool));
+      CRYPTO_BUFFER_new_from_CBS(&ocsp_response, ssl->ctx->pool.get()));
   if (hs->new_session->ocsp_response == nullptr) {
     ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_INTERNAL_ERROR);
     return ssl_hs_error;
@@ -1790,9 +1264,15 @@ static enum ssl_hs_wait_t do_read_server_hello_done(SSL_HANDSHAKE *hs) {
   return ssl_hs_ok;
 }
 
-static bool check_credential(SSL_HANDSHAKE *hs, const SSL_CREDENTIAL *cred,
+static bool check_credential(SSL_HANDSHAKE *hs, const SSLCredential *cred,
                              uint16_t *out_sigalg) {
-  if (cred->type != SSLCredentialType::kX509) {
+  bool cert_type_ok = false;
+  if (hs->client_cert_type == TLSEXT_cert_type_x509) {
+    cert_type_ok = cred->type == SSLCredentialType::kX509;
+  } else if (hs->client_cert_type == TLSEXT_cert_type_rpk) {
+    cert_type_ok = cred->type == SSLCredentialType::kRawPublicKey;
+  }
+  if (!cert_type_ok) {
     OPENSSL_PUT_ERROR(SSL, SSL_R_UNKNOWN_CERTIFICATE_TYPE);
     return false;
   }
@@ -1852,32 +1332,42 @@ static enum ssl_hs_wait_t do_send_client_certificate(SSL_HANDSHAKE *hs) {
     }
   }
 
-  Array<SSL_CREDENTIAL *> creds;
+  Array<SSLCredential *> creds;
   if (!ssl_get_full_credential_list(hs, &creds)) {
     return ssl_hs_error;
   }
 
-  if (creds.empty()) {
-    // If there were no credentials, proceed without a client certificate. In
-    // this case, the handshake buffer may be released early.
-    hs->transcript.FreeBuffer();
-  } else {
-    // Select the credential to use.
-    for (SSL_CREDENTIAL *cred : creds) {
-      ERR_clear_error();
-      uint16_t sigalg;
-      if (check_credential(hs, cred, &sigalg)) {
-        hs->credential = UpRef(cred);
-        hs->signature_algorithm = sigalg;
-        break;
-      }
+  // Select the credential, if any, to use.
+  bool may_proceed_anonymously = true;
+  for (SSLCredential *cred : creds) {
+    if (!cred->UsesPrivateKey()) {
+      // Non-certificate credentials (e.g. PSKs) do not participate in deciding
+      // whether to error or proceed anonymously.
+      continue;
     }
-    if (hs->credential == nullptr) {
+
+    ERR_clear_error();
+    may_proceed_anonymously = false;
+    uint16_t sigalg;
+    if (check_credential(hs, cred, &sigalg)) {
+      hs->credential = UpRef(cred);
+      hs->signature_algorithm = sigalg;
+      break;
+    }
+  }
+
+  // Fail the connection if no credentials matched, but only if the caller
+  // configured at least one certificate credential. If there were no
+  // candidates, proceed anonymously.
+  if (hs->credential == nullptr) {
+    if (!may_proceed_anonymously) {
       // The error from the last attempt is in the error queue.
       assert(ERR_peek_error() != 0);
       ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_HANDSHAKE_FAILURE);
       return ssl_hs_error;
     }
+    // Without CertificateVerify, we can release the handshake buffer.
+    hs->transcript.FreeBuffer();
   }
 
   if (!ssl_send_tls12_certificate(hs)) {
@@ -1903,7 +1393,8 @@ static enum ssl_hs_wait_t do_send_client_key_exchange(SSL_HANDSHAKE *hs) {
   Array<uint8_t> pms;
   uint32_t alg_k = hs->new_cipher->algorithm_mkey;
   uint32_t alg_a = hs->new_cipher->algorithm_auth;
-  if (ssl_cipher_uses_certificate_auth(hs->new_cipher)) {
+  if (ssl_cipher_uses_certificate_auth(hs->new_cipher) &&
+      hs->new_session->peer_cert_type == TLSEXT_cert_type_x509) {
     const CRYPTO_BUFFER *leaf =
         sk_CRYPTO_BUFFER_value(hs->new_session->certs.get(), 0);
     CBS leaf_cbs;
@@ -1914,6 +1405,8 @@ static enum ssl_hs_wait_t do_send_client_key_exchange(SSL_HANDSHAKE *hs) {
     // certificates, which we do not support, from ECDSA certificates.
     // Historically, we have not checked RSA key usages, so it is controlled by
     // a flag for now. See https://crbug.com/795089.
+    // Key usage is only checked for X.509 certs. (RPKs have no keyUsage to
+    // enforce.)
     ssl_key_usage_t intended_use = (alg_k & SSL_kRSA)
                                        ? key_usage_encipherment
                                        : key_usage_digital_signature;

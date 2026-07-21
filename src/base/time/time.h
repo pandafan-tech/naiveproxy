@@ -101,7 +101,6 @@
 #if BUILDFLAG(IS_WIN)
 #include <string>
 
-#include "base/gtest_prod_util.h"
 #include "base/win/windows_types.h"
 
 namespace ABI {
@@ -127,8 +126,8 @@ constexpr TimeDelta Microseconds(T n);
 
 namespace {
 
-// TODO: Replace usage of this with std::isnan() once Chromium uses C++23,
-// where that is constexpr.
+// TODO: Replace usage of this with std::isnan() once the Windows toolchain
+// supports that being constexpr (other toolchains already do).
 constexpr bool isnan(double d) {
   return d != d;
 }
@@ -462,6 +461,23 @@ class TimeBase {
   // the other subclasses can vary each time the application is restarted.
   constexpr TimeDelta since_origin() const;
 
+  // Returns |this| snapped to the next tick, given a |tick_phase| and
+  // repeating |tick_interval| in both directions. |this| may be before,
+  // after, or equal to the |tick_phase|.
+  constexpr TimeClass SnappedToNextTick(TimeClass tick_phase,
+                                        TimeDelta tick_interval) const {
+    // |interval_offset| is the offset from |this| to the next multiple of
+    // |tick_interval| after |tick_phase|, possibly negative if in the past.
+    TimeDelta interval_offset = (tick_phase - *this) % tick_interval;
+    // If |this| is exactly on the interval (i.e. offset==0), don't adjust.
+    // Otherwise, if |tick_phase| was in the past, adjust forward to the next
+    // tick after |this|.
+    if (!interval_offset.is_zero() && tick_phase < *this) {
+      interval_offset += tick_interval;
+    }
+    return *this + interval_offset;
+  }
+
   // Compute the difference between two times.
 #if !defined(__aarch64__) && BUILDFLAG(IS_ANDROID)
   NOINLINE  // https://crbug.com/1369775
@@ -739,18 +755,6 @@ class BASE_EXPORT Time : public time_internal::TimeBase<Time> {
   // This is provided for testing only, and is not tracked in a thread-safe
   // way.
   static bool IsHighResolutionTimerInUse();
-
-  // The following two functions are used to report the fraction of elapsed time
-  // that the high resolution timer is activated.
-  // ResetHighResolutionTimerUsage() resets the cumulative usage and starts the
-  // measurement interval and GetHighResolutionTimerUsage() returns the
-  // percentage of time since the reset that the high resolution timer was
-  // activated.
-  // ResetHighResolutionTimerUsage() must be called at least once before calling
-  // GetHighResolutionTimerUsage(); otherwise the usage result would be
-  // undefined.
-  static void ResetHighResolutionTimerUsage();
-  static double GetHighResolutionTimerUsage();
 #endif  // BUILDFLAG(IS_WIN)
 
   // Converts an exploded structure representing either the local time or UTC
@@ -888,42 +892,42 @@ class BASE_EXPORT Time : public time_internal::TimeBase<Time> {
 
 template <typename T>
 constexpr TimeDelta Days(T n) {
-  return TimeDelta::FromInternalValue(MakeClampedNum(n) *
+  return TimeDelta::FromInternalValue(ClampedNumeric(n) *
                                       Time::kMicrosecondsPerDay);
 }
 template <typename T>
 constexpr TimeDelta Hours(T n) {
-  return TimeDelta::FromInternalValue(MakeClampedNum(n) *
+  return TimeDelta::FromInternalValue(ClampedNumeric(n) *
                                       Time::kMicrosecondsPerHour);
 }
 template <typename T>
 constexpr TimeDelta Minutes(T n) {
-  return TimeDelta::FromInternalValue(MakeClampedNum(n) *
+  return TimeDelta::FromInternalValue(ClampedNumeric(n) *
                                       Time::kMicrosecondsPerMinute);
 }
 template <typename T>
 constexpr TimeDelta Seconds(T n) {
-  return TimeDelta::FromInternalValue(MakeClampedNum(n) *
+  return TimeDelta::FromInternalValue(ClampedNumeric(n) *
                                       Time::kMicrosecondsPerSecond);
 }
 template <typename T>
 constexpr TimeDelta Milliseconds(T n) {
-  return TimeDelta::FromInternalValue(MakeClampedNum(n) *
+  return TimeDelta::FromInternalValue(ClampedNumeric(n) *
                                       Time::kMicrosecondsPerMillisecond);
 }
 template <typename T>
 constexpr TimeDelta Microseconds(T n) {
-  return TimeDelta::FromInternalValue(MakeClampedNum(n));
+  return TimeDelta::FromInternalValue(ClampedNumeric(n));
 }
 template <typename T>
 constexpr TimeDelta Nanoseconds(T n) {
-  return TimeDelta::FromInternalValue(MakeClampedNum(n) /
+  return TimeDelta::FromInternalValue(ClampedNumeric(n) /
                                       Time::kNanosecondsPerMicrosecond);
 }
 template <typename T>
 constexpr TimeDelta Hertz(T n) {
   return n ? TimeDelta::FromInternalValue(Time::kMicrosecondsPerSecond /
-                                          MakeClampedNum(n))
+                                          ClampedNumeric(n))
            : TimeDelta::Max();
 }
 
@@ -1270,7 +1274,7 @@ class BASE_EXPORT TimeTicks : public time_internal::TimeBase<TimeTicks> {
 
   // Truncates the TimeTicks value to the precision of SystemClock#uptimeMillis.
   // Note that the clocks already share the same monotonic clock source.
-  jlong ToUptimeMillis() const;
+  int64_t ToUptimeMillis() const;
 
   // Returns the TimeTicks value as microseconds in the timebase of
   // SystemClock#uptimeMillis.
@@ -1279,7 +1283,7 @@ class BASE_EXPORT TimeTicks : public time_internal::TimeBase<TimeTicks> {
   // System.nanoTime() may be used to get sub-millisecond precision in Java code
   // and may be compared against this value as the two share the same clock
   // source (though be sure to convert nanos to micros).
-  jlong ToUptimeMicros() const;
+  int64_t ToUptimeMicros() const;
 
 #endif  // BUILDFLAG(IS_ANDROID)
 
@@ -1302,12 +1306,6 @@ class BASE_EXPORT TimeTicks : public time_internal::TimeBase<TimeTicks> {
   static TimeTicks UnixEpoch();
 
   static void SetSharedUnixEpoch(TimeTicks);
-
-  // Returns |this| snapped to the next tick, given a |tick_phase| and
-  // repeating |tick_interval| in both directions. |this| may be before,
-  // after, or equal to the |tick_phase|.
-  TimeTicks SnappedToNextTick(TimeTicks tick_phase,
-                              TimeDelta tick_interval) const;
 
   // Returns an enum indicating the underlying clock being used to generate
   // TimeTicks timestamps. This function should only be used for debugging and

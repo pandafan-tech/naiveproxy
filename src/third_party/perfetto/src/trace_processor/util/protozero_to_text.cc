@@ -144,12 +144,7 @@ void PrintEnumField(const FieldDescriptor& fd,
 std::string FormattedFieldDescriptorName(
     const FieldDescriptor& field_descriptor) {
   if (field_descriptor.is_extension()) {
-    // Libprotobuf formatter always formats extension field names as fully
-    // qualified names.
-    // TODO(b/197625974): Assuming for now all our extensions will belong to the
-    // perfetto.protos package. Update this if we ever want to support extendees
-    // in different package.
-    return "[perfetto.protos." + field_descriptor.name() + "]";
+    return "[" + field_descriptor.extension_full_name() + "]";
   }
   return field_descriptor.name();
 }
@@ -240,7 +235,8 @@ void ProtozeroToTextInternal(const std::string& type,
                              NewLinesMode new_lines_mode,
                              const DescriptorPool& pool,
                              std::string* indents,
-                             std::string* output);
+                             std::string* output,
+                             bool skip_unknown_fields);
 
 template <protozero::proto_utils::ProtoWireType wire_type, typename T>
 void PrintPackedField(const FieldDescriptor& fd,
@@ -289,7 +285,8 @@ void PrintLengthDelimitedField(const FieldDescriptor* fd,
                                NewLinesMode new_lines_mode,
                                std::string* indents,
                                const DescriptorPool& pool,
-                               std::string* out) {
+                               std::string* out,
+                               bool skip_unknown_fields) {
   const bool include_new_lines = new_lines_mode == kIncludeNewLines;
   uint32_t type = fd ? fd->type() : 0;
   switch (type) {
@@ -305,7 +302,8 @@ void PrintLengthDelimitedField(const FieldDescriptor* fd,
         IncreaseIndents(indents);
       }
       ProtozeroToTextInternal(fd->resolved_type_name(), field.as_bytes(),
-                              new_lines_mode, pool, indents, out);
+                              new_lines_mode, pool, indents, out,
+                              skip_unknown_fields);
       if (include_new_lines) {
         DecreaseIndents(indents);
         StrAppend(out, "\n", *indents, "}");
@@ -389,7 +387,8 @@ void ProtozeroToTextInternal(const std::string& type,
                              NewLinesMode new_lines_mode,
                              const DescriptorPool& pool,
                              std::string* indents,
-                             std::string* output) {
+                             std::string* output,
+                             bool skip_unknown_fields) {
   std::optional<uint32_t> opt_proto_desc_idx = pool.FindDescriptorIdx(type);
   const ProtoDescriptor* opt_proto_descriptor =
       opt_proto_desc_idx ? &pool.descriptors()[*opt_proto_desc_idx] : nullptr;
@@ -410,13 +409,16 @@ void ProtozeroToTextInternal(const std::string& type,
     const auto* opt_field_descriptor =
         opt_proto_descriptor ? opt_proto_descriptor->FindFieldByTag(field.id())
                              : nullptr;
+    if (skip_unknown_fields && opt_field_descriptor == nullptr) {
+      continue;
+    }
     switch (field.type()) {
       case ProtoWireType::kVarInt:
         PrintVarIntField(opt_field_descriptor, field, pool, output);
         break;
       case ProtoWireType::kLengthDelimited:
         PrintLengthDelimitedField(opt_field_descriptor, field, new_lines_mode,
-                                  indents, pool, output);
+                                  indents, pool, output, skip_unknown_fields);
         break;
       case ProtoWireType::kFixed32:
         PrintFixed32Field(opt_field_descriptor, field, output);
@@ -449,21 +451,23 @@ std::string ProtozeroToText(const DescriptorPool& pool,
                             const std::string& type,
                             protozero::ConstBytes protobytes,
                             NewLinesMode new_lines_mode,
-                            uint32_t initial_indent_depth) {
+                            uint32_t initial_indent_depth,
+                            bool skip_unknown_fields) {
   std::string indent = std::string(2lu * initial_indent_depth, ' ');
   std::string final_result;
   ProtozeroToTextInternal(type, protobytes, new_lines_mode, pool, &indent,
-                          &final_result);
+                          &final_result, skip_unknown_fields);
   return final_result;
 }
 
 std::string ProtozeroToText(const DescriptorPool& pool,
                             const std::string& type,
                             const std::vector<uint8_t>& protobytes,
-                            NewLinesMode new_lines_mode) {
+                            NewLinesMode new_lines_mode,
+                            bool skip_unknown_fields) {
   return ProtozeroToText(
       pool, type, protozero::ConstBytes{protobytes.data(), protobytes.size()},
-      new_lines_mode);
+      new_lines_mode, skip_unknown_fields);
 }
 
 }  // namespace perfetto::trace_processor::protozero_to_text

@@ -2,19 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef PARTITION_ALLOC_SHIM_CHECKED_MULTIPLY_WIN_H_
 #define PARTITION_ALLOC_SHIM_CHECKED_MULTIPLY_WIN_H_
 
+#include "partition_alloc/buildflags.h"
 #include "partition_alloc/partition_alloc_base/numerics/checked_math.h"
 
 namespace allocator_shim::internal {
 
-#if !defined(COMPONENT_BUILD)
+#if !PA_BUILDFLAG(IS_COMPONENT_BUILD)
 PA_ALWAYS_INLINE
 #endif
 size_t CheckedMultiply(size_t multiplicand, size_t multiplier) {

@@ -70,7 +70,7 @@ source_set("export_json") {
     "tables",
     "types",
     "util:args_utils",
-    "util:json_parser",
+    "util:json_value",
   ]
   public_deps = [ "../../include/perfetto/ext/trace_processor:export_json" ]
 }
@@ -126,11 +126,13 @@ source_set("storage_minimal") {
   ]
   deps = [
     "../../gn:default_deps",
+    "../../protos/perfetto/common:zero",
     "../base",
     "../protozero",
     "containers",
     "importers/common",
     "importers/common:parser_types",
+    "importers/etw:minimal",
     "importers/ftrace:minimal",
     "importers/fuchsia:fuchsia_record",
     "importers/memory_tracker:graph_processor",
@@ -141,6 +143,7 @@ source_set("storage_minimal") {
     "tables",
     "types",
     "util:blob",
+    "util:clock",
     "util:descriptors",
     "util:gzip",
     "util:proto_to_args_parser",
@@ -173,19 +176,24 @@ if (enable_perfetto_trace_processor_sqlite) {
       "../base",
       "../base:clock_snapshots",
       "../protozero",
-      "dataframe",
+      "core/dataframe",
+      "core/plugin",
       "importers/android_bugreport",
       "importers/archive",
       "importers/art_hprof",
       "importers/art_method",
+      "importers/collapsed_stack",
       "importers/common",
       "importers/etw:full",
       "importers/ftrace:full",
       "importers/fuchsia:full",
+      "importers/gecko",
+      "importers/json",
       "importers/ninja",
       "importers/perf",
       "importers/perf_text",
       "importers/pprof",
+      "importers/primes",
       "importers/proto:full",
       "importers/proto:minimal",
       "importers/simpleperf_proto",
@@ -193,10 +201,57 @@ if (enable_perfetto_trace_processor_sqlite) {
       "metrics",
       "perfetto_sql/engine",
       "perfetto_sql/generator",
-      "perfetto_sql/intrinsics/functions",
-      "perfetto_sql/intrinsics/operators",
-      "perfetto_sql/intrinsics/table_functions",
       "perfetto_sql/stdlib",
+      "plugins/ancestor",
+      "plugins/args",
+      "plugins/art_heap_graph_functions",
+      "plugins/base64_functions",
+      "plugins/connected_flow",
+      "plugins/core_functions",
+      "plugins/counter_intervals",
+      "plugins/counter_mipmap_operator",
+      "plugins/create_function",
+      "plugins/create_intervals",
+      "plugins/create_view_function",
+      "plugins/critical_path",
+      "plugins/descendant",
+      "plugins/developer_functions",
+      "plugins/dfs_weight_bounded",
+      "plugins/dominator_tree",
+      "plugins/etm_decode_chunk",
+      "plugins/etm_iterate_range",
+      "plugins/experimental_annotated_stack",
+      "plugins/experimental_flamegraph",
+      "plugins/experimental_flat_slice",
+      "plugins/experimental_slice_layout",
+      "plugins/graph_scan",
+      "plugins/graph_traversal",
+      "plugins/import",
+      "plugins/interval_intersect",
+      "plugins/layout_functions",
+      "plugins/math_functions",
+      "plugins/metadata",
+      "plugins/package_lookup",
+      "plugins/perf_counter",
+      "plugins/pprof_functions",
+      "plugins/slice_mipmap_operator",
+      "plugins/span_join_operator",
+      "plugins/sql_stats_table",
+      "plugins/stack_functions",
+      "plugins/stdlib_docs",
+      "plugins/storage_tables",
+      "plugins/string_functions",
+      "plugins/structural_tree_partition",
+      "plugins/symbolize",
+      "plugins/table_info",
+      "plugins/table_pointer_module",
+      "plugins/time_functions",
+      "plugins/to_ftrace",
+      "plugins/tree_functions",
+      "plugins/type_builder_functions",
+      "plugins/utils_functions",
+      "plugins/wattson",
+      "plugins/window_operator",
       "sqlite",
       "storage",
       "tables",
@@ -208,15 +263,21 @@ if (enable_perfetto_trace_processor_sqlite) {
       "util:json_parser",
       "util:protozero_to_json",
       "util:protozero_to_text",
-      "util:regex",
+      "util:simple_json_parser",
+      "util:sql_bundle",
       "util:stdlib",
       "util:trace_type",
     ]
 
     if (enable_perfetto_etm_importer) {
+      deps += [ "importers/etm" ]
+    }
+
+    if (enable_perfetto_winscope) {
       deps += [
-        "importers/etm",
-        "perfetto_sql/intrinsics/operators:etm",
+        "plugins/winscope_importer",
+        "plugins/winscope_proto_to_args_with_defaults",
+        "plugins/winscope_surfaceflinger_hierarchy_paths",
       ]
     }
 
@@ -227,38 +288,47 @@ if (enable_perfetto_trace_processor_sqlite) {
     if (enable_perfetto_trace_processor_mac_instruments) {
       deps += [ "importers/instruments" ]
     }
-    if (enable_perfetto_trace_processor_json) {
-      deps += [
-        "importers/gecko",
-        "importers/json",
-      ]
-    }
   }
 
-  executable("trace_processor_shell") {
+  # Library target for the trace processor shell.
+  # Allows embedders (e.g. Google3) to customize the shell executable's
+  # interaction with the environment.
+  static_library("trace_processor_shell_lib") {
     deps = [
       ":lib",
       "../../gn:default_deps",
       "../../gn:protobuf_full",
+      "../../include/perfetto/ext/trace_processor:trace_processor_shell",
       "../../protos/perfetto/trace_processor:zero",
-      "../../src/profiling:deobfuscator",
-      "../../src/profiling/symbolizer",
-      "../../src/profiling/symbolizer:symbolize_database",
       "../base",
       "../base:version",
       "metrics",
+      "perfetto_sql/generator",
       "rpc",
       "rpc:stdiod",
+      "shell",
+      "shell:subcommands",
       "sqlite",
+      "trace_summary",
       "util:stdlib",
+      "util/deobfuscation:deobfuscator",
+      "util/symbolizer",
+      "util/symbolizer:symbolize_database",
     ]
-    if (enable_perfetto_trace_processor_linenoise) {
-      deps += [ "../../gn:linenoise" ]
-    }
     if (enable_perfetto_trace_processor_httpd) {
       deps += [ "rpc:httpd" ]
     }
+    public_deps =
+        [ "../../include/perfetto/ext/trace_processor:trace_processor_shell" ]
     sources = [ "trace_processor_shell.cc" ]
+  }
+
+  executable("trace_processor_shell") {
+    deps = [
+      ":trace_processor_shell_lib",
+      "../../gn:default_deps",
+    ]
+    sources = [ "trace_processor_shell_main.cc" ]
     if ((perfetto_build_standalone || build_with_chromium) &&
         !is_perfetto_build_generator) {
       data_deps = [
@@ -272,7 +342,7 @@ if (enable_perfetto_trace_processor_sqlite) {
         "../../protos/third_party/simpleperf:descriptor",
       ]
       if (enable_perfetto_llvm_symbolizer) {
-        data_deps += [ "../profiling/symbolizer:llvm_symbolizer_wrapper" ]
+        data_deps += [ "util/symbolizer:llvm_symbolizer_wrapper" ]
       }
     }
   }
@@ -312,7 +382,6 @@ perfetto_unittest_source_set("top_level_unittests") {
     sources += [ "export_json_unittest.cc" ]
     deps += [
       ":export_json",
-      "../../gn:jsoncpp",
       "../../include/perfetto/ext/trace_processor:export_json",
       "containers",
       "importers/common",
@@ -320,6 +389,7 @@ perfetto_unittest_source_set("top_level_unittests") {
       "storage",
       "tables",
       "types",
+      "util:json_value",
     ]
   }
 }
@@ -332,12 +402,14 @@ perfetto_unittest_source_set("unittests") {
   deps = [
     ":top_level_unittests",
     "containers:unittests",
-    "dataframe:unittests",
-    "dataframe/impl:unittests",
+    "core/dataframe:unittests",
+    "core/interpreter:unittests",
+    "core/util:unittests",
     "importers/android_bugreport:unittests",
     "importers/common:unittests",
     "importers/ftrace:unittests",
     "importers/fuchsia:unittests",
+    "importers/json:unittests",
     "importers/memory_tracker:unittests",
     "importers/perf:unittests",
     "importers/proto:unittests",
@@ -348,19 +420,21 @@ perfetto_unittest_source_set("unittests") {
     "sorter:unittests",
     "types:unittests",
     "util:unittests",
+    "util/deobfuscation:unittests",
+    "util/symbolizer:unittests",
   ]
-  if (enable_perfetto_trace_processor_json) {
-    deps += [ "importers/json:unittests" ]
-  }
   if (enable_perfetto_trace_processor_sqlite) {
     deps += [
       "perfetto_sql/engine:unittests",
-      "perfetto_sql/intrinsics/functions:unittests",
-      "perfetto_sql/intrinsics/operators:unittests",
-      "perfetto_sql/intrinsics/table_functions:unittests",
       "perfetto_sql/parser:unittests",
-      "perfetto_sql/preprocessor:unittests",
       "perfetto_sql/tokenizer:unittests",
+      "plugins/ancestor:unittests",
+      "plugins/connected_flow:unittests",
+      "plugins/descendant:unittests",
+      "plugins/experimental_flat_slice:unittests",
+      "plugins/experimental_slice_layout:unittests",
+      "plugins/span_join_operator:unittests",
+      "plugins/string_functions:unittests",
       "sqlite:unittests",
     ]
   }
@@ -374,27 +448,29 @@ perfetto_cc_proto_descriptor("gen_cc_test_messages_descriptor") {
   descriptor_target = "../protozero:testing_messages_descriptor"
 }
 
-source_set("integrationtests") {
-  testonly = true
-  sources = []
-  deps = []
-  if (enable_perfetto_trace_processor_sqlite) {
-    sources += [
-      "read_trace_integrationtest.cc",
-      "trace_database_integrationtest.cc",
-    ]
-    deps += [
-      ":lib",
-      "../../gn:default_deps",
-      "../../gn:gtest_and_gmock",
-      "../../protos/perfetto/common:zero",
-      "../../protos/perfetto/trace:zero",
-      "../../protos/perfetto/trace_processor:zero",
-      "../base",
-      "../base:test_support",
-      "sqlite",
-      "trace_summary:integrationtests",
-    ]
+if (enable_perfetto_integration_tests) {
+  source_set("integrationtests") {
+    testonly = true
+    sources = []
+    deps = []
+    if (enable_perfetto_trace_processor_sqlite) {
+      sources += [
+        "read_trace_integrationtest.cc",
+        "trace_database_integrationtest.cc",
+      ]
+      deps += [
+        ":lib",
+        "../../gn:default_deps",
+        "../../gn:gtest_and_gmock",
+        "../../protos/perfetto/common:zero",
+        "../../protos/perfetto/trace:zero",
+        "../../protos/perfetto/trace_processor:zero",
+        "../base",
+        "../base:test_support",
+        "sqlite",
+        "trace_summary:integrationtests",
+      ]
+    }
   }
 }
 
@@ -408,9 +484,9 @@ if (enable_perfetto_trace_processor_json) {
       "../../gn:default_deps",
       "../../gn:gtest_and_gmock",
       "../../gn:gtest_main",
-      "../../gn:jsoncpp",
       "../../include/perfetto/ext/base",
       "../base:test_support",
+      "util:json_value",
     ]
   }
 }
@@ -423,4 +499,17 @@ perfetto_fuzzer_test("trace_processor_fuzzer") {
     "../../gn:default_deps",
     "../base",
   ]
+}
+
+if (enable_perfetto_benchmarks && enable_perfetto_trace_processor_sqlite) {
+  source_set("benchmarks") {
+    testonly = true
+    sources = [ "trace_processor_benchmark.cc" ]
+    deps = [
+      ":lib",
+      "../../gn:benchmark",
+      "../../gn:default_deps",
+      "../../include/perfetto/trace_processor",
+    ]
+  }
 }

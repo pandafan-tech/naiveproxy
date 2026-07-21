@@ -5,6 +5,7 @@
 #ifndef NET_DEVICE_BOUND_SESSIONS_URL_FETCHER_H_
 #define NET_DEVICE_BOUND_SESSIONS_URL_FETCHER_H_
 
+#include "net/base/net_export.h"
 #include "net/url_request/url_request.h"
 
 namespace net {
@@ -13,14 +14,16 @@ class URLRequestContext;
 
 namespace net::device_bound_sessions {
 
-class URLFetcher : public URLRequest::Delegate {
+class NET_EXPORT URLFetcher : public URLRequest::Delegate {
  public:
   URLFetcher(const URLRequestContext* context,
              GURL url,
-             std::optional<net::NetLogSource> net_log_source);
+             std::optional<net::NetLogSource> net_log_source,
+             bool is_refresh);
   ~URLFetcher() override;
 
   void Start(base::OnceClosure complete_callback);
+  std::string TakeDataReceived();
 
   URLRequest& request() { return *request_; }
   const std::string& data_received() const { return data_received_; }

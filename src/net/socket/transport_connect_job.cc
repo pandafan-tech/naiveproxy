@@ -10,7 +10,6 @@
 #include <variant>
 
 #include "base/check_op.h"
-#include "base/containers/to_vector.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -29,6 +28,7 @@
 #include "net/dns/public/secure_dns_policy.h"
 #include "net/log/net_log_event_type.h"
 #include "net/socket/socket_tag.h"
+#include "net/socket/tcp_connect_job.h"
 #include "net/socket/transport_connect_sub_job.h"
 #include "url/scheme_host_port.h"
 #include "url/url_constants.h"
@@ -56,11 +56,13 @@ TransportSocketParams::TransportSocketParams(
     Endpoint destination,
     NetworkAnonymizationKey network_anonymization_key,
     SecureDnsPolicy secure_dns_policy,
+    handles::NetworkHandle target_network,
     OnHostResolutionCallback host_resolution_callback,
     base::flat_set<std::string> supported_alpns)
     : destination_(std::move(destination)),
       network_anonymization_key_(std::move(network_anonymization_key)),
       secure_dns_policy_(secure_dns_policy),
+      target_network_(target_network),
       host_resolution_callback_(std::move(host_resolution_callback)),
       supported_alpns_(std::move(supported_alpns)) {
 #if DCHECK_IS_ON()
@@ -91,13 +93,29 @@ TransportSocketParams::TransportSocketParams(
 
 TransportSocketParams::~TransportSocketParams() = default;
 
-std::unique_ptr<TransportConnectJob> TransportConnectJob::Factory::Create(
+std::unique_ptr<ConnectJob> TransportConnectJob::Factory::Create(
     RequestPriority priority,
     const SocketTag& socket_tag,
     const CommonConnectJobParams* common_connect_job_params,
     const scoped_refptr<TransportSocketParams>& params,
     Delegate* delegate,
     const NetLogWithSource* net_log) {
+  return CreateJob(priority, socket_tag, common_connect_job_params, params,
+                   delegate, net_log);
+}
+
+std::unique_ptr<ConnectJob> TransportConnectJob::Factory::CreateJob(
+    RequestPriority priority,
+    const SocketTag& socket_tag,
+    const CommonConnectJobParams* common_connect_job_params,
+    const scoped_refptr<TransportSocketParams>& params,
+    Delegate* delegate,
+    const NetLogWithSource* net_log) {
+  if (base::FeatureList::IsEnabled(features::kHappyEyeballsV2)) {
+    return std::make_unique<TcpConnectJob>(priority, socket_tag,
+                                           common_connect_job_params, params,
+                                           delegate, net_log);
+  }
   return std::make_unique<TransportConnectJob>(priority, socket_tag,
                                                common_connect_job_params,
                                                params, delegate, net_log);
@@ -131,6 +149,7 @@ TransportConnectJob::TransportConnectJob(
                  NetLogSourceType::TRANSPORT_CONNECT_JOB,
                  NetLogEventType::TRANSPORT_CONNECT_JOB_CONNECT),
       params_(params) {
+  DCHECK(!base::FeatureList::IsEnabled(features::kHappyEyeballsV2));
   if (endpoint_result_override) {
     has_dns_override_ = true;
     endpoint_results_ = {std::move(endpoint_result_override->result)};
@@ -189,6 +208,11 @@ std::optional<HostResolverEndpointResult>
 TransportConnectJob::GetHostResolverEndpointResult() const {
   CHECK_LT(current_endpoint_result_, endpoint_results_.size());
   return endpoint_results_[current_endpoint_result_];
+}
+
+std::optional<ResolutionDetails> TransportConnectJob::GetResolutionDetails()
+    const {
+  return resolution_details_;
 }
 
 base::TimeDelta TransportConnectJob::ConnectionTimeout() {
@@ -281,7 +305,7 @@ int TransportConnectJob::DoResolveHostComplete(int result) {
 
   if (result != OK) {
     // If hostname resolution failed, record an empty endpoint and the result.
-    connection_attempts_.push_back(ConnectionAttempt(IPEndPoint(), result));
+    connection_attempts_.emplace_back(IPEndPoint(), result);
     return result;
   }
 
@@ -292,8 +316,7 @@ int TransportConnectJob::DoResolveHostComplete(int result) {
     OnHostResolutionCallbackResult callback_result =
         params_->host_resolution_callback().Run(
             ToLegacyDestinationEndpoint(params_->destination()),
-            base::ToVector(request_->GetEndpointResults()),
-            request_->GetDnsAliasResults());
+            request_->GetEndpointResults(), request_->GetDnsAliasResults());
     if (callback_result == OnHostResolutionCallbackResult::kMayBeDeletedAsync) {
       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
           FROM_HERE, base::BindOnce(&TransportConnectJob::OnIOComplete,
@@ -332,6 +355,7 @@ int TransportConnectJob::DoResolveHostCallbackComplete() {
     }
   }
   dns_aliases_ = request_->GetDnsAliasResults();
+  resolution_details_ = request_->GetResolutionDetails();
 
   // No need to retain `request_` beyond this point.
   request_.reset();
@@ -344,26 +368,8 @@ int TransportConnectJob::DoResolveHostCallbackComplete() {
     return ERR_NAME_NOT_RESOLVED;
   }
 
-  Error result = OK;
-  // If DNS aliases are resolved, have the delegate process the aliases to
-  // determine if further action is needed.
-  // Only invoke `HandleDnsAliasesResolved` if aliases contains at least one
-  // element that is not the destination hostname.
-  const std::string& endpoint_hostname =
-      std::holds_alternative<url::SchemeHostPort>(params_->destination())
-          ? std::get<url::SchemeHostPort>(params_->destination()).host()
-          : std::get<HostPortPair>(params_->destination()).host();
-  if (dns_aliases_.size() > 1 ||
-      (dns_aliases_.size() == 1 && !dns_aliases_.contains(endpoint_hostname))) {
-    result = HandleDnsAliasesResolved(dns_aliases_);
-    CHECK_NE(result, ERR_IO_PENDING);
-  }
-
-  if (result == OK) {
-    next_state_ = STATE_TRANSPORT_CONNECT;
-  }
-
-  return result;
+  next_state_ = STATE_TRANSPORT_CONNECT;
+  return OK;
 }
 
 int TransportConnectJob::DoTransportConnect() {

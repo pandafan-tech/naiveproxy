@@ -12,7 +12,6 @@
 #include "base/command_line.h"
 #include "base/environment.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
 #include "base/path_service.h"
@@ -313,7 +312,7 @@ void CreateLaunchOptionsWithXdgActivation(
          std::string token) {
         base::LaunchOptions options;
         if (!token.empty()) {
-          options.environment[kXdgActivationTokenEnvVar] = token;
+          options.environment[kXdgActivationTokenEnvVar] = std::move(token);
         }
         std::move(launch_options_cb).Run(options);
       };

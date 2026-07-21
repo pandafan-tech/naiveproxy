@@ -2,17 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
-#include "partition_alloc/partition_page.h"
-
 #include <cstdint>
 
 #include "partition_alloc/address_pool_manager.h"
 #include "partition_alloc/buildflags.h"
+#include "partition_alloc/internal/partition_page_internal.h"
+#include "partition_alloc/internal/partition_root_internal.h"
 #include "partition_alloc/page_allocator.h"
 #include "partition_alloc/page_allocator_constants.h"
 #include "partition_alloc/partition_address_space.h"
@@ -25,8 +20,8 @@
 #include "partition_alloc/partition_alloc_forward.h"
 #include "partition_alloc/partition_direct_map_extent.h"
 #include "partition_alloc/partition_freelist_entry.h"
-#include "partition_alloc/partition_root.h"
 #include "partition_alloc/reservation_offset_table.h"
+#include "partition_alloc/slot_start.h"
 #include "partition_alloc/tagging.h"
 
 namespace partition_alloc::internal {
@@ -47,7 +42,7 @@ PA_ALWAYS_INLINE void PartitionDirectUnmap(SlotSpanMetadata* slot_span) {
     PA_DCHECK(extent->prev_extent->next_extent == extent);
     extent->prev_extent->next_extent = extent->next_extent;
   } else {
-    root->direct_map_list = extent->next_extent;
+    root->direct_map_list_ = extent->next_extent;
   }
   if (extent->next_extent) {
     PA_DCHECK(extent->next_extent->prev_extent == extent);
@@ -59,11 +54,11 @@ PA_ALWAYS_INLINE void PartitionDirectUnmap(SlotSpanMetadata* slot_span) {
 
   size_t reservation_size = extent->reservation_size;
   PA_DCHECK(!(reservation_size & DirectMapAllocationGranularityOffsetMask()));
-  PA_DCHECK(root->total_size_of_direct_mapped_pages >= reservation_size);
-  root->total_size_of_direct_mapped_pages -= reservation_size;
+  PA_DCHECK(root->total_size_of_direct_mapped_pages_ >= reservation_size);
+  root->total_size_of_direct_mapped_pages_ -= reservation_size;
 
   uintptr_t reservation_start =
-      SlotSpanMetadata::ToSlotSpanStart(slot_span, root);
+      SlotSpanMetadata::ToSlotSpanStart(slot_span, root).value();
   // The mapping may start at an unspecified location within a super page, but
   // we always reserve memory aligned to super page size.
   reservation_start = base::bits::AlignDown(reservation_start, kSuperPageSize);
@@ -90,7 +85,7 @@ PA_ALWAYS_INLINE void SlotSpanMetadata::RegisterEmpty() {
   auto* root = PartitionRoot::FromSlotSpanMetadata(this);
   PartitionRootLock(root).AssertAcquired();
 
-  root->empty_slot_spans_dirty_bytes +=
+  root->empty_slot_spans_dirty_bytes_ +=
       base::bits::AlignUp(GetProvisionedSize(), SystemPageSize());
 
   ToSuperPageExtent()->DecrementNumberOfNonemptySlotSpans();
@@ -102,11 +97,11 @@ PA_ALWAYS_INLINE void SlotSpanMetadata::RegisterEmpty() {
     return;
   }
 
-  PA_DCHECK(root->global_empty_slot_span_ring_index <
-            root->global_empty_slot_span_ring_size);
-  int16_t current_index = root->global_empty_slot_span_ring_index;
+  PA_DCHECK(root->global_empty_slot_span_ring_index_ <
+            root->global_empty_slot_span_ring_size_);
+  int16_t current_index = root->global_empty_slot_span_ring_index_;
   SlotSpanMetadata* slot_span_to_decommit =
-      root->global_empty_slot_span_ring[current_index];
+      PA_UNSAFE_TODO(root->global_empty_slot_span_ring_[current_index]);
   // The slot span might well have been re-activated, filled up, etc. before we
   // get around to looking at it here.
   if (slot_span_to_decommit) {
@@ -115,22 +110,22 @@ PA_ALWAYS_INLINE void SlotSpanMetadata::RegisterEmpty() {
 
   // There should not be a slot span in the buffer at the position this is
   // going into.
-  PA_DCHECK(!root->global_empty_slot_span_ring[current_index]);
+  PA_UNSAFE_TODO(PA_DCHECK(!root->global_empty_slot_span_ring_[current_index]));
 
   // We put the empty slot span on our global list of "slot spans that were once
   // empty", thus providing it a bit of breathing room to get re-used before we
   // really free it. This reduces the number of system calls. Otherwise any
   // free() from a single-slot slot span would lead to a syscall, for instance.
-  root->global_empty_slot_span_ring[current_index] = this;
+  PA_UNSAFE_TODO(root->global_empty_slot_span_ring_[current_index]) = this;
   empty_cache_index_ = current_index;
   in_empty_cache_ = 1;
   ++current_index;
-  if (current_index == root->global_empty_slot_span_ring_size) {
+  if (current_index == root->global_empty_slot_span_ring_size_) {
     current_index = 0;
   }
   PA_DCHECK(current_index <
             base::checked_cast<int16_t>(internal::kMaxEmptySlotSpanRingSize));
-  root->global_empty_slot_span_ring_index = current_index;
+  root->global_empty_slot_span_ring_index_ = current_index;
 
   // Avoid wasting too much memory on empty slot spans. Note that we only divide
   // by powers of two, since division can be very slow, and this path is taken
@@ -139,11 +134,11 @@ PA_ALWAYS_INLINE void SlotSpanMetadata::RegisterEmpty() {
   // Empty slot spans are also all decommitted with MemoryReclaimer, but it may
   // never run, be delayed arbitrarily, and/or miss large memory spikes.
   size_t max_empty_dirty_bytes =
-      root->total_size_of_committed_pages.load(std::memory_order_relaxed) >>
-      root->max_empty_slot_spans_dirty_bytes_shift;
-  if (root->empty_slot_spans_dirty_bytes > max_empty_dirty_bytes) {
+      root->total_size_of_committed_pages_.load(std::memory_order_relaxed) >>
+      root->max_empty_slot_spans_dirty_bytes_shift_;
+  if (root->empty_slot_spans_dirty_bytes_ > max_empty_dirty_bytes) {
     root->ShrinkEmptySlotSpansRing(std::min(
-        root->empty_slot_spans_dirty_bytes / 2, max_empty_dirty_bytes));
+        root->empty_slot_spans_dirty_bytes_ / 2, max_empty_dirty_bytes));
   }
 }
 // static
@@ -230,20 +225,20 @@ void SlotSpanMetadata::Decommit(PartitionRoot* root) {
   PartitionRootLock(root).AssertAcquired();
   PA_DCHECK(is_empty());
   PA_DCHECK(!bucket->is_direct_mapped());
-  uintptr_t slot_span_start = SlotSpanMetadata::ToSlotSpanStart(this, root);
+  SlotSpanStart slot_span_start = SlotSpanMetadata::ToSlotSpanStart(this, root);
   // If lazy commit is enabled, only provisioned slots are committed.
   size_t dirty_size =
       base::bits::AlignUp(GetProvisionedSize(), SystemPageSize());
   size_t size_to_decommit =
       kUseLazyCommit ? dirty_size : bucket->SlotSpanCommittedSize(root);
 
-  PA_DCHECK(root->empty_slot_spans_dirty_bytes >= dirty_size);
-  root->empty_slot_spans_dirty_bytes -= dirty_size;
+  PA_DCHECK(root->empty_slot_spans_dirty_bytes_ >= dirty_size);
+  root->empty_slot_spans_dirty_bytes_ -= dirty_size;
 
   // Not decommitted slot span must've had at least 1 allocation.
   PA_DCHECK(size_to_decommit > 0);
   root->DecommitSystemPagesForData(
-      slot_span_start, size_to_decommit,
+      slot_span_start.value(), size_to_decommit,
       PageAccessibilityDisposition::kAllowKeepForPerf);
 
   // We actually leave the decommitted slot span in the active list. We'll sweep
@@ -261,18 +256,20 @@ void SlotSpanMetadata::DecommitIfPossible(PartitionRoot* root) {
   PartitionRootLock(root).AssertAcquired();
   PA_DCHECK(in_empty_cache_);
   PA_DCHECK(empty_cache_index_ < kMaxEmptySlotSpanRingSize);
-  PA_DCHECK(this == root->global_empty_slot_span_ring[empty_cache_index_]);
+  PA_UNSAFE_TODO(PA_DCHECK(
+      this == root->global_empty_slot_span_ring_[empty_cache_index_]));
   in_empty_cache_ = 0;
   if (is_empty()) {
     Decommit(root);
   }
-  root->global_empty_slot_span_ring[empty_cache_index_] = nullptr;
+  PA_UNSAFE_TODO(root->global_empty_slot_span_ring_[empty_cache_index_]) =
+      nullptr;
 }
 
 void SlotSpanMetadata::SortFreelist(
     [[maybe_unused]] const PartitionRoot* root) {
   std::bitset<kMaxSlotsPerSlotSpan> free_slots;
-  uintptr_t slot_span_start = ToSlotSpanStart(this, root);
+  SlotSpanStart slot_span_start = ToSlotSpanStart(this, root);
 
   size_t num_provisioned_slots =
       bucket->get_slots_per_span() - num_unprovisioned_slots;
@@ -284,7 +281,8 @@ void SlotSpanMetadata::SortFreelist(
   for (FreelistEntry* head = freelist_head; head;
        head = head->GetNext(slot_size)) {
     ++num_free_slots;
-    size_t offset_in_slot_span = SlotStartPtr2Addr(head) - slot_span_start;
+    size_t offset_in_slot_span =
+        slot_span_start.offset(SlotStart::Unchecked(head).Untag().value());
     size_t slot_number = bucket->GetSlotNumber(offset_in_slot_span);
     PA_DCHECK(slot_number < num_provisioned_slots);
     free_slots[slot_number] = true;
@@ -299,7 +297,8 @@ void SlotSpanMetadata::SortFreelist(
     for (size_t slot_number = 0; slot_number < num_provisioned_slots;
          slot_number++) {
       if (free_slots[slot_number]) {
-        uintptr_t slot_start = slot_span_start + (slot_size * slot_number);
+        UntaggedSlotStart slot_start =
+            slot_span_start.GetNthSlotStart(slot_number, slot_size);
         auto* entry = FreelistEntry::EmplaceAndInitNull(slot_start);
         if (!head) {
           head = entry;
@@ -365,6 +364,13 @@ void UnmapNow(uintptr_t reservation_start,
   }
 #endif  // PA_BUILDFLAG(DCHECKS_ARE_ON)
 
+  // Reset the offset table entries first, before decommitting metadata.
+  // This ensures that concurrent callers of MallocZoneSize (on macOS) that
+  // check IsManagedByNormalBucketsOrDirectMap() will see "not allocated"
+  // before the metadata pages become inaccessible, avoiding SIGBUS.
+  root->GetReservationOffsetTable().SetNotAllocatedTag(reservation_start,
+                                                       reservation_size);
+
 #if PA_CONFIG(MOVE_METADATA_OUT_OF_GIGACAGE)
   // Decommit metadata area inside metadata cage to avoid DCHECK() failure
   // at next allocation. This must be done before
@@ -376,14 +382,6 @@ void UnmapNow(uintptr_t reservation_start,
                                PageTag::kPartitionAlloc);
   }
 #endif  // PA_CONFIG(MOVE_METADATA_OUT_OF_GIGACAGE)
-
-  // Reset the offset table entries for the given memory before unreserving
-  // it. Since the memory is not unreserved and not available for other
-  // threads, the table entries for the memory are not modified by other
-  // threads either. So we can update the table entries without race
-  // condition.
-  root->GetReservationOffsetTable().SetNotAllocatedTag(reservation_start,
-                                                       reservation_size);
 
 #if !PA_BUILDFLAG(HAS_64_BIT_POINTERS)
   AddressPoolManager::GetInstance().MarkUnused(pool, reservation_start,

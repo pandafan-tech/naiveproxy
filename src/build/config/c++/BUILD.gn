@@ -1,4 +1,5 @@
 import("//build/config/c++/c++.gni")
+import("//build/config/c++/modules.gni")
 import("//build/config/chrome_build.gni")
 import("//build/config/chromeos/ui_mode.gni")
 import("//build/config/compiler/compiler.gni")
@@ -106,10 +107,14 @@ config("runtime_library") {
   }
 
   if (is_ios) {
-    # Add the path to our custom libc++ to the swift compiler. This is used when
-    # enabling the C++/Swift interoperability.
     swiftflags = [
+      # Prevent the swift compiler from leaking the system's default C++
+      # toolchain into the build.
       "-Xcc=-nostdinc++",
+      "-Xcc=-nodefaultlibs",
+
+      # Add the path to our custom libc++ to the swift compiler. This is used
+      # when enabling the C++/Swift interoperability.
       "-isystem",
       rebase_path("//third_party/libc++/src/include", root_build_dir),
       "-isystem",

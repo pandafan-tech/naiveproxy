@@ -9,6 +9,8 @@
 #include "absl/strings/string_view.h"
 #include "openssl/ssl.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
+#include "quiche/quic/platform/api/quic_flag_utils.h"
+#include "quiche/quic/platform/api/quic_flags.h"
 
 namespace quic {
 
@@ -95,6 +97,10 @@ TlsConnection::TlsConnection(SSL_CTX* ssl_ctx,
     : delegate_(delegate),
       ssl_(SSL_new(ssl_ctx)),
       ssl_config_(std::move(ssl_config)) {
+  if (GetQuicRestartFlag(quic_shed_tls_handshake_config)) {
+    QUIC_RESTART_FLAG_COUNT_N(quic_shed_tls_handshake_config, 2, 2);
+    SSL_set_shed_handshake_config(ssl(), /*enable=*/1);
+  }
   SSL_set_ex_data(
       ssl(), SslIndexSingleton::GetInstance()->ssl_ex_data_index_connection(),
       this);
@@ -145,23 +151,6 @@ TlsConnection* TlsConnection::ConnectionFromSsl(const SSL* ssl) {
 // static
 enum ssl_verify_result_t TlsConnection::VerifyCallback(SSL* ssl,
                                                        uint8_t* out_alert) {
-  // cronet-reality QUIC server-cert verify hook. The proxy's QUIC stack
-  // dialed via QuicSessionPool installs *this* callback on its SSL_CTX
-  // (TlsClientConnection::CreateSslCtx) so REALITY-enabled SSLs need
-  // the same HMAC short-circuit here that TCP gets in
-  // SSLClientSocketImpl::VerifyCertCallback. Without it, BoringSSL
-  // would forward the cert chain to the standard CertVerifier inside
-  // TlsHandshaker::VerifyCert -> ProofVerifierChromium, which rejects
-  // the bare HMAC-signed leaf and the handshake closes mid-Handshake
-  // before our debug instrumentation higher up the stack can fire.
-  if (SSL_reality_is_enabled(ssl)) {
-    if (SSL_reality_verify_peer_cert(ssl)) {
-      *out_alert = 0;
-      return ssl_verify_ok;
-    }
-    *out_alert = SSL_AD_BAD_CERTIFICATE;
-    return ssl_verify_invalid;
-  }
   return ConnectionFromSsl(ssl)->delegate_->VerifyCert(out_alert);
 }
 

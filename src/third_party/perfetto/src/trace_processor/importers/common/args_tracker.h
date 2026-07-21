@@ -24,13 +24,17 @@
 #include "perfetto/ext/base/flat_hash_map.h"
 #include "perfetto/ext/base/fnv_hash.h"
 #include "perfetto/ext/base/small_vector.h"
-#include "src/trace_processor/dataframe/dataframe.h"
+#include "src/trace_processor/core/dataframe/dataframe.h"
 #include "src/trace_processor/importers/common/global_args_tracker.h"
 #include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/tables/android_tables_py.h"
+#include "src/trace_processor/tables/counter_tables_py.h"
 #include "src/trace_processor/tables/flow_tables_py.h"
+#include "src/trace_processor/tables/log_tables_py.h"
 #include "src/trace_processor/tables/memory_tables_py.h"
 #include "src/trace_processor/tables/metadata_tables_py.h"
+#include "src/trace_processor/tables/profiler_tables_py.h"
+#include "src/trace_processor/tables/slice_tables_py.h"
 #include "src/trace_processor/tables/trace_proto_tables_py.h"
 #include "src/trace_processor/tables/track_tables_py.h"
 #include "src/trace_processor/tables/winscope_tables_py.h"
@@ -81,15 +85,15 @@ class ArgsTracker {
     // track the next array index for an array under a specific key.
     size_t GetNextArrayEntryIndex(StringId key) {
       // Zero-initializes |key| in the map if it doesn't exist yet.
-      return args_tracker_
-          ->array_indexes_[std::make_tuple(ptr_, col_, row_, key)];
+      return args_tracker_->array_indexes_[std::make_tuple(
+          reinterpret_cast<uintptr_t>(ptr_), col_, row_, key)];
     }
 
     // Returns the next available array index after increment.
     size_t IncrementArrayEntryIndex(StringId key) {
       // Zero-initializes |key| in the map if it doesn't exist yet.
-      return ++args_tracker_
-                   ->array_indexes_[std::make_tuple(ptr_, col_, row_, key)];
+      return ++args_tracker_->array_indexes_[std::make_tuple(
+          reinterpret_cast<uintptr_t>(ptr_), col_, row_, key)];
     }
 
    protected:
@@ -216,14 +220,14 @@ class ArgsTracker {
 
   BoundInserter AddArgsTo(MetadataId id) {
     auto* table = context_->storage->mutable_metadata_table();
-    uint32_t row = table->FindById(id)->ToRowNumber().row_number();
+    uint32_t row = (*table)[id].ToRowNumber().row_number();
     return BoundInserter(this, &table->dataframe(),
                          tables::MetadataTable::ColumnIndex::int_value, row);
   }
 
   BoundInserter AddArgsTo(TrackId id) {
     auto* table = context_->storage->mutable_track_table();
-    uint32_t row = table->FindById(id)->ToRowNumber().row_number();
+    uint32_t row = (*table)[id].ToRowNumber().row_number();
     return BoundInserter(this, &table->dataframe(),
                          tables::TrackTable::ColumnIndex::source_arg_set_id,
                          row);
@@ -255,8 +259,16 @@ class ArgsTracker {
     return AddArgsTo(context_->storage->mutable_cpu_table(), id);
   }
 
+  BoundInserter AddArgsTo(tables::GpuTable::Id id) {
+    return AddArgsTo(context_->storage->mutable_gpu_table(), id);
+  }
+
   BoundInserter AddArgsTo(tables::TraceImportLogsTable::Id id) {
     return AddArgsTo(context_->storage->mutable_trace_import_logs_table(), id);
+  }
+
+  BoundInserter AddArgsTo(tables::LogTable::Id id) {
+    return AddArgsTo(context_->storage->mutable_log_table(), id);
   }
 
   // Returns a CompactArgSet which contains the args inserted into this
@@ -281,7 +293,7 @@ class ArgsTracker {
  private:
   template <typename T>
   BoundInserter AddArgsTo(T* table, typename T::Id id) {
-    uint32_t row = table->FindById(id)->ToRowNumber().row_number();
+    uint32_t row = (*table)[id].ToRowNumber().row_number();
     return BoundInserter(this, &table->dataframe(), T::ColumnIndex::arg_set_id,
                          row);
   }
@@ -297,18 +309,13 @@ class ArgsTracker {
   base::SmallVector<GlobalArgsTracker::Arg, 16> args_;
   TraceProcessorContext* context_ = nullptr;
 
-  using ArrayKeyTuple = std::tuple<void* /*ptr*/,
+  using ArrayKeyTuple = std::tuple<uintptr_t /*ptr*/,
                                    uint32_t /*col*/,
                                    uint32_t /*row*/,
                                    StringId /*key*/>;
-  struct Hasher {
-    uint64_t operator()(const ArrayKeyTuple& t) const {
-      return base::FnvHasher::Combine(
-          reinterpret_cast<uint64_t>(std::get<0>(t)), std::get<1>(t),
-          std::get<2>(t), std::get<3>(t).raw_id());
-    }
-  };
-  base::FlatHashMap<ArrayKeyTuple, size_t /*next_index*/, Hasher>
+  base::FlatHashMap<ArrayKeyTuple,
+                    size_t /*next_index*/,
+                    base::MurmurHash<ArrayKeyTuple>>
       array_indexes_;
 };
 

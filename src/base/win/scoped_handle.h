@@ -62,7 +62,7 @@ class GenericScopedHandle {
 
   GenericScopedHandle(GenericScopedHandle&& other)
       : handle_(Traits::NullHandle()) {
-    Set(other.Take());
+    Set(other.release());
   }
 
   GenericScopedHandle(const GenericScopedHandle&) = delete;
@@ -72,12 +72,9 @@ class GenericScopedHandle {
 
   bool is_valid() const { return Traits::IsHandleValid(handle_); }
 
-  // TODO(crbug.com/40212898): Migrate callers to is_valid().
-  bool IsValid() const { return is_valid(); }
-
   GenericScopedHandle& operator=(GenericScopedHandle&& other) {
     DCHECK_NE(this, &other);
-    Set(other.Take());
+    Set(other.release());
     return *this;
   }
 

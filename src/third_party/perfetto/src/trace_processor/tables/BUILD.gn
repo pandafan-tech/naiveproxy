@@ -19,7 +19,7 @@ source_set("tables") {
   sources = [ "macros_internal.h" ]
   deps = [
     "../../../gn:default_deps",
-    "../dataframe",
+    "../core/dataframe",
   ]
   public_deps = [ ":tables_python" ]
 }
@@ -31,6 +31,7 @@ perfetto_tp_tables("tables_python") {
     "etm_tables.py",
     "flow_tables.py",
     "jit_tables.py",
+    "log_tables.py",
     "memory_tables.py",
     "metadata_tables.py",
     "perf_tables.py",

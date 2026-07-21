@@ -5,11 +5,7 @@
 #ifndef QUICHE_QUIC_TEST_TOOLS_QUIC_STREAM_PEER_H_
 #define QUICHE_QUIC_TEST_TOOLS_QUIC_STREAM_PEER_H_
 
-#include <cstdint>
-
-#include "quiche/quic/core/quic_packets.h"
-#include "quiche/quic/core/quic_stream_send_buffer.h"
-#include "quiche/quic/core/quic_stream_send_buffer_base.h"
+#include "quiche/quic/core/quic_stream_send_buffer_inlining.h"
 #include "quiche/quic/core/quic_stream_sequencer.h"
 #include "quiche/quic/core/quic_types.h"
 
@@ -46,7 +42,7 @@ class QuicStreamPeer {
   static void SetFinReceived(QuicStream* stream);
   static void SetFinSent(QuicStream* stream);
 
-  static QuicStreamSendBufferBase& SendBuffer(QuicStream* stream);
+  static QuicStreamSendBufferInlining& SendBuffer(QuicStream* stream);
 };
 
 }  // namespace test

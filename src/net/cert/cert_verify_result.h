@@ -5,13 +5,17 @@
 #ifndef NET_CERT_CERT_VERIFY_RESULT_H_
 #define NET_CERT_CERT_VERIFY_RESULT_H_
 
+#include <optional>
+
 #include "base/memory/scoped_refptr.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "net/base/hash_value.h"
 #include "net/base/net_export.h"
 #include "net/cert/cert_status_flags.h"
 #include "net/cert/ct_policy_status.h"
 #include "net/cert/signed_certificate_timestamp_and_status.h"
+#include "net/net_buildflags.h"
 #include "third_party/boringssl/src/include/openssl/pki/ocsp.h"
 
 namespace ct {
@@ -35,7 +39,7 @@ class NET_EXPORT CertVerifyResult {
   // Creates NetLog parameter to describe the CertVerifyResult. |net_error| is
   // a net error code to include in the params, if non-zero. It must not be
   // ERR_IO_PENDING, as that is not a true error.
-  base::Value::Dict NetLogParams(int net_error) const;
+  base::DictValue NetLogParams(int net_error) const;
 
   // The certificate chain that was constructed during verification.
   //
@@ -60,10 +64,6 @@ class NET_EXPORT CertVerifyResult {
   // |verified_cert|, rather than the originally supplied certificate
   // chain.
   CertStatus cert_status;
-
-  // Hash algorithms used by the certificate chain, excluding the trust
-  // anchor.
-  bool has_sha1;
 
   // If the certificate was successfully verified then this contains the
   // hashes for all of the SubjectPublicKeyInfos of the chain (target,
@@ -94,8 +94,27 @@ class NET_EXPORT CertVerifyResult {
 
   // The result of evaluating CT requirements.
   ct::CTRequirementsStatus ct_requirement_status;
+
+#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+  // Special values of crs_root_id. Values starting at 3 are actual ids, and
+  // the source of truth is the root_store.textproto.
+  // These values are recorded in histograms, do not change or re-order.
+  enum CrsRootIdSpecialValues {
+    // The value zero is never used, it is reserved to avoid the possible case
+    // of an integer that was default initialized to zero slipping in
+    // unnoticed.
+    kReserved = 0,
+    kCrsRootIdPrivatelyTrustedRoot = 1,
+    kCrsRootIdUnknownId = 2,
+  };
+  // The stable identifier of the root of the chain of `verified_cert`, or one
+  // of the special values in the `CrsRootIdSpecialValues` enum.
+  // Will be nullopt in builds where CRS is optionally supported but was not
+  // used.
+  std::optional<int32_t> crs_root_id;
+#endif
 };
-// LINT.ThenChange(/services/network/public/cpp/net_ipc_param_traits.cc:CertVerifyResult)
+// LINT.ThenChange(/services/network/public/mojom/cert_verify_result.mojom:CertVerifyResult)
 
 }  // namespace net
 

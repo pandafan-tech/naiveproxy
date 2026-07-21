@@ -20,8 +20,7 @@
 #include <type_traits>
 #include <variant>
 
-#include "src/base/intrusive_tree.h"
-
+#include "perfetto/ext/base/intrusive_tree.h"
 #include "src/protovm/owned_ptr.h"
 #include "src/protovm/scalar.h"
 
@@ -30,7 +29,6 @@ namespace protovm {
 
 struct Node;
 
-namespace internal {
 struct MapNode {
   struct Traits {
     using KeyType = uint64_t;
@@ -48,14 +46,9 @@ struct MapNode {
   OwnedPtr<Node> value;
 };
 
-}  // namespace internal
-
-using IntrusiveMap =
-    base::IntrusiveTree<internal::MapNode, internal::MapNode::Traits>;
+using IntrusiveMap = base::IntrusiveTree<MapNode, MapNode::Traits>;
 
 struct Node {
-  using MapNode = internal::MapNode;
-
   struct Bytes {
     OwnedPtr<void> data;
     size_t size;
@@ -69,10 +62,6 @@ struct Node {
 
   struct IndexedRepeatedField {
     IntrusiveMap index_to_node;
-
-    // Flag needed to track the merge state of indexed repeated field
-    // (see implementation of Merge operation in RW proto)
-    bool has_been_merged;
   };
 
   struct Message {
@@ -94,14 +83,15 @@ struct Node {
   std::variant<Bytes,
                Empty,
                IndexedRepeatedField,
-               MapNode,
                MappedRepeatedField,
                Message,
                Scalar>
       value;
-};
 
-Node& GetOuterNode(Node::MapNode& map_node);
+  // Flag needed to track the merge state of repeated fields
+  // (see implementation of Merge operation in RW proto)
+  bool has_been_merged = false;
+};
 
 }  // namespace protovm
 }  // namespace perfetto

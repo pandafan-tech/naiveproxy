@@ -31,6 +31,7 @@
 #include "base/strings/string_view_util.h"
 #include "base/synchronization/lock.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/timer/elapsed_timer.h"
 #include "base/trace_event/trace_event.h"
 #include "base/values.h"
 #include "build/build_config.h"
@@ -52,6 +53,7 @@
 #include "net/http/transport_security_state.h"
 #include "net/log/net_log_event_type.h"
 #include "net/log/net_log_values.h"
+#include "net/net_buildflags.h"
 #include "net/ssl/cert_compression.h"
 #include "net/ssl/openssl_ssl_util.h"
 #include "net/ssl/ssl_cert_request_info.h"
@@ -83,24 +85,24 @@ const int kCertVerifyPending = 1;
 // Default size of the internal BoringSSL buffers.
 const int kDefaultOpenSSLBufferSize = 17 * 1024;
 
-base::Value::Dict NetLogPrivateKeyOperationParams(uint16_t algorithm,
-                                                  SSLPrivateKey* key) {
-  return base::Value::Dict()
+base::DictValue NetLogPrivateKeyOperationParams(uint16_t algorithm,
+                                                SSLPrivateKey* key) {
+  return base::DictValue()
       .Set("algorithm",
            SSL_get_signature_algorithm_name(algorithm, 0 /* exclude curve */))
       .Set("provider", key->GetProviderName());
 }
 
-base::Value::Dict NetLogSSLInfoParams(SSLClientSocketImpl* socket) {
+base::DictValue NetLogSSLInfoParams(SSLClientSocketImpl* socket) {
   SSLInfo ssl_info;
   if (!socket->GetSSLInfo(&ssl_info)) {
-    return base::Value::Dict();
+    return base::DictValue();
   }
 
   const char* version_str;
   SSLVersionToString(&version_str,
                      SSLConnectionStatusToVersion(ssl_info.connection_status));
-  return base::Value::Dict()
+  return base::DictValue()
       .Set("version", version_str)
       .Set("is_resumed", ssl_info.handshake_type == SSLInfo::HANDSHAKE_RESUME)
       .Set("cipher_suite",
@@ -108,22 +110,24 @@ base::Value::Dict NetLogSSLInfoParams(SSLClientSocketImpl* socket) {
       .Set("key_exchange_group", ssl_info.key_exchange_group)
       .Set("peer_signature_algorithm", ssl_info.peer_signature_algorithm)
       .Set("encrypted_client_hello", ssl_info.encrypted_client_hello)
-      .Set("next_proto", NextProtoToString(socket->GetNegotiatedProtocol()));
+      .Set("next_proto", NextProtoToString(socket->GetNegotiatedProtocol()))
+      .Set("requested_server_padding", ssl_info.server_padding_requested)
+      .Set("received_server_padding", ssl_info.server_padding_received);
 }
 
-base::Value::Dict NetLogSSLAlertParams(const void* bytes, size_t len) {
-  return base::Value::Dict().Set("bytes", NetLogBinaryValue(bytes, len));
+base::DictValue NetLogSSLAlertParams(const void* bytes, size_t len) {
+  return base::DictValue().Set("bytes", NetLogBinaryValue(bytes, len));
 }
 
-base::Value::Dict NetLogSSLMessageParams(bool is_write,
-                                         const void* bytes,
-                                         size_t len,
-                                         NetLogCaptureMode capture_mode) {
+base::DictValue NetLogSSLMessageParams(bool is_write,
+                                       const void* bytes,
+                                       size_t len,
+                                       NetLogCaptureMode capture_mode) {
   if (len == 0) {
     NOTREACHED();
   }
 
-  base::Value::Dict dict;
+  base::DictValue dict;
   // The handshake message type is the first byte. Include it so elided messages
   // still report their type.
   uint8_t type = reinterpret_cast<const uint8_t*>(bytes)[0];
@@ -314,7 +318,7 @@ std::vector<uint8_t> SSLClientSocketImpl::GetECHRetryConfigs() {
 }
 
 std::vector<std::vector<uint8_t>>
-SSLClientSocketImpl::GetServerTrustAnchorIDsForRetry() {
+SSLClientSocketImpl::GetServerTrustAnchorIDs() {
   const uint8_t* available_trust_anchor_ids;
   size_t available_trust_anchor_ids_len;
   SSL_get0_peer_available_trust_anchors(ssl_.get(), &available_trust_anchor_ids,
@@ -324,10 +328,9 @@ SSLClientSocketImpl::GetServerTrustAnchorIDsForRetry() {
   // says `available_trust_anchor_ids` and `available_trust_anchor_ids_len`
   // define a buffer containing a list of Trust Anchor IDs in wire format
   // (length-prefixed non-empty strings);
-  base::SpanReader<const uint8_t> reader(
-      UNSAFE_BUFFERS(base::span<const uint8_t>(
-          available_trust_anchor_ids, available_trust_anchor_ids_len)));
-  return ParseServerTrustAnchorIDs(&reader);
+  base::span<const uint8_t> wire_ids(UNSAFE_BUFFERS(base::span<const uint8_t>(
+      available_trust_anchor_ids, available_trust_anchor_ids_len)));
+  return x509_util::ParseTlsTrustAnchorIDs(wire_ids);
 }
 
 int SSLClientSocketImpl::ExportKeyingMaterial(
@@ -507,10 +510,12 @@ bool SSLClientSocketImpl::GetSSLInfo(SSLInfo* ssl_info) {
   ssl_info->public_key_hashes = server_cert_verify_result_.public_key_hashes;
   ssl_info->client_cert_sent = send_client_cert_ && client_cert_.get();
   ssl_info->encrypted_client_hello = SSL_ech_accepted(ssl_.get());
-  ssl_info->ocsp_result = server_cert_verify_result_.ocsp_result;
   ssl_info->is_fatal_cert_error = is_fatal_cert_error_;
   ssl_info->signed_certificate_timestamps = server_cert_verify_result_.scts;
   ssl_info->ct_policy_compliance = server_cert_verify_result_.policy_compliance;
+#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+  ssl_info->crs_root_id = server_cert_verify_result_.crs_root_id;
+#endif
 
   const SSL_CIPHER* cipher = SSL_get_current_cipher(ssl_.get());
   CHECK(cipher);
@@ -527,6 +532,15 @@ bool SSLClientSocketImpl::GetSSLInfo(SSLInfo* ssl_info) {
   ssl_info->handshake_type = SSL_session_reused(ssl_.get())
                                  ? SSLInfo::HANDSHAKE_RESUME
                                  : SSLInfo::HANDSHAKE_FULL;
+
+  ssl_info->early_data_accepted = SSL_early_data_accepted(ssl_.get());
+
+  ssl_info->server_padding_requested =
+      ssl_config_.server_padding_to_request.has_value();
+  if (ssl_info->server_padding_requested) {
+    ssl_info->server_padding_received =
+        SSL_server_sent_requested_padding(ssl_.get());
+  }
 
   return true;
 }
@@ -675,10 +689,6 @@ int SSLClientSocketImpl::Init() {
       !SSL_set_tlsext_host_name(ssl_.get(), host_and_port_.host().c_str())) {
     return ERR_UNEXPECTED;
   }
-  if (!SSL_apply_reality_global_config_for_authority(
-          ssl_.get(), host_and_port_.host().c_str(), host_and_port_.port())) {
-    return ERR_UNEXPECTED;
-  }
 
   const std::vector<uint16_t> supported_groups =
       context_->config().GetSupportedGroups();
@@ -779,9 +789,29 @@ int SSLClientSocketImpl::Init() {
       SSL_SIGN_RSA_PSS_RSAE_SHA384,    SSL_SIGN_RSA_PKCS1_SHA384,
       SSL_SIGN_RSA_PSS_RSAE_SHA512,    SSL_SIGN_RSA_PKCS1_SHA512,
   };
-  if (!SSL_set_verify_algorithm_prefs(ssl_.get(), kVerifyPrefs,
-                                      std::size(kVerifyPrefs))) {
-    return ERR_UNEXPECTED;
+  static const uint16_t kVerifyPrefsWithMlDsa[] = {
+      SSL_SIGN_ML_DSA_44,
+      SSL_SIGN_ML_DSA_65,
+      SSL_SIGN_ML_DSA_87,
+      SSL_SIGN_ECDSA_SECP256R1_SHA256,
+      SSL_SIGN_RSA_PSS_RSAE_SHA256,
+      SSL_SIGN_RSA_PKCS1_SHA256,
+      SSL_SIGN_ECDSA_SECP384R1_SHA384,
+      SSL_SIGN_RSA_PSS_RSAE_SHA384,
+      SSL_SIGN_RSA_PKCS1_SHA384,
+      SSL_SIGN_RSA_PSS_RSAE_SHA512,
+      SSL_SIGN_RSA_PKCS1_SHA512,
+  };
+  if (base::FeatureList::IsEnabled(features::kTlsMldsaSignatures)) {
+    if (!SSL_set_verify_algorithm_prefs(ssl_.get(), kVerifyPrefsWithMlDsa,
+                                        std::size(kVerifyPrefsWithMlDsa))) {
+      return ERR_UNEXPECTED;
+    }
+  } else {
+    if (!SSL_set_verify_algorithm_prefs(ssl_.get(), kVerifyPrefs,
+                                        std::size(kVerifyPrefs))) {
+      return ERR_UNEXPECTED;
+    }
   }
 
   SSL_set_alps_use_new_codepoint(
@@ -836,7 +866,7 @@ int SSLClientSocketImpl::Init() {
   if (!ssl_config_.ech_config_list.empty()) {
     DCHECK(context_->config().ech_enabled);
     net_log_.AddEvent(NetLogEventType::SSL_ECH_CONFIG_LIST, [&] {
-      return base::Value::Dict().Set(
+      return base::DictValue().Set(
           "bytes", NetLogBinaryValue(ssl_config_.ech_config_list));
     });
     if (!SSL_set1_ech_config_list(ssl_.get(),
@@ -849,11 +879,24 @@ int SSLClientSocketImpl::Init() {
   SSL_set_permute_extensions(ssl_.get(), 1);
 
   // Configure BoringSSL to send Trust Anchor IDs, if provided.
-  if (ssl_config_.trust_anchor_ids.has_value() &&
-      !SSL_set1_requested_trust_anchors(ssl_.get(),
-                                        ssl_config_.trust_anchor_ids->data(),
-                                        ssl_config_.trust_anchor_ids->size())) {
-    return ERR_UNEXPECTED;
+  if (ssl_config_.trust_anchor_ids.has_value()) {
+    if (!SSL_set1_requested_trust_anchors(
+            ssl_.get(), ssl_config_.trust_anchor_ids->data(),
+            ssl_config_.trust_anchor_ids->size())) {
+      return ERR_UNEXPECTED;
+    }
+    net_log_.AddEvent(NetLogEventType::SSL_CLIENT_TRUST_ANCHOR_IDS_LIST, [&] {
+      return base::DictValue().Set(
+          "trust_anchor_ids",
+          x509_util::TrustAnchorIDsToString(x509_util::ParseTlsTrustAnchorIDs(
+              *ssl_config_.trust_anchor_ids)));
+    });
+  }
+
+  // Configure BoringSSL to ask for server padding, if provided.
+  if (ssl_config_.server_padding_to_request.has_value()) {
+    SSL_set_server_padding_request(
+        ssl_.get(), ssl_config_.server_padding_to_request.value());
   }
 
   // The compliance policy must be the last thing configured in order to have
@@ -1047,36 +1090,6 @@ ssl_verify_result_t SSLClientSocketImpl::VerifyCert() {
     return HandleVerifyResult();
   }
 
-  // REALITY short-circuit (cronet-reality patch series):
-  // When REALITY is configured on this SSL (either per-SSL or via the
-  // global config), authentication is provided by the HMAC-SHA512
-  // verification of the leaf cert's signature value against the derived
-  // auth_key, NOT by chain validation against system trust anchors. The
-  // server's borrowed Ed25519 leaf cert is intentionally not part of any
-  // public PKI chain.
-  //
-  // We skip the standard CertVerifier pipeline in that case: if the
-  // REALITY HMAC matches, the connection is authenticated. If not, we
-  // refuse rather than fall through to standard verification (a
-  // successful chain verify here would just mean we got proxied to the
-  // real borrowed site, which is useless for routing proxy traffic).
-  if (SSL_reality_is_enabled(ssl_.get())) {
-    if (SSL_reality_verify_peer_cert(ssl_.get())) {
-      // Synthesize a passing CertVerifyResult so downstream code (key
-      // pinning, expect-CT, etc.) sees a clean state.
-      server_cert_ = x509_util::CreateX509CertificateFromBuffers(
-          SSL_get0_peer_certificates(ssl_.get()));
-      server_cert_verify_result_.Reset();
-      server_cert_verify_result_.verified_cert = server_cert_;
-      server_cert_verify_result_.cert_status = 0;  // OK
-      cert_verification_result_ = OK;
-      return HandleVerifyResult();
-    }
-    // REALITY enabled but HMAC mismatch — refuse.
-    OpenSSLPutNetError(FROM_HERE, ERR_CERT_AUTHORITY_INVALID);
-    return ssl_verify_invalid;
-  }
-
   // In this configuration, BoringSSL will perform exactly one certificate
   // verification, so there cannot be state from a previous verification.
   CHECK(!server_cert_);
@@ -1092,9 +1105,19 @@ ssl_verify_result_t SSLClientSocketImpl::VerifyCert() {
   }
 
   net_log_.AddEvent(NetLogEventType::SSL_CERTIFICATES_RECEIVED, [&] {
-    return base::Value::Dict().Set(
-        "certificates", NetLogX509CertificateList(server_cert_.get()));
+    return base::DictValue().Set("certificates",
+                                 NetLogX509CertificateList(server_cert_.get()));
   });
+
+  auto server_trust_anchor_ids = GetServerTrustAnchorIDs();
+  if (!server_trust_anchor_ids.empty()) {
+    net_log_.AddEvent(
+        NetLogEventType::SSL_CLIENT_RECEIVED_TRUST_ANCHOR_IDS, [&] {
+          return base::DictValue().Set(
+              "trust_anchor_ids",
+              x509_util::TrustAnchorIDsToString(server_trust_anchor_ids));
+        });
+  }
 
   // If the certificate is bad and has been previously accepted, use
   // the previous status and bypass the error.
@@ -1255,6 +1278,10 @@ void SSLClientSocketImpl::DoConnectCallback(int rv) {
 }
 
 void SSLClientSocketImpl::OnHandshakeIOComplete(int result) {
+  std::optional<base::ElapsedTimer> timer;
+  if (base::ShouldRecordSubsampledMetric(0.001)) {
+    timer.emplace();
+  }
   int rv = DoHandshakeLoop(result);
   if (rv != ERR_IO_PENDING) {
     if (in_confirm_handshake_) {
@@ -1264,6 +1291,11 @@ void SSLClientSocketImpl::OnHandshakeIOComplete(int result) {
       LogConnectEndEvent(rv);
     }
     DoConnectCallback(rv);
+  }
+  if (timer) {
+    base::UmaHistogramTimes(
+        "Net.SSLClientSocketImpl.OnHandshakeIOCompleteDuration",
+        timer->Elapsed());
   }
 }
 
@@ -1447,7 +1479,7 @@ void SSLClientSocketImpl::DoPeek() {
                                 ssl_early_data_reason_max_value + 1);
     }
     net_log_.AddEvent(NetLogEventType::SSL_HANDSHAKE_EARLY_DATA_REASON, [&] {
-      base::Value::Dict dict;
+      base::DictValue dict;
       dict.Set("early_data_reason", early_data_reason);
       return dict;
     });
@@ -1523,25 +1555,6 @@ void SSLClientSocketImpl::RetryAllOperations() {
     DoWriteCallback(rv_write);
 }
 
-// static
-std::vector<std::vector<uint8_t>>
-SSLClientSocketImpl::ParseServerTrustAnchorIDs(
-    base::SpanReader<const uint8_t>* reader) {
-  std::vector<std::vector<uint8_t>> trust_anchor_ids;
-  while (reader->remaining() > 0) {
-    uint8_t len;
-    if (!reader->ReadU8BigEndian(len) || len < 1u) {
-      return {};
-    }
-    std::optional<base::span<const uint8_t>> bytes = reader->Read(len);
-    if (!bytes) {
-      return {};
-    }
-    trust_anchor_ids.emplace_back(base::ToVector(*bytes));
-  }
-  return trust_anchor_ids;
-}
-
 int SSLClientSocketImpl::ClientCertRequestCallback(SSL* ssl) {
   DCHECK(ssl == ssl_.get());
 
@@ -1579,7 +1592,7 @@ int SSLClientSocketImpl::ClientCertRequestCallback(SSL* ssl) {
     // If the key supports rsa_pkcs1_sha256, automatically add support for
     // rsa_pkcs1_sha256_legacy, for use with TLS 1.3. We convert here so that
     // not every `SSLPrivateKey` needs to implement it explicitly.
-    if (base::Contains(preferences, SSL_SIGN_RSA_PKCS1_SHA256)) {
+    if (std::ranges::contains(preferences, SSL_SIGN_RSA_PKCS1_SHA256)) {
       preferences.push_back(SSL_SIGN_RSA_PKCS1_SHA256_LEGACY);
     }
 

@@ -258,6 +258,9 @@ class QUICHE_EXPORT QuicSpdySession
   // before encryption gets established.
   void SendHttp3GoAway(QuicErrorCode error_code, const std::string& reason);
 
+  void SendHttp3GoAway(QuicErrorCode error_code, const std::string& reason,
+                       bool immediate);
+
   QpackEncoder* qpack_encoder();
   QpackDecoder* qpack_decoder();
   QuicHeadersStream* headers_stream() { return headers_stream_; }
@@ -402,13 +405,6 @@ class QUICHE_EXPORT QuicSpdySession
     return http_datagram_support_;
   }
 
-  // cronet-reality: Chromium's proxy CONNECT-UDP stream can observe the peer
-  // H3_DATAGRAM SETTINGS as unavailable even after the server accepted the
-  // extended CONNECT. For that path, enable the locally supported H3 datagram
-  // mode so SendHttp3Datagram and OnDatagramReceived use the normal RFC 9297
-  // encoder/decoder instead of silently dropping datagrams.
-  void EnableH3DatagramForConnectUdp();
-
   // This must not be used except by QuicSpdyStream::SendHttp3Datagram.
   DatagramStatus SendHttp3Datagram(QuicStreamId stream_id,
                                    absl::string_view payload);
@@ -444,7 +440,7 @@ class QUICHE_EXPORT QuicSpdySession
   // are supported to ensure we know which one is used. The HTTP Datagram check
   // will be removed once we drop support for draft04.
   bool ShouldBufferRequestsUntilSettings() {
-    return version().UsesHttp3() && perspective() == Perspective::IS_SERVER &&
+    return version().IsIetfQuic() && perspective() == Perspective::IS_SERVER &&
            (ShouldNegotiateWebTransport() ||
             LocalHttpDatagramSupport() == HttpDatagramSupport::kRfcAndDraft04 ||
             force_buffer_requests_until_settings_);
@@ -500,7 +496,7 @@ class QUICHE_EXPORT QuicSpdySession
   // Override CreateIncomingStream() with QuicSpdyStream return type to
   // ensure that all data streams are QuicSpdyStreams.
   QuicSpdyStream* CreateIncomingStream(QuicStreamId id) override = 0;
-  QuicSpdyStream* CreateIncomingStream(PendingStream* pending) override = 0;
+  bool ShouldRefuseIncomingStream(QuicStreamId id) override;
   // Called to create a new outgoing bidirectional stream.
   virtual QuicSpdyStream* CreateOutgoingBidirectionalStream() = 0;
 
@@ -530,7 +526,7 @@ class QUICHE_EXPORT QuicSpdySession
   // corresponding type. Returns the pointer to the newly created stream, or
   // nullptr if the stream type is not yet available.
   QuicStream* ProcessReadUnidirectionalPendingStream(
-      PendingStream* pending) override;
+      PendingStream& pending) override;
 
   size_t WriteHeadersOnHeadersStreamImpl(
       QuicStreamId id, quiche::HttpHeaderBlock headers, bool fin,
@@ -638,6 +634,8 @@ class QUICHE_EXPORT QuicSpdySession
   }
 
   bool ValidateWebTransportSettingsConsistency();
+
+  QuicStreamId GetStreamIdForHttp3Goaway(bool immediate) const;
 
   std::unique_ptr<QpackDecoder> qpack_decoder_;
   http2::Http2DecoderAdapter h2_deframer_;

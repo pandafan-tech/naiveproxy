@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "base/android/library_loader/anchor_functions_buildflags.h"
 #include "base/android/library_loader/library_prefetcher.h"
@@ -67,9 +68,19 @@ bool LibraryLoaded(LibraryProcessType library_process_type) {
   return true;
 }
 
-static jboolean JNI_LibraryLoader_LibraryLoaded(JNIEnv* env,
-                                                jint library_process_type) {
-  return LibraryLoaded(static_cast<LibraryProcessType>(library_process_type));
+static bool JNI_LibraryLoader_LibraryLoaded(JNIEnv* env,
+                                            LibraryProcessType library_process_type) {
+  bool result = LibraryLoaded(library_process_type);
+  if (result && library_process_type == PROCESS_BROWSER) {
+    // Required for //third_party/cardboard SDK, which has native code that uses
+    // JNI to call into code within the Chrome split.
+    // JNIEnv is thread-local and this overrides only the main thread, because
+    // that is all that's needed for now.
+    // This should never be enabled for WebView processes, since it could interfere
+    // with JNI from host apps.
+    HookJniFindClass(env);
+  }
+  return result;
 }
 
 void LibraryLoaderExitHook() {
@@ -85,3 +96,5 @@ void InitAtExitManager() {
 
 }  // namespace android
 }  // namespace base
+
+DEFINE_JNI(LibraryLoader)

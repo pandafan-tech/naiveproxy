@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <ctime>
@@ -33,6 +34,7 @@
 #include "base/debug/task_trace.h"
 #include "base/functional/callback.h"
 #include "base/immediate_crash.h"
+#include "base/logging/logging_settings.h"
 #include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/pending_task.h"
@@ -186,13 +188,14 @@ void MaybeInitializeVlogInfo() {
   }
 }
 
-const char* const log_severity_names[] = {"INFO", "WARNING", "ERROR", "FATAL"};
+constexpr auto log_severity_names =
+    std::to_array<const char*>({"INFO", "WARNING", "ERROR", "FATAL"});
 static_assert(LOGGING_NUM_SEVERITIES == std::size(log_severity_names),
               "Incorrect number of log_severity_names");
 
 const char* log_severity_name(int severity) {
-  if (severity >= 0 && severity < LOGGING_NUM_SEVERITIES) {
-    return UNSAFE_TODO(log_severity_names[severity]);
+  if (severity >= 0 && static_cast<size_t>(severity) < LOGGING_NUM_SEVERITIES) {
+    return log_severity_names[static_cast<size_t>(severity)];
   }
   return "UNKNOWN";
 }
@@ -445,7 +448,7 @@ void SetLogFatalCrashKey(LogMessage* log_message) {
 
 std::string BuildCrashString(const char* file,
                              int line,
-                             const char* message_without_prefix) {
+                             std::string_view message_without_prefix) {
   // Only log last path component.
   if (file) {
     const char* slash = UNSAFE_TODO(strrchr(file,
@@ -659,7 +662,7 @@ LogMessageHandlerFunction GetLogMessageHandler() {
 // This is for developers only; we don't use this in circumstances
 // (like release builds) where users could see it, since users don't
 // understand these messages anyway.
-void DisplayDebugMessageInDialog(const std::string& str) {
+void DisplayDebugMessageInDialog(std::string_view str) {
   if (str.empty()) {
     return;
   }
@@ -694,7 +697,7 @@ void LogMessage::Flush() {
   // Don't let actions from this method affect the system error after returning.
   base::ScopedClearLastError scoped_clear_last_error;
 
-  size_t stack_start = stream_.str().length();
+  size_t stack_start = stream_.view().length();
 #if !defined(OFFICIAL_BUILD) && !defined(__UCLIBC__) && !BUILDFLAG(IS_AIX)
   // Include a stack trace on a fatal, unless a debugger is attached.
   if (severity_ == LOGGING_FATAL && !base::debug::BeingDebugged()) {
@@ -829,8 +832,8 @@ void LogMessage::Flush() {
             return OS_LOG_TYPE_DEFAULT;
         }
       }(severity_);
-      os_log_with_type(log.get(), os_log_type, "%{public}s",
-                       str_newline.c_str());
+      UNSAFE_TODO(os_log_with_type(log.get(), os_log_type, "%{public}s",
+                                   str_newline.c_str()));
     }
 #elif BUILDFLAG(IS_ANDROID)
     android_LogPriority priority =
@@ -920,7 +923,7 @@ void LogMessage::Flush() {
 
 std::string LogMessage::BuildCrashString() const {
   return logging::BuildCrashString(file(), line(),
-                                   UNSAFE_TODO(str().c_str() + message_start_));
+                                   stream_.view().substr(message_start_));
 }
 
 // writes the common header info to the stream
@@ -997,14 +1000,14 @@ void LogMessage::Init(const char* file, int line) {
     }
     stream_ << ":" << filename << ":" << line << "] ";
   }
-  message_start_ = stream_.str().length();
+  message_start_ = stream_.view().length();
 }
 
 void LogMessage::HandleFatal(size_t stack_start,
                              const std::string& str_newline) const {
   char str_stack[1024];
-  UNSAFE_TODO(
-      base::strlcpy(str_stack, str_newline.data(), std::size(str_stack)));
+
+  base::strlcpy(str_stack, str_newline.data(), std::size(str_stack));
   base::debug::Alias(&str_stack);
 
   if (!GetLogAssertHandlerStack().empty()) {
@@ -1028,7 +1031,7 @@ void LogMessage::HandleFatal(size_t stack_start,
     if (!base::debug::BeingDebugged()) {
       // Displaying a dialog is unnecessary when debugging and can complicate
       // debugging.
-      DisplayDebugMessageInDialog(stream_.str());
+      DisplayDebugMessageInDialog(stream_.view());
     }
 #endif
 

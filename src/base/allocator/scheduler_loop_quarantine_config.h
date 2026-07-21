@@ -22,14 +22,17 @@ enum class SchedulerLoopQuarantineBranchType {
   kThreadLocalDefault,
   // Specialized configuration for the main thread of a process.
   kMain,
+  // Specialized configuration for the IO thread of a process.
+  kIO,
   // One for `ADVANCED_MEMORY_SAFETY_CHECKS()` objects.
   kAdvancedMemorySafetyChecks,
 };
 
-// Returns quarantine configuration for `process_name` and `branch_type`.
+// Returns quarantine configuration for `process_type_identifier` and
+// `branch_type`.
 BASE_EXPORT ::partition_alloc::internal::SchedulerLoopQuarantineConfig
 GetSchedulerLoopQuarantineConfiguration(
-    const std::string& process_type,
+    std::string_view process_type_identifier,
     SchedulerLoopQuarantineBranchType branch_type);
 
 }  // namespace base::allocator

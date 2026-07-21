@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import("../../gn/perfetto.gni")
+
 source_set("for_testing") {
   deps = [
     "../../gn:default_deps",
@@ -42,6 +44,14 @@ source_set("shared_lib") {
     "tracing_session.cc",
   ]
   defines = [ "PERFETTO_SHLIB_SDK_IMPLEMENTATION" ]
+
+  # Abseil is only used in Perfetto via:
+  # - the gRPC/libprotobuf
+  # - re2
+  if (!enable_perfetto_re2 &&
+      (perfetto_build_standalone || is_perfetto_build_generator)) {
+    assert_no_deps = [ "../../buildtools:abseil_cpp" ]
+  }
 }
 
 shared_library("libperfetto_c") {
@@ -50,4 +60,14 @@ shared_library("libperfetto_c") {
     "../../gn:default_deps",
   ]
   public_deps = [ "../../include/perfetto/public" ]
+}
+
+# This is only used by the Bazel build (see //BUILD), where it gets mapped to a
+# cc_library exposing the C public headers without linking the implementation.
+# We skip it in other configurations because an empty static_library has no
+# .obj inputs, which makes lld-link fail on Windows ("no input files").
+if (is_perfetto_build_generator) {
+  static_library("libperfetto_c_headers") {
+    public_deps = [ "../../include/perfetto/public" ]
+  }
 }

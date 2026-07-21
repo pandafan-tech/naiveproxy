@@ -23,6 +23,7 @@
 #include "protos/perfetto/trace/ftrace/ftrace_event.pbzero.h"
 #include "protos/perfetto/trace/ftrace/power.pbzero.h"
 #include "src/trace_processor/importers/common/event_tracker.h"
+#include "src/trace_processor/importers/common/gpu_tracker.h"
 #include "src/trace_processor/importers/common/import_logs_tracker.h"
 #include "src/trace_processor/importers/common/slice_tracker.h"
 #include "src/trace_processor/importers/common/track_tracker.h"
@@ -47,10 +48,14 @@ void GpuWorkPeriodTracker::ParseGpuWorkPeriodEvent(int64_t timestamp,
 
   static constexpr auto kTrackBlueprint = tracks::SliceBlueprint(
       "android_gpu_work_period",
-      tracks::DimensionBlueprints(tracks::kGpuDimensionBlueprint,
+      tracks::DimensionBlueprints(tracks::kUgpuDimensionBlueprint,
+                                  tracks::kGpuIdDimensionBlueprint,
                                   tracks::kUidDimensionBlueprint));
+  auto ugpu = context_->gpu_tracker->GetOrCreateGpu(
+      static_cast<uint32_t>(evt.gpu_id()));
   TrackId track_id = context_->track_tracker->InternTrack(
-      kTrackBlueprint, {evt.gpu_id(), static_cast<int32_t>(evt.uid())});
+      kTrackBlueprint,
+      {ugpu.value, evt.gpu_id(), static_cast<int32_t>(evt.uid())});
 
   const auto duration =
       static_cast<int64_t>(evt.end_time_ns() - evt.start_time_ns());
@@ -82,9 +87,9 @@ void GpuWorkPeriodTracker::ParseGpuWorkPeriodEvent(int64_t timestamp,
   auto slice_id = context_->slice_tracker->Scoped(
       timestamp, track_id, kNullStringId, entry_name_id, duration);
   if (slice_id) {
-    auto rr = context_->storage->mutable_slice_table()->FindById(*slice_id);
-    rr->set_thread_ts(timestamp);
-    rr->set_thread_dur(active_duration);
+    auto rr = (*context_->storage->mutable_slice_table())[*slice_id];
+    rr.set_thread_ts(timestamp);
+    rr.set_thread_dur(active_duration);
   }
 }
 

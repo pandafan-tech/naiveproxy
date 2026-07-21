@@ -2,8 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef QUICHE_QUIC_MOQT_MOQT_SUBSCRIPTION_H_
-#define QUICHE_QUIC_MOQT_MOQT_SUBSCRIPTION_H_
+// TODO(martinduke): Rename this file to moqt_subscriber.h
+
+#ifndef QUICHE_QUIC_MOQT_MOQT_TRACK_H_
+#define QUICHE_QUIC_MOQT_MOQT_TRACK_H_
 
 #include <cstdint>
 #include <memory>
@@ -13,15 +15,20 @@
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/quic_alarm.h"
+#include "quiche/quic/core/quic_alarm_factory.h"
 #include "quiche/quic/core/quic_time.h"
+#include "quiche/quic/moqt/moqt_bidi_stream.h"
 #include "quiche/quic/moqt/moqt_fetch_task.h"
+#include "quiche/quic/moqt/moqt_key_value_pair.h"
 #include "quiche/quic/moqt/moqt_messages.h"
+#include "quiche/quic/moqt/moqt_names.h"
 #include "quiche/quic/moqt/moqt_object.h"
 #include "quiche/quic/moqt/moqt_priority.h"
 #include "quiche/quic/moqt/moqt_session_interface.h"
-#include "quiche/quic/moqt/moqt_subscribe_windows.h"
-#include "quiche/common/quiche_buffer_allocator.h"
+#include "quiche/quic/moqt/moqt_types.h"
 #include "quiche/common/quiche_callbacks.h"
+#include "quiche/common/quiche_circular_deque.h"
+#include "quiche/common/quiche_mem_slice.h"
 #include "quiche/common/quiche_weak_ptr.h"
 #include "quiche/web_transport/web_transport.h"
 
@@ -36,52 +43,46 @@ class SubscribeRemoteTrackPeer;
 class RemoteTrack {
  public:
   RemoteTrack(const FullTrackName& full_track_name, uint64_t id,
-              SubscribeWindow window, MoqtPriority priority)
+              BidiStreamDeletedCallback callback)
       : full_track_name_(full_track_name),
         request_id_(id),
-        subscriber_priority_(priority),
-        window_(window),
+        delete_callback_(std::move(callback)),
         weak_ptr_factory_(this) {}
-  virtual ~RemoteTrack() = default;
+  virtual ~RemoteTrack() { Destroy(); }
 
-  FullTrackName full_track_name() const { return full_track_name_; }
-  // If FETCH_ERROR or SUBSCRIBE_ERROR arrives after OK or an object, it is a
-  // protocol violation.
+  const FullTrackName& full_track_name() const { return full_track_name_; }
+  // If REQUEST_ERROR arrives after OK or an object, it is a protocol violation.
   virtual void OnObjectOrOk() { error_is_allowed_ = false; }
   bool ErrorIsAllowed() const { return error_is_allowed_; }
-
-  // Makes sure the data stream type is consistent with the track type.
-  bool CheckDataStreamType(MoqtDataStreamType type);
 
   uint64_t request_id() const { return request_id_; }
 
   // Is the object one that was requested?
-  bool InWindow(Location sequence) const { return window_.InWindow(sequence); }
+  virtual bool InWindow(Location sequence) const = 0;
 
   quiche::QuicheWeakPtr<RemoteTrack> weak_ptr() {
     return weak_ptr_factory_.Create();
   }
 
-  const SubscribeWindow& window() const { return window_; }
-
-  MoqtPriority subscriber_priority() const { return subscriber_priority_; }
-  void set_subscriber_priority(MoqtPriority priority) {
-    subscriber_priority_ = priority;
-  }
-
   virtual bool is_fetch() const = 0;
 
- protected:
-  SubscribeWindow& window_mutable() { return window_; };
+  void Destroy() {
+    if (delete_callback_ == nullptr) {
+      return;
+    }
+    BidiStreamDeletedCallback delete_callback = std::move(delete_callback_);
+    delete_callback_ = nullptr;
+    std::move(delete_callback)();
+  }
 
  private:
   const FullTrackName full_track_name_;
   const uint64_t request_id_;
   MoqtPriority subscriber_priority_;
-  SubscribeWindow window_;
   // If false, an object or OK message has been received, so any ERROR message
   // is a protocol violation.
   bool error_is_allowed_ = true;
+  BidiStreamDeletedCallback delete_callback_;
 
   // Must be last.
   quiche::QuicheWeakPtrFactory<RemoteTrack> weak_ptr_factory_;
@@ -90,54 +91,41 @@ class RemoteTrack {
 // A track on the peer to which the session has subscribed.
 class SubscribeRemoteTrack : public RemoteTrack {
  public:
+  // If the second argument is null, delete the registration. Returns false if
+  // it fails due to a duplicate track alias, destroying the session.
+  using RegisterTrackAliasCallback =
+      quiche::MultiUseCallback<bool(uint64_t, SubscribeRemoteTrack*)>;
+  // We're using BidiStreamDeletedCallback here because this will move to a
+  // bidi stream.
   SubscribeRemoteTrack(const MoqtSubscribe& subscribe,
-                       SubscribeVisitor* visitor)
+                       SubscribeVisitor* visitor,
+                       BidiStreamDeletedCallback callback,
+                       RegisterTrackAliasCallback register_track_alias_callback)
       : RemoteTrack(subscribe.full_track_name, subscribe.request_id,
-                    SubscribeWindow(subscribe.start.value_or(Location()),
-                                    subscribe.end_group),
-                    subscribe.subscriber_priority),
-        forward_(subscribe.forward),
+                    std::move(callback)),
+        parameters_(subscribe.parameters),
         visitor_(visitor),
-        delivery_timeout_(subscribe.parameters.delivery_timeout) {}
-  ~SubscribeRemoteTrack() override {
-    if (subscribe_done_alarm_ != nullptr) {
-      subscribe_done_alarm_->PermanentCancel();
-    }
-  }
+        register_track_alias_callback_(
+            std::move(register_track_alias_callback)) {}
+  ~SubscribeRemoteTrack() override;
 
   void OnObjectOrOk() override {
     RemoteTrack::OnObjectOrOk();
   }
   std::optional<uint64_t> track_alias() const { return track_alias_; }
-  void set_track_alias(uint64_t track_alias) {
+  // Returns false if the callback returns false, meaning the session has been
+  // destroyed.
+  [[nodiscard]] bool set_track_alias(uint64_t track_alias) {
     track_alias_.emplace(track_alias);
-  }
-  SubscribeVisitor* visitor() { return visitor_; }
-
-  // Returns false if the forwarding preference is changing on the track.
-  bool OnObject(bool is_datagram) {
-    OnObjectOrOk();
-    if (!is_datagram_.has_value()) {
-      is_datagram_ = is_datagram;
-      return true;
+    if (register_track_alias_callback_) {
+      return register_track_alias_callback_(track_alias, this);
     }
-    return (is_datagram_ == is_datagram);
-  }
-  // Called on SUBSCRIBE_OK or SUBSCRIBE_UPDATE.
-  bool TruncateStart(Location start) {
-    return window_mutable().TruncateStart(start);
-  }
-  // Called on SUBSCRIBE_UPDATE.
-  bool TruncateEnd(uint64_t end_group) {
-    return window_mutable().TruncateEnd(end_group);
+    return true;
   }
   void OnStreamOpened();
   void OnStreamClosed(bool fin_received, std::optional<DataStreamIndex> index);
   void OnPublishDone(uint64_t stream_count, const quic::QuicClock* clock,
-                     std::unique_ptr<quic::QuicAlarm> subscribe_done_alarm);
-  bool all_streams_closed() const {
-    return total_streams_.has_value() && *total_streams_ == streams_closed_;
-  }
+                     quic::QuicAlarmFactory* alarm_factory);
 
   // The application can request a Joining FETCH but also for FETCH objects to
   // be delivered via SubscribeRemoteTrack::Visitor::OnObjectFragment(). When
@@ -145,33 +133,76 @@ class SubscribeRemoteTrack : public RemoteTrack {
   // FETCH objects to pipe directly into the visitor.
   void OnJoiningFetchReady(std::unique_ptr<MoqtFetchTask> fetch_task);
 
-  bool forward() const { return forward_; }
-  void set_forward(bool forward) { forward_ = forward; }
-
   bool is_fetch() const override { return false; }
+
+  MessageParameters& parameters() { return parameters_; }
+
+  bool InWindow(Location location) const override {
+    return parameters_.forward() &&
+           (!parameters_.subscription_filter.has_value() ||
+            parameters_.subscription_filter->InWindow(location));
+  }
+
+  MoqtPriority default_publisher_priority() const {
+    return default_publisher_priority_;
+  }
+  void set_default_publisher_priority(MoqtPriority priority) {
+    default_publisher_priority_ = priority;
+  }
+
+  void set_dynamic_groups(bool dynamic_groups) {
+    dynamic_groups_ = dynamic_groups;
+  }
+
+  quic::QuicTimeDelta publisher_delivery_timeout() const {
+    return publisher_delivery_timeout_;
+  }
+  void set_publisher_delivery_timeout(
+      quic::QuicTimeDelta publisher_delivery_timeout) {
+    publisher_delivery_timeout_ = publisher_delivery_timeout;
+  }
+
+  SubscribeVisitor* visitor() const { return visitor_; }
 
  private:
   friend class test::MoqtSessionPeer;
   friend class test::SubscribeRemoteTrackPeer;
 
-  void MaybeSetPublishDoneAlarm();
+  class PublishDoneDelegate : public quic::QuicAlarm::DelegateWithoutContext {
+   public:
+    PublishDoneDelegate(SubscribeRemoteTrack* subscribe)
+        : subscribe_(subscribe) {}
 
+    void OnAlarm() override { subscribe_->Destroy(); }
+
+   private:
+    SubscribeRemoteTrack* subscribe_;
+  };
+
+  void MaybeSetPublishDoneAlarm();
+  bool all_streams_closed() const {
+    return total_streams_.has_value() && *total_streams_ == streams_closed_;
+  }
+
+  MessageParameters parameters_;
+  quic::QuicTimeDelta publisher_delivery_timeout_ = kDefaultDeliveryTimeout;
+  MoqtPriority default_publisher_priority_ = kDefaultPublisherPriority;
+  bool dynamic_groups_ = kDefaultDynamicGroups;
   void FetchObjects();
   std::unique_ptr<MoqtFetchTask> fetch_task_;
+  // If nonzero, fetch_task_ is in mid-object.
+  uint64_t fetch_object_offset_ = 0;
 
   std::optional<const uint64_t> track_alias_;
-  bool forward_;
   SubscribeVisitor* visitor_;
-  std::optional<bool> is_datagram_;
   int currently_open_streams_ = 0;
   // Every stream that has received FIN or RESET_STREAM.
   uint64_t streams_closed_ = 0;
-  // Value assigned on SUBSCRIBE_DONE. Can destroy subscription state if
+  RegisterTrackAliasCallback register_track_alias_callback_;
+  // Value assigned on PUBLISH_DONE. Can destroy subscription state if
   // streams_closed_ == total_streams_.
   std::optional<uint64_t> total_streams_;
-  // Timer to clean up the track if there are no open streams.
-  quic::QuicTimeDelta delivery_timeout_ = quic::QuicTimeDelta::Infinite();
-  std::unique_ptr<quic::QuicAlarm> subscribe_done_alarm_ = nullptr;
+  std::unique_ptr<quic::QuicAlarm> publish_done_alarm_ = nullptr;
   const quic::QuicClock* clock_ = nullptr;
 };
 
@@ -185,34 +216,57 @@ using CanReadCallback = quiche::MultiUseCallback<void()>;
 using TaskDestroyedCallback = quiche::SingleUseCallback<void()>;
 
 // Class for upstream FETCH. It will notify the application using |callback|
-// when a FETCH_OK or FETCH_ERROR is received.
+// when a FETCH_OK or REQUEST_ERROR is received.
 class UpstreamFetch : public RemoteTrack {
  public:
   // Standalone Fetch constructor
   UpstreamFetch(const MoqtFetch& fetch, const StandaloneFetch standalone,
-                FetchResponseCallback callback)
-      : RemoteTrack(
-            standalone.full_track_name, fetch.request_id,
-            SubscribeWindow(standalone.start_location, standalone.end_location),
-            fetch.subscriber_priority),
+                FetchResponseCallback callback,
+                BidiStreamDeletedCallback delete_callback)
+      : RemoteTrack(standalone.full_track_name, fetch.request_id,
+                    std::move(delete_callback)),
+        group_order_(fetch.parameters.group_order.value_or(
+            MoqtDeliveryOrder::kAscending)),
+        start_(standalone.start_location),
+        end_(standalone.end_location),
+        subscriber_priority_(fetch.parameters.subscriber_priority.value_or(
+            kDefaultSubscriberPriority)),
         ok_callback_(std::move(callback)) {}
   // Relative Joining Fetch constructor
   UpstreamFetch(const MoqtFetch& fetch, FullTrackName full_track_name,
-                FetchResponseCallback callback)
+                FetchResponseCallback callback,
+                BidiStreamDeletedCallback delete_callback)
       : RemoteTrack(full_track_name, fetch.request_id,
-                    SubscribeWindow(Location(0, 0)), fetch.subscriber_priority),
+                    std::move(delete_callback)),
+        group_order_(fetch.parameters.group_order.value_or(
+            MoqtDeliveryOrder::kAscending)),
+        relative_groups_(
+            std::get<JoiningFetchRelative>(fetch.fetch).joining_start),
+        subscriber_priority_(fetch.parameters.subscriber_priority.value_or(
+            kDefaultSubscriberPriority)),
         ok_callback_(std::move(callback)) {}
   // Absolute Joining Fetch constructor
   UpstreamFetch(const MoqtFetch& fetch, FullTrackName full_track_name,
                 JoiningFetchAbsolute absolute_joining,
-                FetchResponseCallback callback)
-      : RemoteTrack(
-            full_track_name, fetch.request_id,
-            SubscribeWindow(Location(absolute_joining.joining_start, 0)),
-            fetch.subscriber_priority),
+                FetchResponseCallback callback,
+                BidiStreamDeletedCallback delete_callback)
+      : RemoteTrack(full_track_name, fetch.request_id,
+                    std::move(delete_callback)),
+        group_order_(fetch.parameters.group_order.value_or(
+            MoqtDeliveryOrder::kAscending)),
+        start_(Location(absolute_joining.joining_start, 0)),
+        subscriber_priority_(fetch.parameters.subscriber_priority.value_or(
+            kDefaultSubscriberPriority)),
         ok_callback_(std::move(callback)) {}
   UpstreamFetch(const UpstreamFetch&) = delete;
   ~UpstreamFetch();
+
+  bool InWindow(Location location) const override {
+    return (location >= start_ && location <= end_);
+  }
+
+  // Called when the data stream is destroyed.
+  void OnStreamClosed() { Destroy(); }
 
   class UpstreamFetchTask : public MoqtFetchTask {
    public:
@@ -256,7 +310,8 @@ class UpstreamFetch : public RemoteTrack {
     // MoqtSession calls this for a hint if the object has been read.
     bool HasObject() const { return next_object_.has_value(); }
     bool NeedsMorePayload() const {
-      return next_object_.has_value() && next_object_->payload_length > 0;
+      return next_object_.has_value() &&
+             payload_length_ < next_object_->payload_length;
     }
     // MoqtSession calls NotifyNewObject() after NewObject() because it has to
     // exit the parser loop before the callback possibly causes another read.
@@ -270,6 +325,9 @@ class UpstreamFetch : public RemoteTrack {
         std::optional<webtransport::StreamErrorCode> error,
         absl::string_view reason_phrase);
 
+    uint64_t payload_offset() const { return payload_offset_; }
+    uint64_t payload_length() const { return payload_length_; }
+
    private:
     Location largest_location_;
     absl::Status status_ = absl::OkStatus();
@@ -279,9 +337,11 @@ class UpstreamFetch : public RemoteTrack {
     // payload bytes not yet received. The application receives a
     // PublishedObject that is constructed from next_object_ and payload_.
     std::optional<MoqtObject> next_object_;
-    // Store payload separately. Will be converted into QuicheMemSlice only when
-    // complete, since QuicheMemSlice is immutable.
-    quiche::QuicheBuffer payload_;
+    quiche::QuicheCircularDeque<quiche::QuicheMemSlice> payload_;
+    // The starting point of payload_. Data is deleted as it is delivered.
+    uint64_t payload_offset_ = 0;
+    // Total data delivered for this object.
+    uint64_t payload_length_ = 0;
 
     // The task should only call object_available_callback_ when the last result
     // was kPending. Otherwise, there can be recursive loops of
@@ -297,9 +357,9 @@ class UpstreamFetch : public RemoteTrack {
     quiche::QuicheWeakPtrFactory<UpstreamFetchTask> weak_ptr_factory_;
   };
 
-  // Arrival of FETCH_OK/FETCH_ERROR.
-  void OnFetchResult(Location largest_location, MoqtDeliveryOrder group_order,
-                     absl::Status status, TaskDestroyedCallback callback);
+  // Arrival of FETCH_OK/REQUEST_ERROR.
+  void OnFetchResult(Location largest_location, absl::Status status,
+                     TaskDestroyedCallback callback);
 
   UpstreamFetchTask* task() { return task_.GetIfAvailable(); }
 
@@ -314,7 +374,11 @@ class UpstreamFetch : public RemoteTrack {
                        bool end_of_message);
 
  private:
-  std::optional<MoqtDeliveryOrder> group_order_;  // nullopt if not yet known.
+  MoqtDeliveryOrder group_order_;
+  Location start_ = Location(0, 0);
+  Location end_ = Location(kMaxGroupId, kMaxObjectId);
+  std::optional<uint64_t> relative_groups_;
+  MoqtPriority subscriber_priority_;
   // The last object received on the stream.
   std::optional<Location> last_location_;
   // The highest location received on the stream.
@@ -334,4 +398,4 @@ class UpstreamFetch : public RemoteTrack {
 
 }  // namespace moqt
 
-#endif  // QUICHE_QUIC_MOQT_MOQT_SUBSCRIPTION_H_
+#endif  // QUICHE_QUIC_MOQT_MOQT_TRACK_H_

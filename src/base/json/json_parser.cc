@@ -375,7 +375,7 @@ std::optional<Value> JSONParser::ConsumeDictionary() {
     return std::nullopt;
   }
 
-  std::vector<std::pair<std::string, std::unique_ptr<Value>>> values;
+  std::vector<std::pair<std::string, Value>> values;
 
   Token token = GetNextToken();
   while (token != T_OBJECT_END) {
@@ -405,8 +405,7 @@ std::optional<Value> JSONParser::ConsumeDictionary() {
       return std::nullopt;
     }
 
-    values.emplace_back(std::move(*key),
-                        std::make_unique<Value>(std::move(*value)));
+    values.emplace_back(std::move(*key), std::move(*value));
 
     token = GetNextToken();
     if (token == T_LIST_SEPARATOR) {
@@ -426,7 +425,8 @@ std::optional<Value> JSONParser::ConsumeDictionary() {
   // Reverse |dict_storage| to keep the last of elements with the same key in
   // the input.
   std::ranges::reverse(values);
-  return Value(Value::Dict(PassKey<JSONParser>(), std::move(values)));
+  return Value(DictValue(std::make_move_iterator(values.begin()),
+                         std::make_move_iterator(values.end())));
 }
 
 std::optional<Value> JSONParser::ConsumeList() {
@@ -441,7 +441,7 @@ std::optional<Value> JSONParser::ConsumeList() {
     return std::nullopt;
   }
 
-  Value::List list;
+  ListValue list;
 
   Token token = GetNextToken();
   while (token != T_ARRAY_END) {
@@ -606,8 +606,7 @@ JSONParser::ConsumeStringPart() {
     if (static_cast<unsigned char>(*c) >= kExtendedASCIIStart) {
       base_icu::UChar32 next_char = 0;
       size_t last_index = index_;
-      if (!ReadUnicodeCharacter(input_.data(), input_.length(), &index_,
-                                &next_char)) {
+      if (!ReadUnicodeCharacter(input_, &index_, &next_char)) {
         if ((options_ & JSON_REPLACE_INVALID_CHARACTERS) == 0) {
           ReportError(JSON_UNSUPPORTED_ENCODING, 0);
           // No need to return consumed data.

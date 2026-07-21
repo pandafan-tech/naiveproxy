@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <array>
-
 // Create a state machine for validating UTF-8. The algorithm in brief:
 // 1. Convert the complete unicode range of code points, except for the
 //    surrogate code points, to an ordered array of sequences of bytes in
@@ -35,6 +33,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
 #include <map>
 #include <string>
 #include <vector>
@@ -43,6 +42,7 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/logging/logging_settings.h"
 #include "base/memory/raw_ptr.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/stringprintf.h"
@@ -323,7 +323,7 @@ uint8_t MakeState(const StringSet& set,
                        std::end(new_state_initializer));
   const uint8_t new_state_number =
       base::checked_cast<uint8_t>(states->size() - 1);
-  CHECK(state_map->insert(std::make_pair(set, new_state_number)).second);
+  CHECK(state_map->try_emplace(set, new_state_number).second);
   return new_state_number;
 }
 
@@ -331,7 +331,7 @@ std::vector<State> GenerateStates(const PairVector& pairs) {
   // States 0 and 1 are the initial/valid state and invalid state, respectively.
   std::vector<State> states(2, GenerateInvalidState());
   StateMap state_map;
-  state_map.insert(std::make_pair(StringSet(), 0));
+  state_map.try_emplace(StringSet(), 0);
   for (auto it = pairs.begin(); it != pairs.end(); ++it) {
     DCHECK(it->character.empty());
     DCHECK(!it->set.empty());

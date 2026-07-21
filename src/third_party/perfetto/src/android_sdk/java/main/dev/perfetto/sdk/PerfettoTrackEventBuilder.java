@@ -16,30 +16,27 @@
 
 package dev.perfetto.sdk;
 
+import com.google.errorprone.annotations.CompileTimeConstant;
+
+import java.util.ArrayList;
+import java.util.function.Supplier;
+
 import dev.perfetto.sdk.PerfettoNativeMemoryCleaner.AllocationStats;
 import dev.perfetto.sdk.PerfettoTrace.Category;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.ArgBool;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.ArgDouble;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.ArgInt64;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.ArgString;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.CounterDouble;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.CounterInt64;
+import dev.perfetto.sdk.PerfettoTrackEventExtra.Arg;
+import dev.perfetto.sdk.PerfettoTrackEventExtra.Counter;
 import dev.perfetto.sdk.PerfettoTrackEventExtra.CounterTrack;
+import dev.perfetto.sdk.PerfettoTrackEventExtra.Field;
 import dev.perfetto.sdk.PerfettoTrackEventExtra.FieldContainer;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.FieldDouble;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.FieldInt64;
 import dev.perfetto.sdk.PerfettoTrackEventExtra.FieldNested;
-import dev.perfetto.sdk.PerfettoTrackEventExtra.FieldString;
 import dev.perfetto.sdk.PerfettoTrackEventExtra.Flow;
 import dev.perfetto.sdk.PerfettoTrackEventExtra.NamedTrack;
 import dev.perfetto.sdk.PerfettoTrackEventExtra.PerfettoPointer;
 import dev.perfetto.sdk.PerfettoTrackEventExtra.Proto;
-import java.util.ArrayList;
-import java.util.function.Supplier;
 
 /** Builder for Perfetto track event extras. */
 public final class PerfettoTrackEventBuilder {
-  private static final int DEFAULT_EXTRA_CACHE_SIZE = 5;
+  private static final int DEFAULT_EXTRA_CACHE_SIZE = 16;
   private static final int DEFAULT_PENDING_POINTERS_LIST_SIZE = 16;
 
   private PerfettoTrackEventExtra mExtra;
@@ -58,52 +55,43 @@ public final class PerfettoTrackEventBuilder {
       new AllocationStats();
 
   private static final class ObjectsPool {
-    public final Pool<FieldInt64> mFieldInt64Pool;
-    public final Pool<FieldDouble> mFieldDoublePool;
-    public final Pool<FieldString> mFieldStringPool;
+    public final Pool<Field> mFieldPool;
     public final Pool<FieldNested> mFieldNestedPool;
     public final Pool<Proto> mProtoPool;
+    public final Pool<Flow> mFlowPool;
+    public final Pool<Flow> mTerminatingFlowPool;
 
     public ObjectsPool(int capacity) {
-      mFieldInt64Pool = new Pool<>(capacity);
-      mFieldDoublePool = new Pool<>(capacity);
-      mFieldStringPool = new Pool<>(capacity);
+      mFieldPool = new Pool<>(capacity);
       mFieldNestedPool = new Pool<>(capacity);
       mProtoPool = new Pool<>(capacity);
+      mFlowPool = new Pool<>(capacity);
+      mTerminatingFlowPool = new Pool<>(capacity);
     }
 
     public void reset() {
-      mFieldInt64Pool.reset();
-      mFieldDoublePool.reset();
-      mFieldStringPool.reset();
+      mFieldPool.reset();
       mFieldNestedPool.reset();
       mProtoPool.reset();
+      mFlowPool.reset();
+      mTerminatingFlowPool.reset();
     }
   }
 
   private static final class ObjectsCache {
     public final RingBuffer<NamedTrack> mNamedTrackCache;
     public final RingBuffer<CounterTrack> mCounterTrackCache;
-    public final RingBuffer<ArgInt64> mArgInt64Cache;
-    public final RingBuffer<ArgBool> mArgBoolCache;
-    public final RingBuffer<ArgDouble> mArgDoubleCache;
-    public final RingBuffer<ArgString> mArgStringCache;
+    public final RingBuffer<Arg> mArgCache;
 
     public ObjectsCache(int capacity) {
       mNamedTrackCache = new RingBuffer<>(capacity);
       mCounterTrackCache = new RingBuffer<>(capacity);
-      mArgInt64Cache = new RingBuffer<>(capacity);
-      mArgBoolCache = new RingBuffer<>(capacity);
-      mArgDoubleCache = new RingBuffer<>(capacity);
-      mArgStringCache = new RingBuffer<>(capacity);
+      mArgCache = new RingBuffer<>(capacity);
     }
   }
 
   private static final class LazyInitObjects {
-    private CounterInt64 mCounterInt64 = null;
-    private CounterDouble mCounterDouble = null;
-    private Flow mFlow = null;
-    private Flow mTerminatingFlow = null;
+    private Counter mCounter = null;
 
     private final PerfettoNativeMemoryCleaner mNativeMemoryCleaner;
 
@@ -111,32 +99,11 @@ public final class PerfettoTrackEventBuilder {
       this.mNativeMemoryCleaner = memoryCleaner;
     }
 
-    public CounterInt64 getCounterInt64() {
-      if (mCounterInt64 == null) {
-        mCounterInt64 = new CounterInt64(mNativeMemoryCleaner);
+    public Counter getCounter() {
+      if (mCounter == null) {
+        mCounter = new Counter(mNativeMemoryCleaner);
       }
-      return mCounterInt64;
-    }
-
-    public CounterDouble getCounterDouble() {
-      if (mCounterDouble == null) {
-        mCounterDouble = new CounterDouble(mNativeMemoryCleaner);
-      }
-      return mCounterDouble;
-    }
-
-    public Flow getFlow() {
-      if (mFlow == null) {
-        mFlow = new Flow(mNativeMemoryCleaner);
-      }
-      return mFlow;
-    }
-
-    public Flow getTerminatingFlow() {
-      if (mTerminatingFlow == null) {
-        mTerminatingFlow = new Flow(mNativeMemoryCleaner);
-      }
-      return mTerminatingFlow;
+      return mCounter;
     }
   }
 
@@ -154,12 +121,8 @@ public final class PerfettoTrackEventBuilder {
   private final Supplier<FieldNested> fieldNestedSupplier =
       () -> new FieldNested(mNativeMemoryCleaner);
   private final Supplier<Proto> protoSupplier = () -> new Proto(mNativeMemoryCleaner);
-  private final Supplier<FieldInt64> fieldInt64Supplier =
-      () -> new FieldInt64(mNativeMemoryCleaner);
-  private final Supplier<FieldDouble> fieldDoubleSupplier =
-      () -> new FieldDouble(mNativeMemoryCleaner);
-  private final Supplier<FieldString> fieldStringSupplier =
-      () -> new FieldString(mNativeMemoryCleaner);
+  private final Supplier<Field> fieldSupplier = () -> new Field(mNativeMemoryCleaner);
+  private final Supplier<Flow> flowSupplier = () -> new Flow(mNativeMemoryCleaner);
 
   private static final PerfettoTrackEventBuilder NO_OP_BUILDER =
       new PerfettoTrackEventBuilder(/* isCategoryEnabled= */ false, /* parent= */ null);
@@ -293,12 +256,12 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-    ArgInt64 arg = mObjectsCache.mArgInt64Cache.get(name.hashCode());
+    Arg arg = mObjectsCache.mArgCache.get(name.hashCode());
     if (arg == null || !arg.getName().equals(name)) {
-      arg = new ArgInt64(name, mNativeMemoryCleaner);
-      mObjectsCache.mArgInt64Cache.put(name.hashCode(), arg);
+      arg = new Arg(name, mNativeMemoryCleaner);
+      mObjectsCache.mArgCache.put(name.hashCode(), arg);
     }
-    arg.setValue(val);
+    arg.setValueInt64(val);
     addPerfettoPointerToExtra(arg);
     return this;
   }
@@ -311,12 +274,12 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-    ArgBool arg = mObjectsCache.mArgBoolCache.get(name.hashCode());
+    Arg arg = mObjectsCache.mArgCache.get(name.hashCode());
     if (arg == null || !arg.getName().equals(name)) {
-      arg = new ArgBool(name, mNativeMemoryCleaner);
-      mObjectsCache.mArgBoolCache.put(name.hashCode(), arg);
+      arg = new Arg(name, mNativeMemoryCleaner);
+      mObjectsCache.mArgCache.put(name.hashCode(), arg);
     }
-    arg.setValue(val);
+    arg.setValueBool(val);
     addPerfettoPointerToExtra(arg);
     return this;
   }
@@ -329,12 +292,12 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-    ArgDouble arg = mObjectsCache.mArgDoubleCache.get(name.hashCode());
+    Arg arg = mObjectsCache.mArgCache.get(name.hashCode());
     if (arg == null || !arg.getName().equals(name)) {
-      arg = new ArgDouble(name, mNativeMemoryCleaner);
-      mObjectsCache.mArgDoubleCache.put(name.hashCode(), arg);
+      arg = new Arg(name, mNativeMemoryCleaner);
+      mObjectsCache.mArgCache.put(name.hashCode(), arg);
     }
-    arg.setValue(val);
+    arg.setValueDouble(val);
     addPerfettoPointerToExtra(arg);
     return this;
   }
@@ -347,46 +310,75 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-    ArgString arg = mObjectsCache.mArgStringCache.get(name.hashCode());
+    Arg arg = mObjectsCache.mArgCache.get(name.hashCode());
     if (arg == null || !arg.getName().equals(name)) {
-      arg = new ArgString(name, mNativeMemoryCleaner);
-      mObjectsCache.mArgStringCache.put(name.hashCode(), arg);
+      arg = new Arg(name, mNativeMemoryCleaner);
+      mObjectsCache.mArgCache.put(name.hashCode(), arg);
     }
-    arg.setValue(val);
+    arg.setValueString(val);
     addPerfettoPointerToExtra(arg);
     return this;
   }
 
-  /** Adds a flow with {@code id}. */
+  /** Deprecated: use {@link #addFlow} */
   public PerfettoTrackEventBuilder setFlow(long id) {
+    return addFlow(id);
+  }
+
+  /** Adds a flow with {@code id}. */
+  public PerfettoTrackEventBuilder addFlow(long id) {
     if (!mIsCategoryEnabled) {
       return this;
     }
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-    Flow flow = mLazyInitObjects.getFlow();
+    Flow flow = mObjectsPool.mFlowPool.get(flowSupplier);
     flow.setProcessFlow(id);
     addPerfettoPointerToExtra(flow);
     return this;
   }
 
-  /** Adds a terminating flow with {@code id}. */
+  /** Deprecated: use {@link #addTerminatingFlow} */
   public PerfettoTrackEventBuilder setTerminatingFlow(long id) {
+    return addTerminatingFlow(id);
+  }
+
+  /** Adds a terminating flow with {@code id}. */
+  public PerfettoTrackEventBuilder addTerminatingFlow(long id) {
     if (!mIsCategoryEnabled) {
       return this;
     }
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-    Flow terminatingFlow = mLazyInitObjects.getTerminatingFlow();
+    Flow terminatingFlow = mObjectsPool.mTerminatingFlowPool.get(flowSupplier);
     terminatingFlow.setProcessTerminatingFlow(id);
     addPerfettoPointerToExtra(terminatingFlow);
     return this;
   }
 
   /** Adds the events to a named track instead of the thread track where the event occurred. */
-  public PerfettoTrackEventBuilder usingNamedTrack(long id, String name, long parentUuid) {
+  public PerfettoTrackEventBuilder usingNamedTrack(
+          long id, @CompileTimeConstant String name, long parentUuid) {
+      return usingNamedTrack(id, name, parentUuid, /* isNameStatic = */ true);
+  }
+
+  /**
+   * Adds the events to a named track with a dynamic name (populated in field 10 of
+   * TrackDescriptor).
+   */
+  public PerfettoTrackEventBuilder usingNamedTrackWithDynamicName(
+      long id, String name, long parentUuid) {
+    return usingNamedTrack(id, name, parentUuid, /* isNameStatic = */ false);
+  }
+
+  /**
+   * Adds the events to a named track with a static name (populated in field 10 of
+   * TrackDescriptor).
+   */
+  private PerfettoTrackEventBuilder usingNamedTrack(
+          long id, String name, long parentUuid, boolean isNameStatic) {
     if (!mIsCategoryEnabled) {
       return this;
     }
@@ -395,8 +387,8 @@ public final class PerfettoTrackEventBuilder {
     }
 
     NamedTrack track = mObjectsCache.mNamedTrackCache.get(name.hashCode());
-    if (track == null || !track.getName().equals(name)) {
-      track = new NamedTrack(id, name, parentUuid, mNativeMemoryCleaner);
+    if (track == null || !track.getName().equals(name) || track.isNameStatic() != isNameStatic) {
+      track = new NamedTrack(id, name, parentUuid, isNameStatic, mNativeMemoryCleaner);
       mObjectsCache.mNamedTrackCache.put(name.hashCode(), track);
     }
     addPerfettoPointerToExtra(track);
@@ -407,26 +399,67 @@ public final class PerfettoTrackEventBuilder {
    * Adds the events to a process scoped named track instead of the thread track where the event
    * occurred.
    */
-  public PerfettoTrackEventBuilder usingProcessNamedTrack(long id, String name) {
+  public PerfettoTrackEventBuilder usingProcessNamedTrack(
+          long id, @CompileTimeConstant String name) {
+      if (!mIsCategoryEnabled) {
+          return this;
+      }
+      return usingNamedTrack(id, name, PerfettoTrace.getProcessTrackUuid());
+  }
+
+  /**
+   * Adds the events to a process scoped named track with a dynamic name instead of the thread track
+   * where the event occurred.
+   */
+  public PerfettoTrackEventBuilder usingProcessNamedTrackWithDynamicName(
+      long id,  String name) {
     if (!mIsCategoryEnabled) {
       return this;
     }
-    return usingNamedTrack(id, name, PerfettoTrace.getProcessTrackUuid());
+    return usingNamedTrackWithDynamicName(id, name, PerfettoTrace.getProcessTrackUuid());
   }
 
   /**
    * Adds the events to a thread scoped named track instead of the thread track where the event
    * occurred.
    */
-  public PerfettoTrackEventBuilder usingThreadNamedTrack(long id, String name, long tid) {
+  public PerfettoTrackEventBuilder usingThreadNamedTrack(
+          long id, @CompileTimeConstant String name, long tid) {
+      if (!mIsCategoryEnabled) {
+          return this;
+      }
+      return usingNamedTrack(id, name, PerfettoTrace.getThreadTrackUuid(tid));
+  }
+
+  /**
+   * Adds the events to a thread scoped named track with a dynamic name instead of the thread track
+   * where the event occurred.
+   */
+  public PerfettoTrackEventBuilder usingThreadNamedTrackWithDynamicName(
+      long id, String name, long tid) {
     if (!mIsCategoryEnabled) {
       return this;
     }
-    return usingNamedTrack(id, name, PerfettoTrace.getThreadTrackUuid(tid));
+    return usingNamedTrackWithDynamicName(id, name, PerfettoTrace.getThreadTrackUuid(tid));
   }
 
   /** Adds the events to a counter track instead. This is required for setting counter values. */
-  public PerfettoTrackEventBuilder usingCounterTrack(long parentUuid, String name) {
+  public PerfettoTrackEventBuilder usingCounterTrack(
+          long parentUuid, @CompileTimeConstant String name) {
+      return usingCounterTrack(parentUuid, name, /* isNameStatic = */ true);
+  }
+
+  /**
+   * Adds the events to a counter track with a static name instead. This is required for setting
+   * counter values.
+   */
+  public PerfettoTrackEventBuilder usingCounterTrackWithDynamicName(
+      long parentUuid,  String name) {
+    return usingCounterTrack(parentUuid, name, /* isNameStatic = */ false);
+  }
+
+  private PerfettoTrackEventBuilder usingCounterTrack(
+      long parentUuid, String name, boolean isNameStatic) {
     if (!mIsCategoryEnabled) {
       return this;
     }
@@ -435,8 +468,8 @@ public final class PerfettoTrackEventBuilder {
     }
 
     CounterTrack track = mObjectsCache.mCounterTrackCache.get(name.hashCode());
-    if (track == null || !track.getName().equals(name)) {
-      track = new CounterTrack(name, parentUuid, mNativeMemoryCleaner);
+    if (track == null || !track.getName().equals(name) || track.isNameStatic() != isNameStatic) {
+      track = new CounterTrack(name, parentUuid, isNameStatic, mNativeMemoryCleaner);
       mObjectsCache.mCounterTrackCache.put(name.hashCode(), track);
     }
     addPerfettoPointerToExtra(track);
@@ -447,22 +480,47 @@ public final class PerfettoTrackEventBuilder {
    * Adds the events to a process scoped counter track instead. This is required for setting counter
    * values.
    */
-  public PerfettoTrackEventBuilder usingProcessCounterTrack(String name) {
+  public PerfettoTrackEventBuilder usingProcessCounterTrack(@CompileTimeConstant String name) {
+      if (!mIsCategoryEnabled) {
+          return this;
+      }
+      return usingCounterTrack(PerfettoTrace.getProcessTrackUuid(), name);
+  }
+
+  /**
+   * Adds the events to a process scoped counter track with a static name instead. This is required
+   * for setting counter values.
+   */
+  public PerfettoTrackEventBuilder usingProcessCounterTrackWithDynamicName(
+       String name) {
     if (!mIsCategoryEnabled) {
       return this;
     }
-    return usingCounterTrack(PerfettoTrace.getProcessTrackUuid(), name);
+    return usingCounterTrackWithDynamicName(PerfettoTrace.getProcessTrackUuid(), name);
   }
 
   /**
    * Adds the events to a thread scoped counter track instead. This is required for setting counter
    * values.
    */
-  public PerfettoTrackEventBuilder usingThreadCounterTrack(long tid, String name) {
+  public PerfettoTrackEventBuilder usingThreadCounterTrack(
+          long tid, @CompileTimeConstant String name) {
+      if (!mIsCategoryEnabled) {
+          return this;
+      }
+      return usingCounterTrack(PerfettoTrace.getThreadTrackUuid(tid), name);
+  }
+
+  /**
+   * Adds the events to a thread scoped counter track with a static name instead. This is required for
+   * setting counter values.
+   */
+  public PerfettoTrackEventBuilder usingThreadCounterTrackWithDynamicName(
+      long tid,  String name) {
     if (!mIsCategoryEnabled) {
       return this;
     }
-    return usingCounterTrack(PerfettoTrace.getThreadTrackUuid(tid), name);
+    return usingCounterTrackWithDynamicName(PerfettoTrace.getThreadTrackUuid(tid), name);
   }
 
   /** Sets a long counter value on the event. */
@@ -473,9 +531,9 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-    CounterInt64 counterInt64 = mLazyInitObjects.getCounterInt64();
-    counterInt64.setValue(val);
-    addPerfettoPointerToExtra(counterInt64);
+    Counter counter = mLazyInitObjects.getCounter();
+    counter.setValueInt64(val);
+    addPerfettoPointerToExtra(counter);
     return this;
   }
 
@@ -487,10 +545,9 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkNotBuildingProto();
     }
-
-    CounterDouble counterDouble = mLazyInitObjects.getCounterDouble();
-    counterDouble.setValue(val);
-    addPerfettoPointerToExtra(counterDouble);
+    Counter counter = mLazyInitObjects.getCounter();
+    counter.setValueDouble(val);
+    addPerfettoPointerToExtra(counter);
     return this;
   }
 
@@ -502,8 +559,8 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkBuildingProto();
     }
-    FieldInt64 field = mObjectsPool.mFieldInt64Pool.get(fieldInt64Supplier);
-    field.setValue(id, val);
+    Field field = mObjectsPool.mFieldPool.get(fieldSupplier);
+    field.setValueInt64(id, val);
     addFieldToContainer(field);
     return this;
   }
@@ -516,8 +573,8 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkBuildingProto();
     }
-    FieldDouble field = mObjectsPool.mFieldDoublePool.get(fieldDoubleSupplier);
-    field.setValue(id, val);
+    Field field = mObjectsPool.mFieldPool.get(fieldSupplier);
+    field.setValueDouble(id, val);
     addFieldToContainer(field);
     return this;
   }
@@ -530,8 +587,26 @@ public final class PerfettoTrackEventBuilder {
     if (mIsDebug) {
       checkBuildingProto();
     }
-    FieldString field = mObjectsPool.mFieldStringPool.get(fieldStringSupplier);
-    field.setValue(id, val);
+    Field field = mObjectsPool.mFieldPool.get(fieldSupplier);
+    field.setValueString(id, val);
+    addFieldToContainer(field);
+    return this;
+  }
+
+  /**
+   * Adds a proto field with field id { @code id} and value { @code val}.
+   * { @code internedTypeId} must be non-zero, in which case the string { @code val} will be interned
+   * with the given type ID. If { @code internedTypeId} is zero, the string is dropped silently.
+   */
+  public PerfettoTrackEventBuilder addFieldWithInterning(long id, String val, long internedTypeId) {
+    if (!mIsCategoryEnabled) {
+      return this;
+    }
+    if (mIsDebug) {
+      checkBuildingProto();
+    }
+    Field field = mObjectsPool.mFieldPool.get(fieldSupplier);
+    field.setValueWithInterning(id, val, internedTypeId);
     addFieldToContainer(field);
     return this;
   }
@@ -679,10 +754,13 @@ public final class PerfettoTrackEventBuilder {
   }
 
   private void checkState() {
-    if (mIsBuilt) {
-      throw new IllegalStateException(
-          "This builder has already been used. Create a new builder for another event.");
-    }
+    if (mIsBuilt) throwStateError();
+  }
+
+  /** Outlined to keep the caller method small and more likely to be inlined. */
+  private static void throwStateError() {
+    throw new IllegalStateException(
+        "This builder has already been used. Create a new builder for another event.");
   }
 
   private boolean isBuildingTopLevelExtra() {
@@ -704,29 +782,41 @@ public final class PerfettoTrackEventBuilder {
 
   private void checkNotBuildingProto() {
     checkState();
-    if (isBuildingProtoOrNestedProto()) {
-      throw new IllegalStateException("Operation not supported for proto.");
-    }
+    if (isBuildingProtoOrNestedProto()) throwNotBuildingProtoError();
+  }
+
+  /** Outlined to keep the caller method small and more likely to be inlined. */
+  private static void throwNotBuildingProtoError() {
+    throw new IllegalStateException("Operation not supported for proto.");
   }
 
   private void checkBuildingProto() {
     checkState();
-    if (isBuildingTopLevelExtra()) {
-      throw new IllegalStateException("Field operations must be within beginProto/endProto block.");
-    }
+    if (isBuildingTopLevelExtra()) throwBuildingProtoError();
+  }
+
+  /** Outlined to keep the caller method small and more likely to be inlined. */
+  private static void throwBuildingProtoError() {
+    throw new IllegalStateException("Field operations must be within beginProto/endProto block.");
   }
 
   private void checkMatchingBeginNested() {
     checkState();
-    if (!isBuildingNestedProto()) {
-      throw new IllegalStateException("No matching beginNested call.");
-    }
+    if (!isBuildingNestedProto()) throwMatchingBeginNestedError();
+  }
+
+  /** Outlined to keep the caller method small and more likely to be inlined. */
+  private static void throwMatchingBeginNestedError() {
+    throw new IllegalStateException("No matching beginNested call.");
   }
 
   private void checkMatchingBeginProto() {
     checkState();
-    if (!isBuildingProto()) {
-      throw new IllegalStateException("No matching beginProto call.");
-    }
+    if (!isBuildingProto()) throwMatchingBeginProtoError();
+  }
+
+  /** Outlined to keep the caller method small and more likely to be inlined. */
+  private static void throwMatchingBeginProtoError() {
+    throw new IllegalStateException("No matching beginProto call.");
   }
 }

@@ -6,17 +6,17 @@
 
 #include "base/check_op.h"
 #include "base/containers/adapters.h"
-#include "base/containers/contains.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/default_clock.h"
 #include "base/time/default_tick_clock.h"
+#include "base/time/time.h"
 #include "base/values.h"
 #include "net/base/features.h"
 #include "net/base/network_anonymization_key.h"
@@ -541,11 +541,11 @@ void HttpServerProperties::OnDefaultNetworkChanged() {
 base::Value HttpServerProperties::GetAlternativeServiceInfoAsValue() const {
   const base::Time now = clock_->Now();
   const base::TimeTicks now_ticks = tick_clock_->NowTicks();
-  base::Value::List dict_list;
+  base::ListValue dict_list;
   for (const auto& server_info : server_info_map_) {
     if (!server_info.second.alternative_services.has_value())
       continue;
-    base::Value::List alternative_service_list;
+    base::ListValue alternative_service_list;
     const ServerInfoMapKey& key = server_info.first;
     for (const AlternativeServiceInfo& alternative_service_info :
          server_info.second.alternative_services.value()) {
@@ -572,19 +572,19 @@ base::Value HttpServerProperties::GetAlternativeServiceInfoAsValue() const {
         base::Time::Exploded exploded;
         brokenness_expiration.LocalExplode(&exploded);
         std::string broken_info_string =
-            " (broken until " +
-            base::StringPrintf("%04d-%02d-%02d %0d:%0d:%0d", exploded.year,
-                               exploded.month, exploded.day_of_month,
-                               exploded.hour, exploded.minute,
-                               exploded.second) +
-            ")";
+            base::StrCat({" (broken until ",
+                          base::StringPrintf(
+                              "%04d-%02d-%02d %0d:%0d:%0d", exploded.year,
+                              exploded.month, exploded.day_of_month,
+                              exploded.hour, exploded.minute, exploded.second),
+                          ")"});
         alternative_service_string.append(broken_info_string);
       }
       alternative_service_list.Append(std::move(alternative_service_string));
     }
     if (alternative_service_list.empty())
       continue;
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set("server", key.server.Serialize());
     dict.Set("network_anonymization_key",
              key.network_anonymization_key.ToDebugString());
@@ -1339,7 +1339,7 @@ void HttpServerProperties::OnServerInfoLoaded(
                             kCanonicalPort),
         it.first.network_anonymization_key);
     // If we already have a valid canonical server, we're done.
-    if (base::Contains(canonical_alt_svc_map_, key)) {
+    if (canonical_alt_svc_map_.contains(key)) {
       auto key_it = server_info_map_.Peek(key);
       if (key_it != server_info_map_.end() &&
           key_it->second.alternative_services.has_value()) {

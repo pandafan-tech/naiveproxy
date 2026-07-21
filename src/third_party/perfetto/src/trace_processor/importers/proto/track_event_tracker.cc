@@ -22,7 +22,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <optional>
 #include <unordered_set>
 #include <utility>
@@ -30,6 +29,7 @@
 
 #include "perfetto/base/logging.h"
 #include "src/trace_processor/importers/common/args_tracker.h"
+#include "src/trace_processor/importers/common/import_logs_tracker.h"
 #include "src/trace_processor/importers/common/process_track_translation_table.h"
 #include "src/trace_processor/importers/common/process_tracker.h"
 #include "src/trace_processor/importers/common/synthetic_tid.h"
@@ -38,6 +38,8 @@
 #include "src/trace_processor/importers/common/tracks.h"
 #include "src/trace_processor/importers/common/tracks_common.h"
 #include "src/trace_processor/importers/common/tracks_internal.h"
+#include "src/trace_processor/importers/proto/packet_sequence_state_generation.h"
+#include "src/trace_processor/importers/proto/track_event_sequence_state.h"
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/types/trace_processor_context.h"
@@ -150,16 +152,20 @@ TrackEventTracker::TrackEventTracker(TraceProcessorContext* context)
           context->storage->InternString("Default Track")),
       description_key_(context->storage->InternString("description")),
       y_axis_share_key_(context->storage->InternString("y_axis_share_key")),
+      track_uuid_key_id_(context->storage->InternString("track_uuid")),
+      parent_uuid_key_id_(context->storage->InternString("parent_uuid")),
       context_(context) {}
 
 void TrackEventTracker::ReserveDescriptorTrack(
     uint64_t uuid,
     const DescriptorTrackReservation& reservation) {
   if (uuid == kDefaultDescriptorTrackUuid && reservation.parent_uuid) {
-    PERFETTO_DLOG(
-        "Default track (uuid 0) cannot have a parent uui specified. Ignoring "
-        "the descriptor.");
-    context_->storage->IncrementStats(stats::track_event_tokenizer_errors);
+    context_->import_logs_tracker->RecordAnalysisError(
+        stats::track_descriptor_default_track_with_parent,
+        [&](ArgsTracker::BoundInserter& inserter) {
+          inserter.AddArg(parent_uuid_key_id_,
+                          Variadic::UnsignedInteger(reservation.parent_uuid));
+        });
     return;
   }
 
@@ -168,10 +174,7 @@ void TrackEventTracker::ReserveDescriptorTrack(
     return;
   }
   if (!it->reservation.IsForSameTrack(reservation)) {
-    PERFETTO_DLOG("New track reservation for track with uuid %" PRIu64
-                  " doesn't match earlier one",
-                  uuid);
-    context_->storage->IncrementStats(stats::track_event_tokenizer_errors);
+    RecordTrackError(stats::track_descriptor_conflicting_reservation, uuid);
     return;
   }
 
@@ -192,7 +195,7 @@ void TrackEventTracker::ReserveDescriptorTrack(
 
       // If the track was already resolved, update the name.
       auto* tracks = context_->storage->mutable_track_table();
-      auto rr = *tracks->FindById(*track_id);
+      auto rr = (*tracks)[*track_id];
       rr.set_name(reservation.name);
     }
   }
@@ -424,9 +427,8 @@ TrackEventTracker::InternDescriptorTrackImpl(
   // persisted in the case of merged tracks.
   auto set_parent_id = [this, parent_track_id](TrackId id) {
     if (parent_track_id) {
-      auto rr = context_->storage->mutable_track_table()->FindById(id);
-      PERFETTO_CHECK(rr);
-      rr->set_parent_id(parent_track_id);
+      auto rr = (*context_->storage->mutable_track_table())[id];
+      rr.set_parent_id(parent_track_id);
     }
   };
   using M = TrackEventTracker::DescriptorTrackReservation::SiblingMergeBehavior;
@@ -589,8 +591,8 @@ std::optional<double> TrackEventTracker::ConvertToAbsoluteCounterValue(
     value *= static_cast<double>(c_details.unit_multiplier);
   }
   if (c_details.is_incremental) {
-    value = packet_sequence_state->IncrementAndGetCounterValue(
-        counter_track_uuid, value);
+    value = packet_sequence_state->GetCustomState<TrackEventSequenceState>()
+                ->IncrementAndGetCounterValue(counter_track_uuid, value);
   }
   return value;
 }
@@ -666,20 +668,28 @@ bool TrackEventTracker::IsTrackHierarchyValid(uint64_t uuid) {
     }
     for (uint32_t j = 0; j < i; ++j) {
       if (current_uuid == seen[j]) {
-        PERFETTO_ELOG("Loop detected in hierarchy for track %" PRIu64, uuid);
+        RecordTrackError(stats::track_event_track_hierarchy_loop, uuid);
         return false;
       }
     }
     auto* state_ptr = descriptor_tracks_state_.Find(current_uuid);
     if (!state_ptr) {
-      context_->storage->IncrementStats(stats::track_hierarchy_missing_uuid);
+      RecordTrackError(stats::track_hierarchy_missing_uuid, uuid);
       return false;
     }
     seen[i] = current_uuid;
     current_uuid = state_ptr->reservation.parent_uuid;
   }
-  PERFETTO_ELOG("Too many ancestors in hierarchy for track %" PRIu64, uuid);
+  RecordTrackError(stats::track_event_track_hierarchy_too_deep, uuid);
   return false;
+}
+
+void TrackEventTracker::RecordTrackError(size_t stat_key, uint64_t track_uuid) {
+  context_->import_logs_tracker->RecordAnalysisError(
+      stat_key, [this, track_uuid](ArgsTracker::BoundInserter& inserter) {
+        inserter.AddArg(track_uuid_key_id_,
+                        Variadic::UnsignedInteger(track_uuid));
+      });
 }
 
 TrackEventTracker::ResolvedDescriptorTrack

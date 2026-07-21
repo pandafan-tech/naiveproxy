@@ -5,8 +5,14 @@
 #ifndef NET_DEVICE_BOUND_SESSIONS_SESSION_ERROR_H_
 #define NET_DEVICE_BOUND_SESSIONS_SESSION_ERROR_H_
 
+#include <optional>
+
+#include "base/types/expected.h"
 #include "net/base/schemeful_site.h"
 #include "net/device_bound_sessions/deletion_reason.h"
+#include "net/device_bound_sessions/failed_request.h"
+#include "net/device_bound_sessions/refresh_result.h"
+#include "url/gurl.h"
 
 namespace net::device_bound_sessions {
 
@@ -56,7 +62,7 @@ struct NET_EXPORT SessionError {
     kBoundCookieSetForbidden = 37,
     kNetError = 38,
     kProxyError = 39,
-    kInvalidConfigJson = 40,
+    // Deprecated: kInvalidConfigJson = 40,
     kEmptySessionConfig = 41,
     kInvalidCredentialsConfig = 42,
     kInvalidCredentialsType = 43,
@@ -94,9 +100,15 @@ struct NET_EXPORT SessionError {
     kScopeRuleOriginScopedHostPatternMismatch = 75,
     kScopeRuleSiteScopedHostPatternMismatch = 76,
     kSigningQuotaExceeded = 77,
-    kMaxValue = kSigningQuotaExceeded,
+    kInvalidConfigJson = 78,
+    kInvalidFederatedSessionProviderFailedToRestoreKey = 79,
+    kFailedToUnwrapKey = 80,
+    kSessionDeletedDuringRefresh = 81,
+    kTransientSigningError = 82,
+    kCrossOriginRegistrationSiteNotIncluded = 83,
+    kMaxValue = kCrossOriginRegistrationSiteNotIncluded,
   };
-  // LINT.ThenChange(//tools/metrics/histograms/metadata/net/enums.xml:DeviceBoundSessionError)
+  // LINT.ThenChange(//tools/metrics/histograms/enums.xml:DeviceBoundSessionError,//services/network/public/mojom/device_bound_sessions.mojom:DeviceBoundSessionError)
 
   using enum ErrorType;
 
@@ -116,8 +128,17 @@ struct NET_EXPORT SessionError {
   // Whether the error is due to server-side behavior.
   bool IsServerError() const;
 
+  // Returns the mapped `RefreshResult` for this error, if applicable.
+  std::optional<RefreshResult> GetRefreshResult() const;
+
   ErrorType type;
+  // If a network request failed during registration/refresh, details
+  // about that request.
+  std::optional<FailedRequest> failed_request;
 };
+
+template <typename T>
+using SessionErrorOr = base::expected<T, SessionError::ErrorType>;
 
 }  // namespace net::device_bound_sessions
 

@@ -7,9 +7,11 @@
 #include <stddef.h>
 
 #include <memory>
+#include <string_view>
 
 #include "base/files/file_path.h"
 #include "base/json/json_file_value_serializer.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/test/values_test_util.h"
 #include "base/values.h"
@@ -24,9 +26,9 @@ TestIdentifier::TestIdentifier(const TestIdentifier& other) = default;
 TestIdentifier& TestIdentifier::operator=(const TestIdentifier& other) =
     default;
 
-std::string FormatFullTestName(const std::string& test_case_name,
-                               const std::string& test_name) {
-  return test_case_name + "." + test_name;
+std::string FormatFullTestName(std::string_view test_case_name,
+                               std::string_view test_name) {
+  return base::StrCat({test_case_name, ".", test_name});
 }
 
 std::string TestNameWithoutDisabledPrefix(const std::string& full_test_name) {
@@ -57,9 +59,9 @@ std::vector<TestIdentifier> GetCompiledInTests() {
 bool WriteCompiledInTestsToFile(const FilePath& path) {
   std::vector<TestIdentifier> tests(GetCompiledInTests());
 
-  Value::List storage;
+  ListValue storage;
   for (const TestIdentifier& i : tests) {
-    Value::Dict test_info;
+    DictValue test_info;
     test_info.Set("test_case_name", i.test_case_name);
     test_info.Set("test_name", i.test_name);
     test_info.Set("file", i.file);
@@ -91,7 +93,7 @@ bool ReadTestNamesFromFile(const FilePath& path,
       return false;
     }
 
-    const Value::Dict& dict = item.GetDict();
+    const DictValue& dict = item.GetDict();
     const std::string* test_case_name = dict.FindString("test_case_name");
     if (!test_case_name || !IsStringASCII(*test_case_name)) {
       return false;

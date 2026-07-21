@@ -36,17 +36,16 @@ class NaiveConnection {
  public:
   using TimeFunc = base::TimeTicks (*)();
 
-  NaiveConnection(
-      unsigned int id,
-      ClientProtocol protocol,
-      std::unique_ptr<PaddingDetectorDelegate> padding_detector_delegate,
-      const ProxyInfo& proxy_info,
-      RedirectResolver* resolver,
-      HttpNetworkSession* session,
-      const NetworkAnonymizationKey& network_anonymization_key,
-      const NetLogWithSource& net_log,
-      std::unique_ptr<StreamSocket> accepted_socket,
-      const NetworkTrafficAnnotationTag& traffic_annotation);
+  NaiveConnection(unsigned int id,
+                  ClientProtocol protocol,
+                  std::unique_ptr<PaddingType> negotiated_client_padding,
+                  const ProxyInfo& proxy_info,
+                  RedirectResolver* resolver,
+                  HttpNetworkSession* session,
+                  const NetworkAnonymizationKey& network_anonymization_key,
+                  const NetLogWithSource& net_log,
+                  std::unique_ptr<StreamSocket> accepted_socket,
+                  const NetworkTrafficAnnotationTag& traffic_annotation);
   ~NaiveConnection();
   NaiveConnection(const NaiveConnection&) = delete;
   NaiveConnection& operator=(const NaiveConnection&) = delete;
@@ -55,6 +54,8 @@ class NaiveConnection {
   int Connect(CompletionOnceCallback callback);
   void Disconnect();
   int Run(CompletionOnceCallback callback);
+  base::TimeTicks GetLastWriteTime() const;
+  base::TimeTicks GetCreationTime() const;
 
  private:
   enum State {
@@ -90,13 +91,15 @@ class NaiveConnection {
   void OnPullComplete(Direction from, Direction to, int result);
   void OnPushComplete(Direction from, Direction to, int result);
 
+  std::optional<PaddingType> GetServerPaddingType() const;
+
   unsigned int id_;
   ClientProtocol protocol_;
-  std::unique_ptr<PaddingDetectorDelegate> padding_detector_delegate_;
+  std::unique_ptr<PaddingType> negotiated_client_padding_;
   const ProxyInfo& proxy_info_;
   RedirectResolver* resolver_;
   HttpNetworkSession* session_;
-  const NetworkAnonymizationKey& network_anonymization_key_;
+  NetworkAnonymizationKey network_anonymization_key_;
   const NetLogWithSource& net_log_;
 
   CompletionRepeatingCallback io_callback_;
@@ -123,6 +126,9 @@ class NaiveConnection {
   bool full_duplex_;
 
   TimeFunc time_func_;
+
+  base::TimeTicks last_write_time_[kNumDirections];
+  base::TimeTicks created_at_;
 
   // Traffic annotation for socket control.
   const NetworkTrafficAnnotationTag& traffic_annotation_;

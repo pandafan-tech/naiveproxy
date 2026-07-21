@@ -48,6 +48,7 @@
 //  Processor features:
 //    ARCH_CPU_31_BITS / ARCH_CPU_32_BITS / ARCH_CPU_64_BITS
 //    ARCH_CPU_BIG_ENDIAN / ARCH_CPU_LITTLE_ENDIAN
+//    ARCH_CPU_PTRAUTH
 
 // Mapping to some Rust conditionals:
 //
@@ -93,8 +94,8 @@
 // The OS_CHROMEOS macro is defined in GN.
 #define OS_LINUX 1
 #endif  // !defined(OS_CHROMEOS)
-// Include a system header to pull in features.h for glibc/uclibc macros.
-#include <assert.h>
+// Include features.h for glibc/uclibc macros.
+#include <features.h>
 #if defined(__GLIBC__) && !defined(__UCLIBC__)
 // We really are using glibc, not uClibc pretending to be glibc.
 #define LIBC_GLIBC 1
@@ -270,6 +271,12 @@
 #define BUILDFLAG_INTERNAL_IS_OZONE() (1)
 #else
 #define BUILDFLAG_INTERNAL_IS_OZONE() (0)
+#endif
+
+#if __PTRAUTH__
+#define BUILDFLAG_INTERNAL_ARCH_CPU_PTRAUTH() (1)
+#else
+#define BUILDFLAG_INTERNAL_ARCH_CPU_PTRAUTH() (0)
 #endif
 
 // Compiler detection. Note: clang masquerades as GCC on POSIX and as MSVC on

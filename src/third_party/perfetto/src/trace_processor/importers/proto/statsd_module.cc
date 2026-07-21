@@ -30,18 +30,18 @@
 #include "perfetto/protozero/field.h"
 #include "perfetto/protozero/proto_decoder.h"
 #include "perfetto/protozero/proto_utils.h"
-#include "perfetto/protozero/scattered_heap_buffer.h"
 #include "perfetto/trace_processor/ref_counted.h"
-#include "perfetto/trace_processor/trace_blob.h"
 #include "protos/perfetto/trace/statsd/statsd_atom.pbzero.h"
 #include "protos/perfetto/trace/trace_packet.pbzero.h"
 #include "src/trace_processor/importers/common/args_tracker.h"
 #include "src/trace_processor/importers/common/parser_types.h"
 #include "src/trace_processor/importers/common/slice_tracker.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/importers/common/track_tracker.h"
 #include "src/trace_processor/importers/common/tracks.h"
 #include "src/trace_processor/importers/proto/args_parser.h"
 #include "src/trace_processor/importers/proto/atoms.descriptor.h"
+#include "src/trace_processor/importers/proto/blob_packet_writer.h"
 #include "src/trace_processor/importers/proto/packet_sequence_state_generation.h"
 #include "src/trace_processor/importers/proto/proto_importer_module.h"
 #include "src/trace_processor/sorter/trace_sorter.h"
@@ -143,18 +143,18 @@ ModuleResult StatsdModule::TokenizePacket(
     if (it_timestamps) {
       atom_timestamp = *it_timestamps++;
     } else {
-      context_->storage->IncrementStats(stats::atom_timestamp_missing);
+      context_->stats_tracker->IncrementStats(stats::atom_timestamp_missing);
       atom_timestamp = packet_timestamp;
     }
 
-    protozero::HeapBuffered<TracePacket> forged;
-    forged->set_timestamp(static_cast<uint64_t>(atom_timestamp));
+    TraceBlobView tbv =
+        context_->blob_packet_writer->WritePacket([&](auto* forged) {
+          forged->set_timestamp(static_cast<uint64_t>(atom_timestamp));
 
-    auto* statsd = forged->set_statsd_atom();
-    statsd->AppendBytes(StatsdAtom::kAtomFieldNumber, (*it).data, (*it).size);
-
-    auto [vec, size] = forged.SerializeAsUniquePtr();
-    TraceBlobView tbv(TraceBlob::TakeOwnership(std::move(vec), size));
+          auto* statsd = forged->set_statsd_atom();
+          statsd->AppendBytes(StatsdAtom::kAtomFieldNumber, (*it).data,
+                              (*it).size);
+        });
     module_context_->trace_packet_stream->Push(
         atom_timestamp, TracePacketData{std::move(tbv), state});
   }
@@ -208,7 +208,7 @@ void StatsdModule::ParseAtom(int64_t ts, protozero::ConstBytes nested_bytes) {
           // descriptor for them so don't report errors. See:
           // https://cs.android.com/android/platform/superproject/main/+/main:frameworks/proto_logging/stats/atoms.proto;l=1290;drc=a34b11bfebe897259a0340a59f1793ae2dffd762
           if (nested_field_id < 100000) {
-            context_->storage->IncrementStats(stats::atom_unknown);
+            context_->stats_tracker->IncrementStats(stats::atom_unknown);
           }
 
           status = ParseGenericEvent(field.as_bytes(), delegate);
@@ -219,7 +219,7 @@ void StatsdModule::ParseAtom(int64_t ts, protozero::ConstBytes nested_bytes) {
         }
 
         if (!status.ok()) {
-          context_->storage->IncrementStats(stats::atom_unknown);
+          context_->stats_tracker->IncrementStats(stats::atom_unknown);
         }
       });
 }
@@ -228,7 +228,7 @@ StringId StatsdModule::GetAtomName(uint32_t atom_field_id) {
   StringId* cached_name = atom_names_.Find(atom_field_id);
   if (cached_name == nullptr) {
     if (!descriptor_idx_) {
-      context_->storage->IncrementStats(stats::atom_unknown);
+      context_->stats_tracker->IncrementStats(stats::atom_unknown);
       return context_->storage->InternString("Could not load atom descriptor");
     }
 

@@ -31,16 +31,19 @@ declare_args() {
   # These apply to both target and host toolchains.
   extra_cflags = ""
   extra_cxxflags = ""
+  extra_asmflags = ""
   extra_ldflags = ""
 
   # These apply only to the target toolchain.
   extra_target_cflags = ""
   extra_target_cxxflags = ""
+  extra_target_asmflags = ""
   extra_target_ldflags = ""
 
   # These apply only to the host toolchain.
   extra_host_cflags = ""
   extra_host_cxxflags = ""
+  extra_host_asmflags = ""
   extra_host_ldflags = ""
 }
 
@@ -70,6 +73,8 @@ declare_args() {
     }
   } else if (is_mac_host) {
     strip = "strip -x"
+  } else if (is_freebsd_host) {
+    ar = "llvm-ar"
   }
 
   if (is_clang) {
@@ -150,6 +155,8 @@ declare_args() {
     _target_triplet = "x86_64-linux-android"
   } else if (target_os == "qnx" && target_cpu == "arm64") {
     _target_triplet = "ntoaarch64"
+  } else if (target_os == "qnx" && target_cpu == "x64") {
+    _target_triplet = "ntox86_64"
   } else {
     assert(
         false,
@@ -192,10 +199,15 @@ declare_args() {
       target_strip = "$android_llvm_dir/bin/llvm-strip"
     } else if (is_qnx) {
       target_ar = "${_target_triplet}-ar"
-      target_cc = "qcc -V8.3.0,gcc_${_target_triplet}le"
-      target_cxx = "q++ -V8.3.0,gcc_${_target_triplet}le_cxx"
       target_linker = "${_target_triplet}-ld"
       target_strip = "${_target_triplet}-strip"
+      if (target_cpu == "arm64") {
+        target_cc = "qcc -Vgcc_${_target_triplet}le"
+        target_cxx = "q++ -Vgcc_${_target_triplet}le_cxx"
+      } else {
+        target_cc = "qcc -Vgcc_${_target_triplet}"
+        target_cxx = "q++ -Vgcc_${_target_triplet}_cxx"
+      }
     } else {
       assert(_target_triplet != "",
              "target_triplet must be non-empty when cross-compiling")
@@ -229,6 +241,7 @@ template("gcc_like_toolchain") {
     ld_arg = ""
     external_cflags = ""
     external_cxxflags = ""
+    external_asmflags = ""
     external_ldflags = ""
     strip = ""
     if (defined(invoker.linker) && invoker.linker != "") {
@@ -250,6 +263,9 @@ template("gcc_like_toolchain") {
     }
     if (defined(invoker.external_cxxflags)) {
       external_cxxflags = invoker.external_cxxflags
+    }
+    if (defined(invoker.external_asmflags)) {
+      external_asmflags = invoker.external_asmflags
     }
     if (defined(invoker.external_ldflags)) {
       external_ldflags = invoker.external_ldflags
@@ -293,7 +309,7 @@ template("gcc_like_toolchain") {
       } else {
         depfile_args = "-MMD -MF $depfile"
       }
-      command = "$cc_wrapper $cc $depfile_args {{defines}} {{include_dirs}} {{asmflags}} -c {{source}} -o {{output}}"
+      command = "$cc_wrapper $cc $depfile_args {{defines}} {{include_dirs}} {{asmflags}} ${external_asmflags} -c {{source}} -o {{output}}"
       depsformat = "gcc"
       outputs =
           [ "{{source_out_dir}}/{{target_output_name}}.{{source_name_part}}.o" ]
@@ -389,6 +405,11 @@ gcc_like_toolchain("gcc_like") {
                                     extra_cxxflags,
                                     extra_target_cxxflags,
                                   ])
+  external_asmflags = string_join(" ",
+                                  [
+                                    extra_asmflags,
+                                    extra_target_asmflags,
+                                  ])
   external_ldflags = string_join(" ",
                                  [
                                    extra_ldflags,
@@ -415,6 +436,11 @@ gcc_like_toolchain("gcc_like_host") {
                                   [
                                     extra_cxxflags,
                                     extra_host_cxxflags,
+                                  ])
+  external_asmflags = string_join(" ",
+                                  [
+                                    extra_asmflags,
+                                    extra_host_asmflags,
                                   ])
   external_ldflags = string_join(" ",
                                  [

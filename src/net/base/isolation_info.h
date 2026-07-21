@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 
+#include "base/memory/ref_counted.h"
 #include "base/unguessable_token.h"
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
@@ -67,14 +68,19 @@ namespace net {
 // cookie partition keyed using that nonce. Keep this in mind when using a
 // nonced IsolationInfo for credentialed requests.
 //
-// In addition to the sharding described above, `IsolationInfo::nonce()` is also
-// used to check if a given network request should be disallowed because the
-// initiating fenced frame has revoked network access. More context on
-// network revocation is in network_context.mojom in the comment for
-// `NetworkContext::RevokeNetworkForNonces()`. Not providing the correct
-// `nonce` will therefore lead to sending network requests that should
-// have been blocked. See `RenderFrameHostImpl::ComputeNonce()` which
-// computes the correct nonce for a given frame.
+// There are also several special cases of IsolationInfos. Specifically:
+//  - Transient: Created by `IsolationInfo::CreateTransient()`, used for
+//    requests that should not be persisted to disk or send cookies, and that
+//    should have corresponding network state in it's own partition (not shared
+//    with state from other contexts).
+//  - Empty: Created by the default constructor, can be used by requests for
+//    which cookies should not be sent, corresponding responses should not be
+//    persisted to disk, and for which corresponding network state should can be
+//    shared with that of other requests using an empty IsolationInfo (i.e. no
+//    partitioning between these requests is required). Note that although
+//    responses for requests using an empty IsolationInfo are not persisted to
+//    disk, other metadata that is keyed off of the NetworkAnonymizationKey
+//    (such as HttpServerProperties) might be.
 class NET_EXPORT IsolationInfo {
  public:
   // The update-on-redirect patterns.
@@ -175,6 +181,10 @@ class NET_EXPORT IsolationInfo {
   static IsolationInfo CreateTransient(
       std::optional<base::UnguessableToken> nonce);
 
+  // Creates an empty IsolationInfo with the provided NetworkIsolationPartition.
+  static IsolationInfo CreateEmptyWithPartition(
+      NetworkIsolationPartition network_isolation_partition);
+
   // Creates an IsolationInfo from the serialized contents. Returns a nullopt
   // if deserialization fails or if data is inconsistent.
   static std::optional<IsolationInfo> Deserialize(
@@ -235,14 +245,14 @@ class NET_EXPORT IsolationInfo {
   // unmodified.
   IsolationInfo CreateForRedirect(const url::Origin& new_origin) const;
 
-  RequestType request_type() const { return request_type_; }
+  RequestType request_type() const { return data_->request_type(); }
 
   std::optional<FrameAncestorRelation> frame_ancestor_relation() const {
-    return frame_ancestor_relation_;
+    return data_->frame_ancestor_relation();
   }
 
   bool IsMainFrameRequest() const {
-    return RequestType::kMainFrame == request_type_;
+    return RequestType::kMainFrame == request_type();
   }
 
   // If this request is associated with a outer most main frame. See
@@ -251,7 +261,7 @@ class NET_EXPORT IsolationInfo {
     return IsMainFrameRequest() && !nonce();
   }
 
-  bool IsEmpty() const { return !top_frame_origin_; }
+  bool IsEmpty() const { return !top_frame_origin(); }
 
   // These may only be nullopt if created by the empty constructor. If one is
   // nullopt, both are, and SiteForCookies is null.
@@ -260,23 +270,25 @@ class NET_EXPORT IsolationInfo {
   // case an IsolationInfo was created from a NetworkIsolationKey, they may be
   // scheme + eTLD+1 instead of actual origins.
   const std::optional<url::Origin>& top_frame_origin() const {
-    return top_frame_origin_;
+    return data_->top_frame_origin();
   }
-  const std::optional<url::Origin>& frame_origin() const;
+  const std::optional<url::Origin>& frame_origin() const {
+    return data_->frame_origin();
+  }
 
   const NetworkIsolationKey& network_isolation_key() const {
-    return network_isolation_key_;
+    return data_->network_isolation_key();
   }
 
   const NetworkAnonymizationKey& network_anonymization_key() const {
-    return network_anonymization_key_;
+    return data_->network_anonymization_key();
   }
 
-  const std::optional<base::UnguessableToken>& nonce() const { return nonce_; }
-
-  NetworkIsolationPartition GetNetworkIsolationPartition() const {
-    return network_isolation_key_.GetNetworkIsolationPartition();
+  const std::optional<base::UnguessableToken>& nonce() const {
+    return data_->network_isolation_key().GetNonce();
   }
+
+  NetworkIsolationPartition GetNetworkIsolationPartition() const;
 
   // The value that should be consulted for the third-party cookie blocking
   // policy, as defined in Section 2.1.1 and 2.1.2 of
@@ -284,7 +296,9 @@ class NET_EXPORT IsolationInfo {
   //
   // WARNING: This value must only be used for the third-party cookie blocking
   //          policy. It MUST NEVER be used for any kind of SECURITY check.
-  const SiteForCookies& site_for_cookies() const { return site_for_cookies_; }
+  const SiteForCookies& site_for_cookies() const {
+    return data_->site_for_cookies();
+  }
 
   bool IsEqualForTesting(const IsolationInfo& other) const;
 
@@ -295,6 +309,52 @@ class NET_EXPORT IsolationInfo {
   std::string DebugString() const;
 
  private:
+  // Holds all the data of an IsolationInfo. This is ref-counted to make copying
+  // IsolationInfo objects cheaper.
+  class Data : public base::RefCountedThreadSafe<Data> {
+   public:
+    Data(RequestType request_type,
+         std::optional<url::Origin> top_frame_origin,
+         std::optional<url::Origin> frame_origin,
+         std::optional<FrameAncestorRelation> frame_ancestor_relation,
+         SiteForCookies site_for_cookies,
+         std::optional<base::UnguessableToken> nonce,
+         NetworkIsolationPartition network_isolation_partition);
+
+    RequestType request_type() const { return request_type_; }
+    const std::optional<url::Origin>& top_frame_origin() const {
+      return top_frame_origin_;
+    }
+    const std::optional<url::Origin>& frame_origin() const {
+      return frame_origin_;
+    }
+    const std::optional<FrameAncestorRelation>& frame_ancestor_relation()
+        const {
+      return frame_ancestor_relation_;
+    }
+    const SiteForCookies& site_for_cookies() const { return site_for_cookies_; }
+
+    const NetworkIsolationKey& network_isolation_key() const {
+      return network_isolation_key_;
+    }
+
+    const NetworkAnonymizationKey& network_anonymization_key() const {
+      return network_anonymization_key_;
+    }
+
+   private:
+    friend class base::RefCountedThreadSafe<Data>;
+    ~Data();
+
+    const RequestType request_type_;
+    const std::optional<url::Origin> top_frame_origin_;
+    const std::optional<url::Origin> frame_origin_;
+    const std::optional<FrameAncestorRelation> frame_ancestor_relation_;
+    const SiteForCookies site_for_cookies_;
+    const NetworkIsolationKey network_isolation_key_;
+    const NetworkAnonymizationKey network_anonymization_key_;
+  };
+
   IsolationInfo(RequestType request_type,
                 std::optional<url::Origin> top_frame_origin,
                 std::optional<url::Origin> frame_origin,
@@ -303,23 +363,8 @@ class NET_EXPORT IsolationInfo {
                 NetworkIsolationPartition network_isolation_partition,
                 std::optional<FrameAncestorRelation> frame_ancestor_relation);
 
-  RequestType request_type_;
-
-  std::optional<url::Origin> top_frame_origin_;
-  std::optional<url::Origin> frame_origin_;
-  std::optional<FrameAncestorRelation> frame_ancestor_relation_;
-
-  // This can be deduced from the two origins above, but keep a cached version
-  // to avoid repeated eTLD+1 calculations, when this is using eTLD+1.
-  NetworkIsolationKey network_isolation_key_;
-
-  NetworkAnonymizationKey network_anonymization_key_;
-
-  SiteForCookies site_for_cookies_;
-
-  // Having a nonce is a way to force a transient opaque `IsolationInfo`
-  // for non-opaque origins.
-  std::optional<base::UnguessableToken> nonce_;
+  // This is never null.
+  scoped_refptr<const Data> data_;
 
   // Mojo serialization code needs to access internal fields.
   friend struct mojo::StructTraits<network::mojom::IsolationInfoDataView,

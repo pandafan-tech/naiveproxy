@@ -26,6 +26,7 @@
 #include "src/trace_processor/importers/common/import_logs_tracker.h"
 #include "src/trace_processor/importers/common/slice_tracker.h"
 #include "src/trace_processor/importers/common/slice_translation_table.h"
+#include "src/trace_processor/importers/common/stats_tracker.h"
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/tables/slice_tables_py.h"
@@ -183,12 +184,11 @@ std::optional<SliceId> SliceTracker::StartSlice(
   std::optional<tables::SliceTable::RowReference> parent_ref =
       depth == 0 ? std::nullopt
                  : std::make_optional(stack.back().row.ToRowReference(slices));
-  int64_t parent_stack_id = parent_ref ? parent_ref->stack_id() : 0;
   std::optional<tables::SliceTable::Id> parent_id =
       parent_ref ? std::make_optional(parent_ref->id()) : std::nullopt;
 
   SliceId id = inserter();
-  tables::SliceTable::RowReference ref = *slices->FindById(id);
+  tables::SliceTable::RowReference ref = (*slices)[id];
   if (depth >= kMaxDepth) {
     auto parent_name = context_->storage->GetString(
         parent_ref->name().value_or(kNullStringId));
@@ -204,8 +204,6 @@ std::optional<SliceId> SliceTracker::StartSlice(
   // Post fill all the relevant columns. All the other columns should have
   // been filled by the inserter.
   ref.set_depth(static_cast<uint32_t>(depth));
-  ref.set_parent_stack_id(parent_stack_id);
-  ref.set_stack_id(GetStackHash(stack));
   if (parent_id)
     ref.set_parent_id(*parent_id);
 
@@ -401,7 +399,7 @@ bool SliceTracker::MaybeCloseStack(int64_t new_ts,
           context_->storage->GetString(ref.name().value_or(kNullStringId))
               .c_str(),
           start_ts, end_ts, new_ts);
-      context_->storage->IncrementStats(stats::misplaced_end_event);
+      context_->stats_tracker->IncrementStats(stats::misplaced_end_event);
 
       // Every slice below this one should have a pending duration. Update
       // of them to have the end ts of the current slice and pop them
@@ -460,33 +458,12 @@ bool SliceTracker::MaybeCloseStack(int64_t new_ts,
     // This is invalid stacking by the producer and should be fixed. Duration
     // events should either be nested or disjoint, never partially intersecting.
     if (new_ts < end_ts && new_ts + new_dur > end_ts) {
-      context_->storage->IncrementStats(
+      context_->stats_tracker->IncrementStats(
           stats::slice_drop_overlapping_complete_event);
       return false;
     }
   }
   return true;
-}
-
-int64_t SliceTracker::GetStackHash(const SlicesStack& stack) {
-  PERFETTO_DCHECK(!stack.empty());
-
-  const auto& slices = context_->storage->slice_table();
-
-  base::FnvHasher hash;
-  for (const auto& i : stack) {
-    auto ref = i.row.ToRowReference(slices);
-    hash.Update(ref.category().value_or(kNullStringId).raw_id());
-    hash.Update(ref.name().value_or(kNullStringId).raw_id());
-  }
-
-  // For clients which don't have an integer type (i.e. Javascript), returning
-  // hashes which have the top 11 bits set leads to numbers which are
-  // unrepresenatble. This means that clients cannot filter using this number as
-  // it will be meaningless when passed back to us. For this reason, make sure
-  // that the hash is always less than 2^53 - 1.
-  constexpr uint64_t kSafeBitmask = (1ull << 53) - 1;
-  return static_cast<int64_t>(hash.digest() & kSafeBitmask);
 }
 
 void SliceTracker::StackPop(TrackId track_id) {

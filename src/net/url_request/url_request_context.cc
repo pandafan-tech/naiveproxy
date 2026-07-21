@@ -11,17 +11,18 @@
 #include "base/debug/alias.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/notreached.h"
 #include "base/strings/string_util.h"
 #include "base/types/pass_key.h"
 #include "build/build_config.h"
+#include "components/unexportable_keys/unexportable_key_service.h"
 #include "net/base/http_user_agent_settings.h"
 #include "net/base/network_delegate.h"
 #include "net/base/proxy_delegate.h"
 #include "net/cert/cert_verifier.h"
 #include "net/cert/sct_auditing_delegate.h"
 #include "net/cookies/cookie_store.h"
+#include "net/dns/dns_platform_attempt_factory.h"
 #include "net/dns/host_resolver.h"
 #include "net/http/http_auth_handler_factory.h"
 #include "net/http/http_cache.h"
@@ -145,9 +146,12 @@ std::unique_ptr<URLRequest> URLRequestContext::CreateRequest(
     NetworkTrafficAnnotationTag traffic_annotation,
     bool is_for_websockets,
     const std::optional<net::NetLogSource> net_log_source) const {
+  // TODO(crbug.com/495684670): Expose target_network once URLRequest fully
+  // supports network binding.
   return std::make_unique<URLRequest>(
       base::PassKey<URLRequestContext>(), url, priority, delegate, this,
-      traffic_annotation, is_for_websockets, net_log_source);
+      traffic_annotation, is_for_websockets, handles::kInvalidNetworkHandle,
+      net_log_source);
 }
 
 void URLRequestContext::AssertNoURLRequests() const {
@@ -242,6 +246,14 @@ void URLRequestContext::set_client_socket_factory(
     std::unique_ptr<ClientSocketFactory> client_socket_factory) {
   client_socket_factory_ = std::move(client_socket_factory);
 }
+void URLRequestContext::set_cache_encryption_delegate(
+    std::unique_ptr<CacheEncryptionDelegate> cache_encryption_delegate) {
+  cache_encryption_delegate_ = std::move(cache_encryption_delegate);
+}
+void URLRequestContext::set_dns_platform_attempt_factory(
+    std::unique_ptr<DnsPlatformAttemptFactory> dns_platform_attempt_factory) {
+  dns_platform_attempt_factory_ = std::move(dns_platform_attempt_factory);
+}
 #if BUILDFLAG(ENABLE_REPORTING)
 void URLRequestContext::set_persistent_reporting_and_nel_store(
     std::unique_ptr<PersistentReportingAndNelStore>
@@ -274,6 +286,11 @@ void URLRequestContext::set_device_bound_session_store(
     std::unique_ptr<device_bound_sessions::SessionStore>
         device_bound_session_store) {
   device_bound_session_store_ = std::move(device_bound_session_store);
+}
+void URLRequestContext::set_unexportable_key_service(
+    std::unique_ptr<unexportable_keys::UnexportableKeyService>
+        unexportable_key_service) {
+  unexportable_key_service_ = std::move(unexportable_key_service);
 }
 #endif  // BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
 

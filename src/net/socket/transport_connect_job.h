@@ -21,8 +21,10 @@
 #include "net/base/host_port_pair.h"
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/dns/host_resolver.h"
 #include "net/dns/public/host_resolver_results.h"
+#include "net/dns/public/resolution_details.h"
 #include "net/dns/public/resolve_error_info.h"
 #include "net/dns/public/secure_dns_policy.h"
 #include "net/socket/connect_job.h"
@@ -54,6 +56,7 @@ class NET_EXPORT_PRIVATE TransportSocketParams
   TransportSocketParams(Endpoint destination,
                         NetworkAnonymizationKey network_anonymization_key,
                         SecureDnsPolicy secure_dns_policy,
+                        handles::NetworkHandle target_network,
                         OnHostResolutionCallback host_resolution_callback,
                         base::flat_set<std::string> supported_alpns);
 
@@ -65,6 +68,7 @@ class NET_EXPORT_PRIVATE TransportSocketParams
     return network_anonymization_key_;
   }
   SecureDnsPolicy secure_dns_policy() const { return secure_dns_policy_; }
+  handles::NetworkHandle target_network() const { return target_network_; }
   const OnHostResolutionCallback& host_resolution_callback() const {
     return host_resolution_callback_;
   }
@@ -79,6 +83,7 @@ class NET_EXPORT_PRIVATE TransportSocketParams
   const Endpoint destination_;
   const NetworkAnonymizationKey network_anonymization_key_;
   const SecureDnsPolicy secure_dns_policy_;
+  const handles::NetworkHandle target_network_;
   const OnHostResolutionCallback host_resolution_callback_;
   const base::flat_set<std::string> supported_alpns_;
 };
@@ -93,12 +98,27 @@ class NET_EXPORT_PRIVATE TransportSocketParams
 // a headstart) and return the one that completes first to the socket pool.
 class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
  public:
+  // May return TcpConnectJobs instead of TransportConnectJobs, based on enabled
+  // features.
+  //
+  // TODO(crbug.com/484073410): Once TcpConnectJob ships and TransportConnectJob
+  // is removed, move this into TcpConnectJob.
   class NET_EXPORT_PRIVATE Factory {
    public:
     Factory() = default;
     virtual ~Factory() = default;
 
-    virtual std::unique_ptr<TransportConnectJob> Create(
+    virtual std::unique_ptr<ConnectJob> Create(
+        RequestPriority priority,
+        const SocketTag& socket_tag,
+        const CommonConnectJobParams* common_connect_job_params,
+        const scoped_refptr<TransportSocketParams>& params,
+        Delegate* delegate,
+        const NetLogWithSource* net_log);
+
+    // Same as Create(), but without an associated factory. Will create a
+    // TcpConnectJob or TransportConnectJob, based on enabled features.
+    static std::unique_ptr<ConnectJob> CreateJob(
         RequestPriority priority,
         const SocketTag& socket_tag,
         const CommonConnectJobParams* common_connect_job_params,
@@ -150,6 +170,7 @@ class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
   ResolveErrorInfo GetResolveErrorInfo() const override;
   std::optional<HostResolverEndpointResult> GetHostResolverEndpointResult()
       const override;
+  std::optional<ResolutionDetails> GetResolutionDetails() const override;
 
   static base::TimeDelta ConnectionTimeout();
 
@@ -231,6 +252,7 @@ class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
   base::OneShotTimer fallback_timer_;
 
   ResolveErrorInfo resolve_error_info_;
+  std::optional<ResolutionDetails> resolution_details_;
   ConnectionAttempts connection_attempts_;
 
   base::WeakPtrFactory<TransportConnectJob> weak_ptr_factory_{this};
