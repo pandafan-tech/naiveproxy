@@ -240,7 +240,7 @@ struct RealityGlobalConfig {
   uint8_t client_version[4] = {0};
 };
 
-static CRYPTO_MUTEX g_reality_global_lock = CRYPTO_MUTEX_INIT;
+static StaticMutex g_reality_global_lock;
 static RealityGlobalConfig g_reality_global;
 static std::map<std::string, RealityGlobalConfig>
     *g_reality_global_by_server_name = nullptr;
@@ -279,14 +279,13 @@ extern "C" int SSL_set_reality_global_config(const uint8_t public_key[32],
                                              size_t short_id_len,
                                              const uint8_t client_version[4]) {
   if (short_id_len > 8) return 0;
-  CRYPTO_MUTEX_lock_write(&g_reality_global_lock);
+  MutexWriteLock lock(&g_reality_global_lock);
   if (public_key == nullptr) {
     g_reality_global.enabled = false;
   } else {
     reality_fill_global_config(&g_reality_global, public_key, short_id,
                                short_id_len, client_version);
   }
-  CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
   return 1;
 }
 
@@ -299,7 +298,7 @@ extern "C" int SSL_set_reality_global_config_for_server_name(
   if (server_name == nullptr || server_name[0] == '\0' || short_id_len > 8) {
     return 0;
   }
-  CRYPTO_MUTEX_lock_write(&g_reality_global_lock);
+  MutexWriteLock lock(&g_reality_global_lock);
   if (g_reality_global_by_server_name == nullptr) {
     g_reality_global_by_server_name =
         new std::map<std::string, RealityGlobalConfig>();
@@ -313,7 +312,6 @@ extern "C" int SSL_set_reality_global_config_for_server_name(
                                client_version);
     (*g_reality_global_by_server_name)[key] = cfg;
   }
-  CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
   return 1;
 }
 
@@ -328,7 +326,7 @@ extern "C" int SSL_set_reality_global_config_for_authority(
       short_id_len > 8) {
     return 0;
   }
-  CRYPTO_MUTEX_lock_write(&g_reality_global_lock);
+  MutexWriteLock lock(&g_reality_global_lock);
   if (g_reality_global_by_authority == nullptr) {
     g_reality_global_by_authority =
         new std::map<std::string, RealityGlobalConfig>();
@@ -342,7 +340,6 @@ extern "C" int SSL_set_reality_global_config_for_authority(
                                client_version);
     (*g_reality_global_by_authority)[key] = cfg;
   }
-  CRYPTO_MUTEX_unlock_write(&g_reality_global_lock);
   return 1;
 }
 
@@ -354,7 +351,7 @@ extern "C" int SSL_apply_reality_global_config_for_authority(
   }
   RealityGlobalConfig snap;
   bool found = false;
-  CRYPTO_MUTEX_lock_read(&g_reality_global_lock);
+  MutexReadLock lock(&g_reality_global_lock);
   if (g_reality_global_by_authority != nullptr) {
     auto it = g_reality_global_by_authority->find(
         reality_authority_key(server_name, port));
@@ -363,7 +360,6 @@ extern "C" int SSL_apply_reality_global_config_for_authority(
       found = true;
     }
   }
-  CRYPTO_MUTEX_unlock_read(&g_reality_global_lock);
   if (!found) {
     return 1;
   }
@@ -374,18 +370,16 @@ extern "C" int SSL_apply_reality_global_config_for_authority(
 // Snapshot the global config under the read lock so callers don't hold the
 // mutex during downstream BoringSSL calls.
 static bool reality_global_snapshot(SSL *ssl, RealityGlobalConfig *out) {
-  CRYPTO_MUTEX_lock_read(&g_reality_global_lock);
+  MutexReadLock lock(&g_reality_global_lock);
   const char *server_name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
   if (server_name != nullptr && g_reality_global_by_server_name != nullptr) {
     auto it = g_reality_global_by_server_name->find(server_name);
     if (it != g_reality_global_by_server_name->end()) {
       *out = it->second;
-      CRYPTO_MUTEX_unlock_read(&g_reality_global_lock);
       return out->enabled;
     }
   }
   *out = g_reality_global;
-  CRYPTO_MUTEX_unlock_read(&g_reality_global_lock);
   return out->enabled;
 }
 
