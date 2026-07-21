@@ -647,6 +647,11 @@ class CustomRootSystemTrustStore : public net::SystemTrustStore {
     return nullptr;
   }
 
+  std::optional<int32_t> GetCrsRootIdForCert(
+      const bssl::CertPathBuilderResultPath* path) const override {
+    return std::nullopt;
+  }
+
   bssl::TrustStore* eutl_trust_store() override { return nullptr; }
 #endif
 
