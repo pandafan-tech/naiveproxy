@@ -14,6 +14,8 @@
 #include "base/memory/raw_ptr.h"
 #include "base/strings/strcat.h"
 #include "base/synchronization/waitable_event.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/grpc_support/include/bidirectional_stream_c.h"
 #include "components/grpc_support/test/get_stream_engine.h"
@@ -279,6 +281,24 @@ TestBidirectionalStreamCallback::WriteData::WriteData(std::string_view data,
     : buffer(data), flush(flush_after) {}
 
 TestBidirectionalStreamCallback::WriteData::~WriteData() = default;
+
+TEST_P(BidirectionalStreamTest,
+       DestroyCompletionCounterAdvancesAfterNetworkThreadDelete) {
+  TestBidirectionalStreamCallback test;
+  const uint64_t completed_before =
+      bidirectional_stream_destroy_completed_count();
+  test.stream = bidirectional_stream_create(engine(), &test, test.callback());
+  ASSERT_TRUE(test.stream);
+  ASSERT_EQ(1, bidirectional_stream_destroy(test.stream));
+
+  const base::TimeTicks deadline =
+      base::TimeTicks::Now() + base::Seconds(5);
+  while (bidirectional_stream_destroy_completed_count() == completed_before &&
+         base::TimeTicks::Now() < deadline) {
+    base::PlatformThread::Sleep(base::Milliseconds(1));
+  }
+  EXPECT_GT(bidirectional_stream_destroy_completed_count(), completed_before);
+}
 
 // Regression test for b/144733928. Test that coalesced headers will be split by
 // cronet by '\0' separator.

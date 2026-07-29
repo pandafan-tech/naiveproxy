@@ -16,6 +16,7 @@ extern "C" {
 #endif
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Engine API. */
 
@@ -147,6 +148,13 @@ bidirectional_stream* bidirectional_stream_create(
  */
 GRPC_SUPPORT_EXPORT
 int bidirectional_stream_destroy(bidirectional_stream* stream);
+
+/* Returns the process-wide number of stream adapters whose destruction has
+ * completed on the engine network thread. Unlike bidirectional_stream_destroy,
+ * which only posts work, this counter advances after the C and C++ stream
+ * objects have actually been deleted. Safe to call from any thread. */
+GRPC_SUPPORT_EXPORT
+uint64_t bidirectional_stream_destroy_completed_count(void);
 
 /**
  * Disables or enables auto flush. By default, data is flushed after
