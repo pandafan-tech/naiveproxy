@@ -416,6 +416,27 @@ void SpdySessionPool::CloseCurrentIdleSessions(const std::string& description) {
   CloseCurrentSessionsHelper(ERR_ABORTED, description, true /* idle_only */);
 }
 
+size_t SpdySessionPool::CloseCurrentIdleSessionsForHostPortPair(
+    const HostPortPair& host_port_pair,
+    const std::string& description) {
+  size_t closed_sessions = 0;
+  WeakSessionList current_sessions = GetCurrentSessions();
+  for (base::WeakPtr<SpdySession>& session : current_sessions) {
+    if (!session || session->host_port_pair() != host_port_pair ||
+        session->is_active() || session->IsDraining()) {
+      continue;
+    }
+
+    session->CloseSessionOnError(ERR_ABORTED, description);
+    NotifyOnSessionClosed(session->spdy_session_key(),
+                          session->WasEverUsedToCreateStreams());
+    DCHECK(!IsSessionAvailable(session));
+    DCHECK(!session || session->IsDraining());
+    ++closed_sessions;
+  }
+  return closed_sessions;
+}
+
 void SpdySessionPool::CloseAllSessions() {
   auto is_draining = [](const SpdySession* s) { return s->IsDraining(); };
   // Repeat until every SpdySession owned by |this| is draining.

@@ -5,6 +5,8 @@
 #ifndef COMPONENTS_CRONET_NATIVE_INCLUDE_CRONET_C_H_
 #define COMPONENTS_CRONET_NATIVE_INCLUDE_CRONET_C_H_
 
+#include <stdint.h>
+
 #include "cronet_export.h"
 
 // Cronet public C API is generated from cronet.idl
@@ -100,6 +102,14 @@ CRONET_EXPORT void Cronet_Engine_SetUdpDialer(Cronet_EnginePtr engine,
 // or speeding up engine shutdown.
 // Must be called after Cronet_Engine_StartWithParams().
 CRONET_EXPORT void Cronet_Engine_CloseAllConnections(Cronet_EnginePtr engine);
+
+// Closes idle HTTP/2 sessions for the origin described by url while preserving
+// active sessions. Returns the number of sessions closed, or a negative net
+// error for invalid input or engine state. Must be called after
+// Cronet_Engine_StartWithParams().
+CRONET_EXPORT int32_t Cronet_Engine_CloseIdleSpdySessionsForUrl(
+    Cronet_EnginePtr engine,
+    const char* url);
 
 #ifdef __cplusplus
 }

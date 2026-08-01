@@ -25,6 +25,7 @@
 #include "components/cronet/version.h"
 #include "components/grpc_support/include/bidirectional_stream_c.h"
 #include "net/base/completion_once_callback.h"
+#include "net/base/host_port_pair.h"
 #include "net/base/net_errors.h"
 #include "net/base/hash_value.h"
 #include "net/base/proxy_delegate.h"
@@ -555,6 +556,47 @@ void Cronet_EngineImpl::CloseAllConnections() {
   done.Wait();
 }
 
+int32_t Cronet_EngineImpl::CloseIdleSpdySessionsForUrl(const char* url) {
+  if (!url)
+    return net::ERR_INVALID_ARGUMENT;
+  const GURL parsed_url(url);
+  if (!parsed_url.is_valid() || !parsed_url.has_host() ||
+      parsed_url.EffectiveIntPort() <= 0) {
+    return net::ERR_INVALID_ARGUMENT;
+  }
+  const net::HostPortPair host_port_pair =
+      net::HostPortPair::FromURL(parsed_url);
+
+  init_completed_.Wait();
+  base::AutoLock lock(lock_);
+  if (!context_)
+    return net::ERR_UNEXPECTED;
+  base::WaitableEvent done;
+  int32_t closed_sessions = 0;
+  context_->PostTaskToNetworkThread(
+      FROM_HERE,
+      base::BindOnce(
+          [](CronetContext* ctx, const net::HostPortPair& host_port_pair,
+             int32_t* closed_sessions, base::WaitableEvent* event) {
+            auto* context = ctx->GetURLRequestContext();
+            if (context && context->http_transaction_factory()) {
+              auto* session =
+                  context->http_transaction_factory()->GetSession();
+              if (session) {
+                *closed_sessions = static_cast<int32_t>(
+                    session->spdy_session_pool()
+                        ->CloseCurrentIdleSessionsForHostPortPair(
+                            host_port_pair,
+                            "CloseIdleSpdySessionsForUrl()"));
+              }
+            }
+            event->Signal();
+          },
+          context_.get(), host_port_pair, &closed_sessions, &done));
+  done.Wait();
+  return closed_sessions;
+}
+
 stream_engine* Cronet_EngineImpl::GetBidirectionalStreamEngine() {
   init_completed_.Wait();
   return stream_engine_.get();
@@ -586,6 +628,13 @@ CRONET_EXPORT stream_engine* Cronet_Engine_GetStreamEngine(
 CRONET_EXPORT void Cronet_Engine_CloseAllConnections(
     Cronet_EnginePtr engine) {
   static_cast<cronet::Cronet_EngineImpl*>(engine)->CloseAllConnections();
+}
+
+CRONET_EXPORT int32_t Cronet_Engine_CloseIdleSpdySessionsForUrl(
+    Cronet_EnginePtr engine,
+    const char* url) {
+  return static_cast<cronet::Cronet_EngineImpl*>(engine)
+      ->CloseIdleSpdySessionsForUrl(url);
 }
 
 CRONET_EXPORT void Cronet_Engine_SetDialer(Cronet_EnginePtr engine,

@@ -5,6 +5,7 @@
 #ifndef COMPONENTS_CRONET_NATIVE_ENGINE_H_
 #define COMPONENTS_CRONET_NATIVE_ENGINE_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -69,6 +70,10 @@ class Cronet_EngineImpl : public Cronet_Engine {
 
   // Close all connections managed by the engine's network session.
   void CloseAllConnections();
+
+  // Close idle HTTP/2 sessions for the origin described by `url`. Active
+  // sessions are preserved. Returns the number of sessions closed.
+  int32_t CloseIdleSpdySessionsForUrl(const char* url);
 
   // Get stream engine for GRPC Bidirectional Stream support. The returned
   // stream_engine is owned by |this| and is only valid until |this| shutdown.
