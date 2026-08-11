@@ -516,8 +516,7 @@ void Cronet_EngineImpl::SetMockCertVerifierForTesting(
   mock_cert_verifier_ = std::move(mock_cert_verifier);
 }
 
-void Cronet_EngineImpl::SetDialer(int (*dialer)(void*, const char*, uint16_t),
-                                  void* context) {
+void Cronet_EngineImpl::SetDialer(Cronet_DialerFunc dialer, void* context) {
   CHECK(!context_);
   dialer_ = dialer;
   dialer_context_ = context;
@@ -556,8 +555,11 @@ void Cronet_EngineImpl::CloseAllConnections() {
   done.Wait();
 }
 
-int32_t Cronet_EngineImpl::CloseIdleSpdySessionsForUrl(const char* url) {
-  if (!url)
+int32_t Cronet_EngineImpl::CloseIdleSpdySessionsForUrlAsync(
+    const char* url,
+    Cronet_CloseIdleSpdySessionsCallback callback,
+    void* callback_context) {
+  if (!url || !callback)
     return net::ERR_INVALID_ARGUMENT;
   const GURL parsed_url(url);
   if (!parsed_url.is_valid() || !parsed_url.has_host() ||
@@ -567,34 +569,34 @@ int32_t Cronet_EngineImpl::CloseIdleSpdySessionsForUrl(const char* url) {
   const net::HostPortPair host_port_pair =
       net::HostPortPair::FromURL(parsed_url);
 
-  init_completed_.Wait();
+  if (!init_completed_.IsSignaled())
+    return net::ERR_UNEXPECTED;
   base::AutoLock lock(lock_);
   if (!context_)
     return net::ERR_UNEXPECTED;
-  base::WaitableEvent done;
-  int32_t closed_sessions = 0;
   context_->PostTaskToNetworkThread(
       FROM_HERE,
       base::BindOnce(
           [](CronetContext* ctx, const net::HostPortPair& host_port_pair,
-             int32_t* closed_sessions, base::WaitableEvent* event) {
+             Cronet_CloseIdleSpdySessionsCallback callback,
+             void* callback_context) {
+            int32_t result = net::ERR_UNEXPECTED;
             auto* context = ctx->GetURLRequestContext();
             if (context && context->http_transaction_factory()) {
               auto* session =
                   context->http_transaction_factory()->GetSession();
               if (session) {
-                *closed_sessions = static_cast<int32_t>(
+                result = static_cast<int32_t>(
                     session->spdy_session_pool()
                         ->CloseCurrentIdleSessionsForHostPortPair(
                             host_port_pair,
                             "CloseIdleSpdySessionsForUrl()"));
               }
             }
-            event->Signal();
+            callback(callback_context, result);
           },
-          context_.get(), host_port_pair, &closed_sessions, &done));
-  done.Wait();
-  return closed_sessions;
+          context_.get(), host_port_pair, callback, callback_context));
+  return net::ERR_IO_PENDING;
 }
 
 stream_engine* Cronet_EngineImpl::GetBidirectionalStreamEngine() {
@@ -630,11 +632,13 @@ CRONET_EXPORT void Cronet_Engine_CloseAllConnections(
   static_cast<cronet::Cronet_EngineImpl*>(engine)->CloseAllConnections();
 }
 
-CRONET_EXPORT int32_t Cronet_Engine_CloseIdleSpdySessionsForUrl(
+CRONET_EXPORT int32_t Cronet_Engine_CloseIdleSpdySessionsForUrlAsync(
     Cronet_EnginePtr engine,
-    const char* url) {
+    const char* url,
+    Cronet_CloseIdleSpdySessionsCallback callback,
+    void* context) {
   return static_cast<cronet::Cronet_EngineImpl*>(engine)
-      ->CloseIdleSpdySessionsForUrl(url);
+      ->CloseIdleSpdySessionsForUrlAsync(url, callback, context);
 }
 
 CRONET_EXPORT void Cronet_Engine_SetDialer(Cronet_EnginePtr engine,

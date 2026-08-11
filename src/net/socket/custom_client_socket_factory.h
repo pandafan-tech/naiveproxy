@@ -14,19 +14,20 @@
 namespace net {
 
 // A ClientSocketFactory that uses a custom dialer callback for TCP connections.
-// When the dialer is set, CreateTransportClientSocket will call the callback
-// to get a connected socket file descriptor instead of creating a new socket.
 class NET_EXPORT CustomClientSocketFactory : public ClientSocketFactory {
  public:
-  // Callback type for custom TCP dialer.
+  // Callback types for asynchronous custom TCP dialing.
   // Parameters:
   //   - address: IP address string (e.g. "1.2.3.4" or "::1")
   //   - port: Port number
-  // Returns:
+  //   - completion: Must be invoked exactly once, from any thread, with:
   //   - On success: connected socket file descriptor (>= 0)
   //   - On failure: negative net error code (e.g. ERR_CONNECTION_REFUSED)
-  using DialerCallback =
-      base::RepeatingCallback<int(const std::string& address, uint16_t port)>;
+  using DialerCompletionCallback = base::OnceCallback<void(int result)>;
+  using DialerCallback = base::RepeatingCallback<void(
+      const std::string& address,
+      uint16_t port,
+      DialerCompletionCallback completion)>;
 
   // Callback type for custom UDP dialer.
   // Parameters:

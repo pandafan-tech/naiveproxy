@@ -29,6 +29,13 @@ class URLRequestContextBuilder;
 
 namespace cronet {
 
+using AsyncTcpDialCompletionFunc = void (*)(void* context, int result);
+using AsyncTcpDialerFunc = void (*)(void* context,
+                                    const char* address,
+                                    uint16_t port,
+                                    AsyncTcpDialCompletionFunc completion,
+                                    void* completion_context);
+
 // Common configuration parameters used by Cronet to configure
 // URLRequestContext.
 // TODO(mgersh): This shouldn't be a struct, and experimental option parsing
@@ -180,12 +187,9 @@ struct URLRequestContextConfig {
 
   const std::optional<cronet::proto::ProxyOptions> proxy_options;
 
-  // Custom TCP dialer callback. When set, this callback will be used to
-  // establish TCP connections instead of the default socket API.
-  // The callback takes (context, address, port) and returns:
-  //   - On success: connected socket fd (>= 0)
-  //   - On failure: negative net error code
-  int (*dialer)(void*, const char*, uint16_t) = nullptr;
+  // Custom asynchronous TCP dialer callback. When set, this callback will be
+  // used to establish TCP connections instead of the default socket API.
+  AsyncTcpDialerFunc dialer = nullptr;
   void* dialer_context = nullptr;
 
   // Custom UDP dialer callback. When set, this callback will be used to

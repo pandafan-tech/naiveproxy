@@ -1048,9 +1048,24 @@ void URLRequestContextConfig::ConfigureURLRequestContextBuilder(
       auto dialer_copy = dialer;
       void* context_copy = dialer_context;
       tcp_dialer_callback = base::BindRepeating(
-          [](int (*dialer)(void*, const char*, uint16_t), void* context,
-             const std::string& address, uint16_t port) -> int {
-            return dialer(context, address.c_str(), port);
+          [](AsyncTcpDialerFunc dialer, void* context,
+             const std::string& address, uint16_t port,
+             net::CustomClientSocketFactory::DialerCompletionCallback
+                 completion) {
+            auto* completion_context =
+                new net::CustomClientSocketFactory::DialerCompletionCallback(
+                    std::move(completion));
+            dialer(
+                context, address.c_str(), port,
+                [](void* context, int result) {
+                  std::unique_ptr<
+                      net::CustomClientSocketFactory::DialerCompletionCallback>
+                      completion(
+                          static_cast<net::CustomClientSocketFactory::
+                                          DialerCompletionCallback*>(context));
+                  std::move(*completion).Run(result);
+                },
+                completion_context);
           },
           dialer_copy, context_copy);
     }

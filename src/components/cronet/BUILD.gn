@@ -125,6 +125,15 @@ if (false) {
     ]
   }
 
+  executable("custom_dialer_regression_test") {
+    testonly = true
+    sources = [ "native/custom_dialer_regression_test.cc" ]
+    deps = [
+      "//base",
+      "//net",
+    ]
+  }
+
   # Shared library for Windows and Linux (purego mode).
   # On Windows, Go's CGO cannot link MSVC-compiled static libraries,
   # so we provide a DLL for runtime loading via purego + memmod.

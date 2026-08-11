@@ -16,6 +16,7 @@
 #include "base/synchronization/waitable_event.h"
 #include "base/thread_annotations.h"
 #include "components/cronet/native/generated/cronet.idl_impl_interface.h"
+#include "components/cronet/native/include/cronet_c.h"
 
 extern "C" typedef struct stream_engine stream_engine;
 
@@ -61,7 +62,7 @@ class Cronet_EngineImpl : public Cronet_Engine {
 
   // Set custom dialer for TCP connections. Must be called before
   // StartWithParams.
-  void SetDialer(int (*dialer)(void*, const char*, uint16_t), void* context);
+  void SetDialer(Cronet_DialerFunc dialer, void* context);
 
   // Set custom dialer for UDP sockets. Must be called before StartWithParams.
   void SetUdpDialer(
@@ -71,9 +72,11 @@ class Cronet_EngineImpl : public Cronet_Engine {
   // Close all connections managed by the engine's network session.
   void CloseAllConnections();
 
-  // Close idle HTTP/2 sessions for the origin described by `url`. Active
-  // sessions are preserved. Returns the number of sessions closed.
-  int32_t CloseIdleSpdySessionsForUrl(const char* url);
+  // Schedule idle HTTP/2 session cleanup for the origin described by `url`.
+  int32_t CloseIdleSpdySessionsForUrlAsync(
+      const char* url,
+      Cronet_CloseIdleSpdySessionsCallback callback,
+      void* context);
 
   // Get stream engine for GRPC Bidirectional Stream support. The returned
   // stream_engine is owned by |this| and is only valid until |this| shutdown.
@@ -122,7 +125,7 @@ class Cronet_EngineImpl : public Cronet_Engine {
   std::unique_ptr<net::CertVerifier> mock_cert_verifier_;
 
   // Custom dialer for TCP connections. Only valid until StartWithParams.
-  int (*dialer_)(void*, const char*, uint16_t) = nullptr;
+  Cronet_DialerFunc dialer_ = nullptr;
   void* dialer_context_ = nullptr;
 
   // Custom dialer for UDP sockets. Only valid until StartWithParams.
