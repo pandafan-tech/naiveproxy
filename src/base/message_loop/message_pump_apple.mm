@@ -34,9 +34,9 @@
 #include "base/time/time.h"
 #include "build/build_config.h"
 
-#if !BUILDFLAG(IS_IOS)
+#if !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 #import <AppKit/AppKit.h>
-#endif  // !BUILDFLAG(IS_IOS)
+#endif  // !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 
 namespace base {
 
@@ -58,14 +58,14 @@ void NoOp(void* info) {}
 constexpr CFTimeInterval kCFTimeIntervalMax =
     std::numeric_limits<CFTimeInterval>::max();
 
-#if !BUILDFLAG(IS_IOS)
+#if !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 // Set to true if message_pump_apple::Create() is called before NSApp is
 // initialized.  Only accessed from the main thread.
 bool g_not_using_cr_app = false;
 
 // The MessagePump controlling [NSApp run].
 MessagePumpNSApplication* g_app_pump;
-#endif  // !BUILDFLAG(IS_IOS)
+#endif  // !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 
 #if BUILDFLAG(IS_IOS)
 constexpr int kDefaultInitialNestingLevel = 1;
@@ -835,7 +835,7 @@ void MessagePumpUIApplication::Detach() {
   OnDetach();
 }
 
-#else
+#elif !BUILDFLAG(CRONET_BUILD)
 
 ScopedPumpMessagesInPrivateModes::ScopedPumpMessagesInPrivateModes() {
   DCHECK(g_app_pump);
@@ -990,6 +990,8 @@ std::unique_ptr<MessagePump> Create() {
   if (NSThread.isMainThread) {
 #if BUILDFLAG(IS_IOS)
     return std::make_unique<MessagePumpUIApplication>();
+#elif BUILDFLAG(CRONET_BUILD)
+    return std::make_unique<MessagePumpNSRunLoop>();
 #else
     if ([NSApp conformsToProtocol:@protocol(CrAppProtocol)]) {
       return std::make_unique<MessagePumpCrApplication>();
@@ -1008,7 +1010,7 @@ std::unique_ptr<MessagePump> Create() {
   return std::make_unique<MessagePumpNSRunLoop>();
 }
 
-#if !BUILDFLAG(IS_IOS)
+#if !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 
 bool UsingCrApp() {
   DCHECK(NSThread.isMainThread);
@@ -1031,7 +1033,7 @@ bool IsHandlingSendEvent() {
   return [app isHandlingSendEvent];
 }
 
-#endif  // !BUILDFLAG(IS_IOS)
+#endif  // !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 
 }  // namespace message_pump_apple
 
