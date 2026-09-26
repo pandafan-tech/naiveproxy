@@ -21,22 +21,28 @@ esac
 if [ "$host_os" = mac -a "$host_cpu" = arm64 ]; then
   WITH_CLANG=Mac_arm64
 fi
-mkdir -p third_party/llvm-build/Release+Asserts
+CLANG_DIR=third_party/llvm-build/Release+Asserts
+mkdir -p "$CLANG_DIR"
 cd tools/clang/scripts
 CLANG_REVISION=$($PYTHON -c 'import update; print(update.PACKAGE_VERSION)')
 cd -
-echo $CLANG_REVISION >third_party/llvm-build/Release+Asserts/cr_build_revision
-if [ ! -d third_party/llvm-build/Release+Asserts/bin ]; then
-  mkdir -p third_party/llvm-build/Release+Asserts
+CLANG_STAMP="$CLANG_DIR/panda_build_revision"
+if [ ! -f "$CLANG_STAMP" ] || [ "$(cat "$CLANG_STAMP")" != "$CLANG_REVISION" ]; then
+  rm -rf "$CLANG_DIR"
+  mkdir -p "$CLANG_DIR"
+fi
+if [ ! -d "$CLANG_DIR/bin" ]; then
   clang_path="clang-$CLANG_REVISION.tar.xz"
   clang_url="https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path"
-  curl "$clang_url" | tar xJf - -C third_party/llvm-build/Release+Asserts
+  curl "$clang_url" | tar xJf - -C "$CLANG_DIR"
   if [ "$target_os" = android ]; then
     clang_path="clang-android-runtime-library-$CLANG_REVISION.tar.xz"
     clang_url="https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path"
-    curl "$clang_url" | tar xJf - -C third_party/llvm-build/Release+Asserts
+    curl "$clang_url" | tar xJf - -C "$CLANG_DIR"
   fi
 fi
+echo "$CLANG_REVISION" >"$CLANG_DIR/cr_build_revision"
+echo "$CLANG_REVISION" >"$CLANG_STAMP"
 
 # sccache
 if [ "$host_os" = win -a ! -f ~/.cargo/bin/sccache.exe ]; then
@@ -55,12 +61,15 @@ esac
 if [ "$host_os" = mac -a "$host_cpu" = arm64 ]; then
   WITH_GN=mac-arm64
 fi
-if [ ! -f gn/out/gn ]; then
-  gn_version=$(grep "'gn_version':" DEPS | cut -d"'" -f4)
+gn_version=$(grep "'gn_version':" DEPS | cut -d"'" -f4)
+GN_STAMP=gn/out/cr_build_revision
+if [ ! -f gn/out/gn ] || [ ! -f "$GN_STAMP" ] || [ "$(cat "$GN_STAMP")" != "$gn_version" ]; then
+  rm -rf gn/out
   mkdir -p gn/out
   curl -L "https://chrome-infra-packages.appspot.com/dl/gn/gn/$WITH_GN/+/$gn_version" -o gn.zip
   unzip gn.zip -d gn/out
   rm gn.zip
+  echo $gn_version >"$GN_STAMP"
 fi
 
 # See src/build/config/compiler/pgo/BUILD.gn

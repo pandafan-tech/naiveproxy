@@ -42,19 +42,27 @@ CRONET_EXPORT stream_engine* Cronet_Engine_GetStreamEngine(
 CRONET_EXPORT void* Cronet_CreateCertVerifierWithRootCerts(
     const char* pem_root_certs);
 
-// Dialer callback type for custom TCP connection establishment.
+// Completion callback for custom TCP connection establishment. The dialer
+// must invoke this exactly once, from any thread.
+typedef void (*Cronet_DialerCompletionFunc)(void* context, int result);
+
+// Dialer callback type for asynchronous custom TCP connection establishment.
 // context: User-provided context pointer passed to Cronet_Engine_SetDialer.
 // address: IP address string (e.g. "1.2.3.4" or "::1").
 // port: Port number.
-// Returns: connected socket fd on success, negative net error code on failure.
+// completion: Callback that accepts a connected socket fd on success or a
+//             negative net error code on failure.
+// completion_context: Opaque context to pass to completion.
 // Common error codes:
 //   -102: ERR_CONNECTION_REFUSED
 //   -104: ERR_CONNECTION_FAILED
 //   -109: ERR_ADDRESS_UNREACHABLE
 //   -118: ERR_CONNECTION_TIMED_OUT
-typedef intptr_t (*Cronet_DialerFunc)(void* context,
-                                      const char* address,
-                                      uint16_t port);
+typedef void (*Cronet_DialerFunc)(void* context,
+                                  const char* address,
+                                  uint16_t port,
+                                  Cronet_DialerCompletionFunc completion,
+                                  void* completion_context);
 
 // Sets a custom dialer for TCP connections.
 // When set, the engine will use this callback to establish TCP connections
@@ -79,11 +87,11 @@ CRONET_EXPORT void Cronet_Engine_SetDialer(Cronet_EnginePtr engine,
 //   - AF_INET/AF_INET6 SOCK_DGRAM: Standard UDP socket
 //   - AF_UNIX SOCK_DGRAM: Unix domain datagram socket (Unix/macOS/Linux)
 //   - AF_UNIX SOCK_STREAM: Unix domain stream socket (Windows, with framing)
-typedef intptr_t (*Cronet_UdpDialerFunc)(void* context,
-                                         const char* address,
-                                         uint16_t port,
-                                         char* out_local_address,
-                                         uint16_t* out_local_port);
+typedef int (*Cronet_UdpDialerFunc)(void* context,
+                                    const char* address,
+                                    uint16_t port,
+                                    char* out_local_address,
+                                    uint16_t* out_local_port);
 
 // Sets a custom dialer for UDP sockets.
 // When set, the engine will use this callback to create UDP sockets
@@ -103,6 +111,22 @@ CRONET_EXPORT void Cronet_Engine_SetUdpDialer(Cronet_EnginePtr engine,
 // Must be called after Cronet_Engine_StartWithParams().
 // Calls from Cronet's network thread schedule the close asynchronously.
 CRONET_EXPORT void Cronet_Engine_CloseAllConnections(Cronet_EnginePtr engine);
+
+// Completion callback for selective idle HTTP/2 session cleanup.
+typedef void (*Cronet_CloseIdleSpdySessionsCallback)(void* context,
+                                                     int32_t result);
+
+// Asynchronously closes idle HTTP/2 sessions for the origin described by url
+// while preserving active sessions. Returns ERR_IO_PENDING after scheduling,
+// or a negative net error when the operation could not be scheduled. After an
+// ERR_IO_PENDING return, callback is invoked exactly once with the number of
+// sessions closed or a negative net error. Must be called after
+// Cronet_Engine_StartWithParams().
+CRONET_EXPORT int32_t Cronet_Engine_CloseIdleSpdySessionsForUrlAsync(
+    Cronet_EnginePtr engine,
+    const char* url,
+    Cronet_CloseIdleSpdySessionsCallback callback,
+    void* context);
 
 #ifdef __cplusplus
 }

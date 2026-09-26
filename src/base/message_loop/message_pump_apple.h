@@ -38,6 +38,7 @@
 #include "base/apple/scoped_cftyperef.h"
 #include "base/containers/stack.h"
 #include "base/memory/raw_ptr.h"
+#include "base/message_loop/ios_cronet_buildflags.h"
 #include "base/message_loop/message_pump.h"
 #include "base/run_loop.h"
 #include "build/build_config.h"
@@ -45,7 +46,7 @@
 #if defined(__OBJC__)
 #if BUILDFLAG(IS_IOS)
 #import <Foundation/Foundation.h>
-#else
+#elif !BUILDFLAG(CRONET_BUILD)
 #import <AppKit/AppKit.h>
 
 // Clients must subclass NSApplication and implement this protocol if they want
@@ -341,7 +342,7 @@ class BASE_EXPORT MessagePumpUIApplication : public MessagePumpCFRunLoopBase {
   std::optional<RunLoop> run_loop_;
 };
 
-#else  // !BUILDFLAG(IS_IOS)
+#elif !BUILDFLAG(CRONET_BUILD)
 
 class MessagePumpNSApplication : public MessagePumpCFRunLoopBase {
  public:
@@ -384,12 +385,13 @@ class MessagePumpCrApplication : public MessagePumpNSApplication {
   bool ShouldCreateAutoreleasePool() override;
 };
 
-#endif  // !BUILDFLAG(IS_IOS)
+#endif  // BUILDFLAG(IS_IOS)
 
 namespace message_pump_apple {
 
-// If not on the main thread, returns a new instance of
-// MessagePumpNSRunLoop.
+// macOS Cronet builds and non-main macOS threads use MessagePumpNSRunLoop.
+// Desktop Chromium builds use the NSApplication pump described below on the
+// main thread.
 //
 // On the main thread, if NSApp exists and conforms to
 // CrAppProtocol, creates an instances of MessagePumpCrApplication.
@@ -398,7 +400,7 @@ namespace message_pump_apple {
 // default NSApplication.
 BASE_EXPORT std::unique_ptr<MessagePump> Create();
 
-#if !BUILDFLAG(IS_IOS)
+#if !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 // If a pump is created before the required CrAppProtocol is
 // created, the wrong MessagePump subclass could be used.
 // UsingCrApp() returns false if the message pump was created before
@@ -409,7 +411,7 @@ BASE_EXPORT bool UsingCrApp();
 // Wrapper to query -[NSApp isHandlingSendEvent] from C++ code.
 // Requires NSApp to implement CrAppProtocol.
 BASE_EXPORT bool IsHandlingSendEvent();
-#endif  // !BUILDFLAG(IS_IOS)
+#endif  // !BUILDFLAG(IS_IOS) && !BUILDFLAG(CRONET_BUILD)
 
 }  // namespace message_pump_apple
 

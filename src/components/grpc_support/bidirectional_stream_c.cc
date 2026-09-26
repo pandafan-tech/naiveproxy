@@ -6,6 +6,7 @@
 
 #include <stdbool.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,6 +37,8 @@
 #include "url/gurl.h"
 
 namespace {
+
+std::atomic<uint64_t> g_bidirectional_stream_destroy_completed_count{0};
 
 class HeadersArray : public bidirectional_stream_header_array {
  public:
@@ -120,7 +123,7 @@ class BidirectionalStreamAdapter final
 
  private:
   ~BidirectionalStreamAdapter();
-  void DestroyOnNetworkThread();
+  static void DestroyOnNetworkThread(BidirectionalStreamAdapter* adapter);
 
   std::unique_ptr<grpc_support::BidirectionalStream> bidirectional_stream_;
 
@@ -216,10 +219,13 @@ void BidirectionalStreamAdapter::DestroyAdapterForStream(
                      base::Unretained(adapter)));
 }
 
-void BidirectionalStreamAdapter::DestroyOnNetworkThread() {
-  DCHECK(request_context_getter_->GetNetworkTaskRunner()
+void BidirectionalStreamAdapter::DestroyOnNetworkThread(
+    BidirectionalStreamAdapter* adapter) {
+  DCHECK(adapter->request_context_getter_->GetNetworkTaskRunner()
              ->BelongsToCurrentThread());
-  delete this;
+  delete adapter;
+  g_bidirectional_stream_destroy_completed_count.fetch_add(
+      1, std::memory_order_relaxed);
 }
 
 }  // namespace
@@ -237,6 +243,11 @@ bidirectional_stream* bidirectional_stream_create(
 int bidirectional_stream_destroy(bidirectional_stream* stream) {
   BidirectionalStreamAdapter::DestroyAdapterForStream(stream);
   return 1;
+}
+
+uint64_t bidirectional_stream_destroy_completed_count(void) {
+  return g_bidirectional_stream_destroy_completed_count.load(
+      std::memory_order_relaxed);
 }
 
 void bidirectional_stream_disable_auto_flush(bidirectional_stream* stream,

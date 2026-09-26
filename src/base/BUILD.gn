@@ -2119,8 +2119,6 @@ component("base") {
       "mac/scoped_ioplugininterface.h",
       "mac/scoped_launch_data.h",
       "mac/scoped_mach_msg_destroy.h",
-      "mac/scoped_sending_event.h",
-      "mac/scoped_sending_event.mm",
       "message_loop/message_pump_kqueue.cc",
       "message_loop/message_pump_kqueue.h",
       "power_monitor/battery_level_provider_mac.mm",
@@ -2157,6 +2155,8 @@ component("base") {
         "mac/launch_services_spi.h",
         "mac/login_util.cc",
         "mac/login_util.h",
+        "mac/scoped_sending_event.h",
+        "mac/scoped_sending_event.mm",
       ]
     }
 

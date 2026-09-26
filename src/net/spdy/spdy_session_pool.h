@@ -325,6 +325,12 @@ class NET_EXPORT SpdySessionPool
   // live.
   void CloseCurrentIdleSessions(const std::string& description);
 
+  // Close idle sessions whose destination matches `host_port_pair`. Active
+  // sessions are preserved. Returns the number of sessions closed.
+  size_t CloseCurrentIdleSessionsForHostPortPair(
+      const HostPortPair& host_port_pair,
+      const std::string& description);
+
   // Repeatedly close all SpdySessions until all of them (including new ones
   // created in the process of closing the current ones, and new ones created in
   // the process of closing those new ones, etc.) are unavailable.

@@ -700,6 +700,10 @@ int SSLClientSocketImpl::Init() {
       !SSL_set_tlsext_host_name(ssl_.get(), host_and_port_.host().c_str())) {
     return ERR_UNEXPECTED;
   }
+  if (!SSL_apply_reality_global_config_for_authority(
+          ssl_.get(), host_and_port_.host().c_str(), host_and_port_.port())) {
+    return ERR_UNEXPECTED;
+  }
 
   const std::vector<uint16_t> supported_groups =
       context_->config().GetSupportedGroups();
@@ -1074,6 +1078,36 @@ ssl_verify_result_t SSLClientSocketImpl::VerifyCert() {
     // cert_verification_result_, return it instead of triggering
     // another verify.
     return HandleVerifyResult();
+  }
+
+  // REALITY short-circuit (cronet-reality patch series):
+  // When REALITY is configured on this SSL (either per-SSL or via the
+  // global config), authentication is provided by the HMAC-SHA512
+  // verification of the leaf cert's signature value against the derived
+  // auth_key, NOT by chain validation against system trust anchors. The
+  // server's borrowed Ed25519 leaf cert is intentionally not part of any
+  // public PKI chain.
+  //
+  // We skip the standard CertVerifier pipeline in that case: if the
+  // REALITY HMAC matches, the connection is authenticated. If not, we
+  // refuse rather than fall through to standard verification (a
+  // successful chain verify here would just mean we got proxied to the
+  // real borrowed site, which is useless for routing proxy traffic).
+  if (SSL_reality_is_enabled(ssl_.get())) {
+    if (SSL_reality_verify_peer_cert(ssl_.get())) {
+      // Synthesize a passing CertVerifyResult so downstream code (key
+      // pinning, expect-CT, etc.) sees a clean state.
+      server_cert_ = x509_util::CreateX509CertificateFromBuffers(
+          SSL_get0_peer_certificates(ssl_.get()));
+      server_cert_verify_result_.Reset();
+      server_cert_verify_result_.verified_cert = server_cert_;
+      server_cert_verify_result_.cert_status = 0;  // OK
+      cert_verification_result_ = OK;
+      return HandleVerifyResult();
+    }
+    // REALITY enabled but HMAC mismatch — refuse.
+    OpenSSLPutNetError(FROM_HERE, ERR_CERT_AUTHORITY_INVALID);
+    return ssl_verify_invalid;
   }
 
   // In this configuration, BoringSSL will perform exactly one certificate

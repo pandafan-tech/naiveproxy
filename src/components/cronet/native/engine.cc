@@ -26,6 +26,8 @@
 #include "components/cronet/version.h"
 #include "components/grpc_support/include/bidirectional_stream_c.h"
 #include "net/base/completion_once_callback.h"
+#include "net/base/host_port_pair.h"
+#include "net/base/net_errors.h"
 #include "net/base/hash_value.h"
 #include "net/base/proxy_delegate.h"
 #include "net/cert/cert_verify_proc.h"
@@ -526,16 +528,14 @@ void Cronet_EngineImpl::SetMockCertVerifierForTesting(
   mock_cert_verifier_ = std::move(mock_cert_verifier);
 }
 
-void Cronet_EngineImpl::SetDialer(
-    intptr_t (*dialer)(void*, const char*, uint16_t),
-    void* context) {
+void Cronet_EngineImpl::SetDialer(Cronet_DialerFunc dialer, void* context) {
   CHECK(!context_);
   dialer_ = dialer;
   dialer_context_ = context;
 }
 
 void Cronet_EngineImpl::SetUdpDialer(
-    intptr_t (*dialer)(void*, const char*, uint16_t, char*, uint16_t*),
+    int (*dialer)(void*, const char*, uint16_t, char*, uint16_t*),
     void* context) {
   CHECK(!context_);
   udp_dialer_ = dialer;
@@ -558,6 +558,50 @@ void Cronet_EngineImpl::CloseAllConnections() {
         base::BindOnce(&base::WaitableEvent::Signal, base::Unretained(&done)));
   }
   done.Wait();
+}
+
+int32_t Cronet_EngineImpl::CloseIdleSpdySessionsForUrlAsync(
+    const char* url,
+    Cronet_CloseIdleSpdySessionsCallback callback,
+    void* callback_context) {
+  if (!url || !callback)
+    return net::ERR_INVALID_ARGUMENT;
+  const GURL parsed_url(url);
+  if (!parsed_url.is_valid() || !parsed_url.has_host() ||
+      parsed_url.EffectiveIntPort() <= 0) {
+    return net::ERR_INVALID_ARGUMENT;
+  }
+  const net::HostPortPair host_port_pair =
+      net::HostPortPair::FromURL(parsed_url);
+
+  if (!init_completed_.IsSignaled())
+    return net::ERR_UNEXPECTED;
+  base::AutoLock lock(lock_);
+  if (!context_)
+    return net::ERR_UNEXPECTED;
+  context_->PostTaskToNetworkThread(
+      FROM_HERE,
+      base::BindOnce(
+          [](CronetContext* ctx, const net::HostPortPair& host_port_pair,
+             Cronet_CloseIdleSpdySessionsCallback callback,
+             void* callback_context) {
+            int32_t result = net::ERR_UNEXPECTED;
+            auto* context = ctx->GetURLRequestContext();
+            if (context && context->http_transaction_factory()) {
+              auto* session =
+                  context->http_transaction_factory()->GetSession();
+              if (session) {
+                result = static_cast<int32_t>(
+                    session->spdy_session_pool()
+                        ->CloseCurrentIdleSessionsForHostPortPair(
+                            host_port_pair,
+                            "CloseIdleSpdySessionsForUrl()"));
+              }
+            }
+            callback(callback_context, result);
+          },
+          context_.get(), host_port_pair, callback, callback_context));
+  return net::ERR_IO_PENDING;
 }
 
 stream_engine* Cronet_EngineImpl::GetBidirectionalStreamEngine() {
@@ -591,6 +635,15 @@ CRONET_EXPORT stream_engine* Cronet_Engine_GetStreamEngine(
 CRONET_EXPORT void Cronet_Engine_CloseAllConnections(
     Cronet_EnginePtr engine) {
   static_cast<cronet::Cronet_EngineImpl*>(engine)->CloseAllConnections();
+}
+
+CRONET_EXPORT int32_t Cronet_Engine_CloseIdleSpdySessionsForUrlAsync(
+    Cronet_EnginePtr engine,
+    const char* url,
+    Cronet_CloseIdleSpdySessionsCallback callback,
+    void* context) {
+  return static_cast<cronet::Cronet_EngineImpl*>(engine)
+      ->CloseIdleSpdySessionsForUrlAsync(url, callback, context);
 }
 
 CRONET_EXPORT void Cronet_Engine_SetDialer(Cronet_EnginePtr engine,

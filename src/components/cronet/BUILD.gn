@@ -125,6 +125,15 @@ if (false) {
     ]
   }
 
+  executable("custom_dialer_regression_test") {
+    testonly = true
+    sources = [ "native/custom_dialer_regression_test.cc" ]
+    deps = [
+      "//base",
+      "//net",
+    ]
+  }
+
   # Shared library for Windows and Linux (purego mode).
   # On Windows, Go's CGO cannot link MSVC-compiled static libraries,
   # so we provide a DLL for runtime loading via purego + memmod.
@@ -155,6 +164,19 @@ if (false) {
         inputs = [ "cronet_exports.lst" ]
         ldflags =
             [ "-Wl,--version-script=" + rebase_path("cronet_exports.lst") ]
+      }
+
+      # SSL_set_reality_* are boringssl symbols (OPENSSL_EXPORT, which is
+      # empty in a static-boringssl build), so they are not covered by
+      # GRPC_SUPPORT_EXPORT / the Cronet_*|bidirectional_stream_* export set.
+      # purego looks them up at runtime, so force-export them from the shared lib.
+      if (is_win) {
+        ldflags = [
+          "/EXPORT:SSL_set_reality_global_config",
+          "/EXPORT:SSL_apply_reality_global_config_for_authority",
+          "/EXPORT:SSL_set_reality_global_config_for_authority",
+          "/EXPORT:SSL_set_reality_global_config_for_server_name",
+        ]
       }
     }
   }
