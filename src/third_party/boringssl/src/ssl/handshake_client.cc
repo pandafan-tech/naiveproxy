@@ -586,8 +586,9 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
 //
 // Matches xray-core's UConn.VerifyPeerCertificate (Xray-core/transport/
 // internet/reality/reality.go).
-static enum ssl_verify_result_t reality_verify_cert(SSL *ssl,
+static enum ssl_verify_result_t reality_verify_cert(SSL *opaque_ssl,
                                                     uint8_t *out_alert) {
+  auto *ssl = FromOpaque(opaque_ssl);
   *out_alert = SSL_AD_BAD_CERTIFICATE;
   if (ssl->s3 == nullptr || ssl->s3->hs == nullptr) {
     return ssl_verify_invalid;
@@ -653,7 +654,8 @@ static enum ssl_verify_result_t reality_verify_cert(SSL *ssl,
   return ssl_verify_ok;
 }
 
-extern "C" int SSL_reality_is_enabled(const SSL *ssl) {
+extern "C" int SSL_reality_is_enabled(const SSL *opaque_ssl) {
+  const auto *ssl = FromOpaque(opaque_ssl);
   if (ssl == nullptr || ssl->s3 == nullptr || ssl->s3->hs == nullptr) {
     return 0;
   }
@@ -694,11 +696,12 @@ extern "C" SSL *SSL_reality_pending_verify_ssl(void) {
   return tls_reality_pending_verify_ssl;
 }
 
-extern "C" int SSL_set_reality_config(SSL *ssl,
+extern "C" int SSL_set_reality_config(SSL *opaque_ssl,
                                       const uint8_t public_key[32],
                                       const uint8_t *short_id,
                                       size_t short_id_len,
                                       const uint8_t client_version[4]) {
+  auto *ssl = FromOpaque(opaque_ssl);
   if (ssl == nullptr || public_key == nullptr || short_id_len > 8) {
     return 0;
   }

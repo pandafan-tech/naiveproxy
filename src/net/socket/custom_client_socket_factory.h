@@ -42,11 +42,11 @@ class NET_EXPORT CustomClientSocketFactory : public ClientSocketFactory {
   //   - On failure: negative net error code
   // The returned socket can be AF_INET/AF_INET6 SOCK_DGRAM, AF_UNIX SOCK_DGRAM,
   // or AF_UNIX SOCK_STREAM (for Windows, with length-prefix framing).
-  using UdpDialerCallback =
-      base::RepeatingCallback<int(const std::string& address,
-                                       uint16_t port,
-                                       char* out_local_address,
-                                       uint16_t* out_local_port)>;
+  using UdpDialerCallback = base::RepeatingCallback<int(
+      const std::string& address,
+      uint16_t port,
+      char* out_local_address,
+      uint16_t* out_local_port)>;
 
   CustomClientSocketFactory(DialerCallback tcp_dialer,
                             UdpDialerCallback udp_dialer);
