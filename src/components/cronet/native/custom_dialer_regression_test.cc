@@ -20,6 +20,7 @@
 #include "net/base/address_list.h"
 #include "net/base/ip_address.h"
 #include "net/base/net_errors.h"
+#include "net/base/network_handle.h"
 #include "net/log/net_log_source.h"
 #include "net/socket/custom_client_socket_factory.h"
 #include "net/socket/transport_client_socket.h"
@@ -39,7 +40,8 @@ bool CanceledDialClosesReturnedDescriptor(
           &pending_completion),
       {});
   auto socket = factory.CreateTransportClientSocket(
-      addresses, nullptr, nullptr, nullptr, net::NetLogSource());
+      addresses, net::handles::kInvalidNetworkHandle, nullptr, nullptr, nullptr,
+      net::NetLogSource());
   if (socket->Connect(base::DoNothing()) != net::ERR_IO_PENDING ||
       !pending_completion) {
     return false;
@@ -79,7 +81,8 @@ int main() {
 
   const auto started_at = std::chrono::steady_clock::now();
   auto socket = factory.CreateTransportClientSocket(
-      addresses, nullptr, nullptr, nullptr, net::NetLogSource());
+      addresses, net::handles::kInvalidNetworkHandle, nullptr, nullptr, nullptr,
+      net::NetLogSource());
   const auto elapsed = std::chrono::steady_clock::now() - started_at;
   if (elapsed >= std::chrono::milliseconds(50) || dial_count != 0) {
     return 1;
