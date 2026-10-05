@@ -352,7 +352,13 @@ bool tls12_check_peer_sigalg(const SSL_HANDSHAKE *hs, uint8_t *out_alert,
   // The peer must have selected an algorithm that is consistent with its public
   // key, the TLS version, and what we advertised.
   Span<const uint16_t> sigalgs = tls12_get_verify_sigalgs(hs);
-  if (std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() ||
+  // REALITY: the server's Ed25519 CertificateVerify is accepted although the
+  // Chrome-shaped ClientHello does not offer Ed25519. uTLS clients behave the
+  // same way.
+  const bool reality_ed25519 =
+      hs->reality_enabled && sigalg == SSL_SIGN_ED25519;
+  if ((!reality_ed25519 &&
+       std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end()) ||
       !ssl_pkey_supports_algorithm(hs->ssl, pkey, sigalg, /*is_verify=*/true)) {
     OPENSSL_PUT_ERROR(SSL, SSL_R_WRONG_SIGNATURE_TYPE);
     *out_alert = SSL_AD_ILLEGAL_PARAMETER;

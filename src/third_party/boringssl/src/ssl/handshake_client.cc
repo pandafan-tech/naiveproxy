@@ -508,20 +508,9 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
     // and CHECK(GetSSLInfo()) fires later. Instead, the net stack patch
     // calls SSL_reality_is_enabled / SSL_reality_verify_peer_cert from
     // inside its VerifyCert() function so both paths converge.
-    static const uint16_t kRealityVerifySigalgs[] = {
-        SSL_SIGN_ED25519,
-        SSL_SIGN_ECDSA_SECP256R1_SHA256,
-        SSL_SIGN_ECDSA_SECP384R1_SHA384,
-        SSL_SIGN_RSA_PSS_RSAE_SHA256,
-        SSL_SIGN_RSA_PSS_RSAE_SHA384,
-        SSL_SIGN_RSA_PSS_RSAE_SHA512,
-        SSL_SIGN_RSA_PKCS1_SHA256,
-        SSL_SIGN_RSA_PKCS1_SHA384,
-        SSL_SIGN_RSA_PKCS1_SHA512,
-    };
-    SSL_set_verify_algorithm_prefs(
-        ssl, kRealityVerifySigalgs,
-        sizeof(kRealityVerifySigalgs) / sizeof(kRealityVerifySigalgs[0]));
+    //
+    // The advertised signature algorithms stay Chrome's.
+    // tls12_check_peer_sigalg accepts the REALITY Ed25519 CertificateVerify.
 
     // REALITY ALPN injection: cronet's HttpProxyConnectJob uses
     // AlpnMode::kDisabled for proxy CONNECT TLS handshakes (see
@@ -725,25 +714,9 @@ extern "C" int SSL_set_reality_config(SSL *opaque_ssl,
   // global-config branch in ssl_add_client_hello above). For embedders like
   // Cronet, the net stack's SSL_CTX-level custom_verify is what should fire;
   // it then calls SSL_reality_verify_peer_cert from the patched VerifyCert().
-  // REALITY uses Ed25519 leaf certs; ensure the client advertises Ed25519
-  // among accepted verification sigalgs so the TLS 1.3 CertificateVerify
-  // (signed with Ed25519 by the server) is acceptable. Keep the common
-  // RSA-PSS/ECDSA defaults alongside in case future REALITY variants ship
-  // non-Ed25519 borrowed certs.
-  static const uint16_t kRealityVerifySigalgs[] = {
-      SSL_SIGN_ED25519,
-      SSL_SIGN_ECDSA_SECP256R1_SHA256,
-      SSL_SIGN_ECDSA_SECP384R1_SHA384,
-      SSL_SIGN_RSA_PSS_RSAE_SHA256,
-      SSL_SIGN_RSA_PSS_RSAE_SHA384,
-      SSL_SIGN_RSA_PSS_RSAE_SHA512,
-      SSL_SIGN_RSA_PKCS1_SHA256,
-      SSL_SIGN_RSA_PKCS1_SHA384,
-      SSL_SIGN_RSA_PKCS1_SHA512,
-  };
-  SSL_set_verify_algorithm_prefs(ssl, kRealityVerifySigalgs,
-                                 sizeof(kRealityVerifySigalgs) /
-                                     sizeof(kRealityVerifySigalgs[0]));
+  // REALITY servers sign CertificateVerify with an Ed25519 leaf whatever the
+  // client advertised. Advertising Ed25519 would make this ClientHello differ
+  // from Chrome's, so tls12_check_peer_sigalg accepts it without listing it.
   return 1;
 }
 
