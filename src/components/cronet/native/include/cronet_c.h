@@ -6,6 +6,7 @@
 #define COMPONENTS_CRONET_NATIVE_INCLUDE_CRONET_C_H_
 
 #include <stdint.h>
+#include <stddef.h>
 
 #include "cronet_export.h"
 
@@ -41,6 +42,25 @@ CRONET_EXPORT stream_engine* Cronet_Engine_GetStreamEngine(
 // Returns nullptr if the PEM data is invalid or no valid certificates found.
 CRONET_EXPORT void* Cronet_CreateCertVerifierWithRootCerts(
     const char* pem_root_certs);
+
+// Runs on a certificate verification worker. Return 0 only after validating
+// the full chain, hostname, validity, and platform distrust policy. Buffers are
+// borrowed for this call. The verifier owns the context until all worker
+// requests finish, including requests canceled during engine shutdown.
+typedef int (*Cronet_CertificateVerifierFunc)(
+    void* context, const char* hostname, const uint8_t* const* certificates,
+    const size_t* certificate_lengths, size_t certificate_count,
+    const uint8_t* ocsp_response, size_t ocsp_response_length);
+
+typedef void (*Cronet_CertificateVerifierDestroyFunc)(void* context);
+
+// Installs host-provided certificate validation before StartWithParams. A
+// missing callback is an error; the engine does not fall back to Chrome roots.
+// On success ownership of context transfers to the verifier, which invokes
+// destroy_context exactly once after its final worker request is released.
+CRONET_EXPORT bool Cronet_Engine_SetCertificateVerifier(
+    Cronet_EnginePtr engine, Cronet_CertificateVerifierFunc verifier,
+    void* context, Cronet_CertificateVerifierDestroyFunc destroy_context);
 
 // Completion callback for custom TCP connection establishment. The dialer
 // must invoke this exactly once, from any thread.

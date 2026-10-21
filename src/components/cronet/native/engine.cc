@@ -31,6 +31,11 @@
 #include "net/base/hash_value.h"
 #include "net/base/proxy_delegate.h"
 #include "net/cert/cert_verify_proc.h"
+#include "net/cert/cert_verify_result.h"
+#include "net/cert/asn1_util.h"
+#include "net/cert/cert_status_flags.h"
+#include "crypto/hash.h"
+#include "third_party/boringssl/src/include/openssl/pool.h"
 #include "net/cert/cert_verify_proc_builtin.h"
 #include "net/cert/crl_set.h"
 #include "net/cert/ct_policy_enforcer.h"
@@ -743,6 +748,71 @@ class CustomRootSystemTrustStore : public net::SystemTrustStore {
 #endif
 };
 
+// The embedder owns the platform trust policy. MultiThreadedCertVerifier
+// keeps OS revocation/network checks off Cronet's network thread.
+class HostCertVerifyProc final : public net::CertVerifyProc {
+ public:
+  HostCertVerifyProc(Cronet_CertificateVerifierFunc callback, void* context,
+                     Cronet_CertificateVerifierDestroyFunc destroy_context)
+      : CertVerifyProc(net::CRLSet::BuiltinCRLSet()),
+        callback_(callback), context_(context), destroy_context_(destroy_context) {}
+
+ protected:
+  ~HostCertVerifyProc() override { destroy_context_(context_); }
+
+ private:
+  int VerifyInternal(net::X509Certificate* cert, const std::string& hostname,
+                     const std::string& ocsp_response,
+                     const std::string& sct_list, int flags,
+                     net::CertVerifyResult* result,
+                     const net::NetLogWithSource& net_log) override {
+    std::vector<const uint8_t*> certificates;
+    std::vector<size_t> lengths;
+    for (const auto& buffer : cert->cert_buffers()) {
+      certificates.push_back(CRYPTO_BUFFER_data(buffer.get()));
+      lengths.push_back(CRYPTO_BUFFER_len(buffer.get()));
+      std::string_view spki;
+      if (!net::asn1::ExtractSPKIFromDERCert(
+              std::string_view(reinterpret_cast<const char*>(certificates.back()),
+                               lengths.back()), &spki)) {
+        result->cert_status |= net::CERT_STATUS_INVALID;
+        return net::ERR_CERT_INVALID;
+      }
+      result->public_key_hashes.push_back(
+          crypto::hash::Sha256(base::as_byte_span(spki)));
+    }
+    int status = callback_(
+        context_, hostname.c_str(), certificates.data(), lengths.data(),
+        certificates.size(),
+        reinterpret_cast<const uint8_t*>(ocsp_response.data()),
+        ocsp_response.size());
+    switch (status) {
+      case net::OK:
+        return net::OK;
+      case net::ERR_CERT_COMMON_NAME_INVALID:
+        result->cert_status |= net::CERT_STATUS_COMMON_NAME_INVALID;
+        break;
+      case net::ERR_CERT_DATE_INVALID:
+        result->cert_status |= net::CERT_STATUS_DATE_INVALID;
+        break;
+      case net::ERR_CERT_AUTHORITY_INVALID:
+        result->cert_status |= net::CERT_STATUS_AUTHORITY_INVALID;
+        break;
+      case net::ERR_CERT_REVOKED:
+        result->cert_status |= net::CERT_STATUS_REVOKED;
+        break;
+      default:
+        result->cert_status |= net::CERT_STATUS_INVALID;
+        return net::ERR_CERT_INVALID;
+    }
+    return status;
+  }
+
+  Cronet_CertificateVerifierFunc callback_;
+  void* context_;
+  Cronet_CertificateVerifierDestroyFunc destroy_context_;
+};
+
 // A CertVerifyProcFactory that always returns the same fixed CertVerifyProc.
 class FixedCertVerifyProcFactory : public net::CertVerifyProcFactory {
  public:
@@ -765,6 +835,20 @@ class FixedCertVerifyProcFactory : public net::CertVerifyProcFactory {
 };
 
 }  // namespace
+
+CRONET_EXPORT bool Cronet_Engine_SetCertificateVerifier(
+    Cronet_EnginePtr engine, Cronet_CertificateVerifierFunc callback,
+    void* context, Cronet_CertificateVerifierDestroyFunc destroy_context) {
+  if (!engine || !callback || !destroy_context) {
+    return false;
+  }
+  auto proc = base::MakeRefCounted<HostCertVerifyProc>(callback, context, destroy_context);
+  auto factory = base::MakeRefCounted<FixedCertVerifyProcFactory>(proc);
+  auto verifier = std::make_unique<net::MultiThreadedCertVerifier>(proc, factory);
+  static_cast<cronet::Cronet_EngineImpl*>(engine)
+      ->SetMockCertVerifierForTesting(std::move(verifier));
+  return true;
+}
 
 CRONET_EXPORT void* Cronet_CreateCertVerifierWithRootCerts(
     const char* pem_root_certs) {
