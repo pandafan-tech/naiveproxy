@@ -135,6 +135,20 @@ bool TlsClientHandshaker::CryptoConnect() {
     return false;
   }
 
+  // cronet-reality: apply the REALITY-QUIC config registered for this
+  // authority (SNI + route port), as SSLClientSocketImpl::Init does for TCP.
+  // A missing entry leaves the connection plain QUIC.
+  if (!server_id_.host().empty() &&
+      !SSL_apply_reality_global_config_for_authority(
+          ssl(), server_id_.host().c_str(), server_id_.port())) {
+    CloseConnection(QUIC_HANDSHAKE_FAILED,
+                    "Client failed to apply REALITY configuration");
+    return false;
+  }
+  // REALITY-QUIC writes its auth tag after any PSK binder, so it never
+  // resumes; skip the session cache so no 0-RTT state is prepared.
+  const bool reality_configured = SSL_reality_is_configured(ssl()) == 1;
+
   if (!SetAlpn()) {
     CloseConnection(QUIC_HANDSHAKE_FAILED, "Client failed to set ALPN");
     return false;
@@ -148,7 +162,7 @@ bool TlsClientHandshaker::CryptoConnect() {
   }
 
   // Set a session to resume, if there is one.
-  if (session_cache_) {
+  if (session_cache_ && !reality_configured) {
     cached_state_ = session_cache_->Lookup(
         server_id_, session()->GetClock()->WallNow(), SSL_get_SSL_CTX(ssl()));
   }

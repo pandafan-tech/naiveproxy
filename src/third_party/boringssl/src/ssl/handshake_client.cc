@@ -478,6 +478,95 @@ static bool reality_apply_to_client_hello(SSL_HANDSHAKE *hs,
   return true;
 }
 
+// reality_resolve_global_config applies the server-name or fallback global
+// REALITY config when no per-SSL config exists. This is how embedders that
+// don't have direct access to SSL objects (e.g., cronet via cronet-go) opt
+// outgoing TLS connections into REALITY for the proxy server's session. It
+// runs before the session-resumption decision so REALITY-QUIC can refuse to
+// offer a session.
+static void reality_resolve_global_config(SSL_HANDSHAKE *hs) {
+  if (hs->reality_enabled) {
+    return;
+  }
+  RealityGlobalConfig snap;
+  if (reality_global_snapshot(hs->ssl, &snap)) {
+    hs->reality_enabled = true;
+    OPENSSL_memcpy(hs->reality_server_pubkey, snap.server_pubkey, 32);
+    OPENSSL_memcpy(hs->reality_short_id, snap.short_id, 8);
+    OPENSSL_memcpy(hs->reality_client_version, snap.client_version, 4);
+  }
+}
+
+// reality_quic_apply_to_client_hello writes the REALITY-QUIC v1 payload into
+// ClientHello.random of the serialized ClientHello in |msg| and into
+// |ssl->s3->client_random|. On entry the random is 32 zero bytes and the
+// session_id is empty. Called after finish_message (and after any PSK binder)
+// but before add_message, so the transcript sees the final bytes.
+//
+//   [0]     handshake type, [1..3] length, [4..5] legacy_version
+//   [6..37] ClientHello.random, [38] session_id length (0)
+static bool reality_quic_apply_to_client_hello(SSL_HANDSHAKE *hs,
+                                               Span<uint8_t> msg) {
+  SSLImpl *const ssl = hs->ssl;
+  if (msg.size() < 39 || msg[0] != SSL3_MT_CLIENT_HELLO || msg[38] != 0) {
+    return false;
+  }
+  for (size_t i = 6; i < 38; i++) {
+    if (msg[i] != 0) {
+      return false;
+    }
+  }
+
+  uint8_t client_priv[32];
+  if (!reality_extract_x25519_priv(hs, client_priv)) {
+    return false;
+  }
+  uint8_t shared[32];
+  const int x25519_ok = X25519(shared, client_priv, hs->reality_server_pubkey);
+  OPENSSL_cleanse(client_priv, sizeof(client_priv));
+  if (!x25519_ok) {
+    return false;
+  }
+  static const char kInfo[] = "REALITY-QUIC";
+  const int hkdf_ok =
+      HKDF(hs->reality_auth_key, sizeof(hs->reality_auth_key), EVP_sha256(),
+           shared, sizeof(shared), /*salt=*/nullptr, /*salt_len=*/0,
+           reinterpret_cast<const uint8_t *>(kInfo), sizeof(kInfo) - 1);
+  OPENSSL_cleanse(shared, sizeof(shared));
+  if (!hkdf_ok) {
+    return false;
+  }
+
+  uint8_t plaintext[16];
+  OPENSSL_memcpy(plaintext, hs->reality_client_version, 4);
+  uint32_t now = static_cast<uint32_t>(time(nullptr));
+  plaintext[4] = static_cast<uint8_t>(now >> 24);
+  plaintext[5] = static_cast<uint8_t>(now >> 16);
+  plaintext[6] = static_cast<uint8_t>(now >> 8);
+  plaintext[7] = static_cast<uint8_t>(now);
+  OPENSSL_memcpy(plaintext + 8, hs->reality_short_id, 8);
+
+  // The X25519 share is fresh for every ClientHello, so auth_key is used
+  // with this fixed nonce exactly once.
+  static const uint8_t kNonce[12] = {0};
+  bssl::ScopedEVP_AEAD_CTX aead;
+  uint8_t out[32];
+  size_t out_len = 0;
+  if (!EVP_AEAD_CTX_init(aead.get(), EVP_aead_aes_256_gcm(),
+                         hs->reality_auth_key, sizeof(hs->reality_auth_key),
+                         EVP_AEAD_DEFAULT_TAG_LENGTH, /*impl=*/nullptr) ||
+      !EVP_AEAD_CTX_seal(aead.get(), out, &out_len, sizeof(out), kNonce,
+                         sizeof(kNonce), plaintext, sizeof(plaintext),
+                         /*ad=*/msg.data(), /*ad_len=*/msg.size()) ||
+      out_len != sizeof(out)) {
+    return false;
+  }
+  OPENSSL_memcpy(msg.data() + 6, out, sizeof(out));
+  OPENSSL_memcpy(ssl->s3->client_random, out, sizeof(out));
+  hs->reality_auth_key_ready = true;
+  return true;
+}
+
 bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
   SSLImpl *const ssl = hs->ssl;
   ScopedCBB cbb;
@@ -485,19 +574,8 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
   ssl_client_hello_type_t type = hs->selected_ech_config
                                      ? ssl_client_hello_outer
                                      : ssl_client_hello_unencrypted;
-  // If per-SSL REALITY was not explicitly configured but a global is set,
-  // apply the global to this SSL. This is how embedders that don't have
-  // direct access to SSL objects (e.g., cronet via cronet-go) opt every
-  // outgoing TLS connection into REALITY for the proxy server's session.
-  if (!hs->reality_enabled) {
-    RealityGlobalConfig snap;
-    if (reality_global_snapshot(ssl, &snap)) {
-      hs->reality_enabled = true;
-      OPENSSL_memcpy(hs->reality_server_pubkey, snap.server_pubkey, 32);
-      OPENSSL_memcpy(hs->reality_short_id, snap.short_id, 8);
-      OPENSSL_memcpy(hs->reality_client_version, snap.client_version, 4);
-    }
-  }
+  reality_resolve_global_config(hs);
+  const bool reality_quic = hs->reality_enabled && SSL_is_quic(ssl);
 
   if (hs->reality_enabled) {
     // NOTE: do NOT install SSL_set_custom_verify here. The Cronet net stack
@@ -528,10 +606,22 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
     }
   }
 
-  // REALITY: force session_id to 32 zero bytes BEFORE serialization so the
-  // AAD-bound bytes match what the server will reconstruct. We patch in
+  // REALITY-QUIC: the payload replaces ClientHello.random, which is zero
+  // while serializing (it is part of the AEAD's AAD). A HelloRetryRequest
+  // would need the same random in the second ClientHello; it is not
+  // supported.
+  if (reality_quic) {
+    if (ssl->s3->used_hello_retry_request) {
+      OPENSSL_PUT_ERROR(SSL, SSL_R_HANDSHAKE_FAILURE_ON_CLIENT_HELLO);
+      return false;
+    }
+    OPENSSL_memset(ssl->s3->client_random, 0, sizeof(ssl->s3->client_random));
+  }
+
+  // REALITY (TCP): force session_id to 32 zero bytes BEFORE serialization so
+  // the AAD-bound bytes match what the server will reconstruct. We patch in
   // the encrypted payload AFTER finish_message but BEFORE add_message.
-  if (hs->reality_enabled) {
+  if (hs->reality_enabled && !reality_quic) {
     hs->session_id.clear();
     if (!hs->session_id.TryResize(32)) {
       return false;
@@ -554,7 +644,10 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
   // session_id bytes.
   if (hs->reality_enabled) {
     assert(type != ssl_client_hello_outer);
-    if (!reality_apply_to_client_hello(hs, Span(msg))) {
+    const bool applied = reality_quic
+                             ? reality_quic_apply_to_client_hello(hs, Span(msg))
+                             : reality_apply_to_client_hello(hs, Span(msg));
+    if (!applied) {
       OPENSSL_PUT_ERROR(SSL, SSL_R_HANDSHAKE_FAILURE_ON_CLIENT_HELLO);
       return false;
     }
@@ -603,21 +696,38 @@ static enum ssl_verify_result_t reality_verify_cert(SSL *opaque_ssl,
     return ssl_verify_invalid;
   }
 
+  // The proof is HMAC-SHA512(auth_key, leaf public key). TCP REALITY uses an
+  // Ed25519 leaf (32-byte raw key). REALITY-QUIC uses an ECDSA P-256 leaf;
+  // the HMAC input is the subjectPublicKey bits (the uncompressed point).
   EVP_PKEY *pkey = X509_get0_pubkey(x509.get());
-  if (pkey == nullptr || EVP_PKEY_id(pkey) != EVP_PKEY_ED25519) {
-    return ssl_verify_invalid;
-  }
   uint8_t ed25519_pub[32];
-  size_t ed25519_pub_len = sizeof(ed25519_pub);
-  if (!EVP_PKEY_get_raw_public_key(pkey, ed25519_pub, &ed25519_pub_len) ||
-      ed25519_pub_len != 32) {
-    return ssl_verify_invalid;
+  const uint8_t *proof_input = nullptr;
+  size_t proof_input_len = 0;
+  if (SSL_is_quic(ssl)) {
+    const ASN1_BIT_STRING *bits = X509_get0_pubkey_bitstr(x509.get());
+    if (pkey == nullptr || EVP_PKEY_id(pkey) != EVP_PKEY_EC ||
+        bits == nullptr || ASN1_STRING_length(bits) != 65) {
+      return ssl_verify_invalid;
+    }
+    proof_input = ASN1_STRING_get0_data(bits);
+    proof_input_len = 65;
+  } else {
+    if (pkey == nullptr || EVP_PKEY_id(pkey) != EVP_PKEY_ED25519) {
+      return ssl_verify_invalid;
+    }
+    size_t ed25519_pub_len = sizeof(ed25519_pub);
+    if (!EVP_PKEY_get_raw_public_key(pkey, ed25519_pub, &ed25519_pub_len) ||
+        ed25519_pub_len != 32) {
+      return ssl_verify_invalid;
+    }
+    proof_input = ed25519_pub;
+    proof_input_len = sizeof(ed25519_pub);
   }
 
   uint8_t expected[64];
   unsigned int expected_len = 0;
   if (HMAC(EVP_sha512(), hs->reality_auth_key, sizeof(hs->reality_auth_key),
-           ed25519_pub, sizeof(ed25519_pub), expected, &expected_len) ==
+           proof_input, proof_input_len, expected, &expected_len) ==
           nullptr ||
       expected_len != 64) {
     return ssl_verify_invalid;
@@ -650,6 +760,14 @@ extern "C" int SSL_reality_is_enabled(const SSL *opaque_ssl) {
   }
   SSL_HANDSHAKE *hs = ssl->s3->hs.get();
   return (hs->reality_enabled && hs->reality_auth_key_ready) ? 1 : 0;
+}
+
+extern "C" int SSL_reality_is_configured(const SSL *opaque_ssl) {
+  const auto *ssl = FromOpaque(opaque_ssl);
+  if (ssl == nullptr || ssl->s3 == nullptr || ssl->s3->hs == nullptr) {
+    return 0;
+  }
+  return ssl->s3->hs->reality_enabled ? 1 : 0;
 }
 
 extern "C" int SSL_reality_verify_peer_cert(SSL *ssl) {
@@ -868,6 +986,11 @@ static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
     return ssl_hs_error;
   }
 
+  // REALITY-QUIC writes its payload after any PSK binder and the server
+  // issues no tickets, so it must never offer a session (resumption would
+  // also re-verify the cached leaf against the new auth key and fail).
+  reality_resolve_global_config(hs);
+
   // If the configured session has expired or is not usable, drop it. We also do
   // not offer sessions on renegotiation.
   SSLSessionType session_type = SSLSessionType::kNotResumable;
@@ -890,6 +1013,7 @@ static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
         hs->pake_prover != nullptr ||
         !ssl_session_is_time_valid(ssl, ssl->session.get()) ||
         SSL_is_quic(ssl) != int{ssl->session->is_quic} ||
+        (hs->reality_enabled && SSL_is_quic(ssl)) ||
         ssl->s3->initial_handshake_complete) {
       ssl_set_session(ssl, nullptr);
       session_type = SSLSessionType::kNotResumable;

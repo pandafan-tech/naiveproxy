@@ -5922,10 +5922,21 @@ OPENSSL_EXPORT int SSL_set1_sigalgs_list(SSL *ssl, const char *str);
 
 // REALITY anti-censorship handshake (cronet-reality patch series).
 //
-// When configured, the client packs an authenticated payload into the
-// 32-byte legacy_session_id field of ClientHello (X25519 ECDH against the
-// server's public key, HKDF-SHA256, AES-256-GCM with AAD = ClientHello bytes
-// with session_id zeroed). The server's reply is verified by comparing
+// Over TCP, the client packs an authenticated payload into the 32-byte
+// legacy_session_id field of ClientHello (X25519 ECDH against the server's
+// public key, HKDF-SHA256, AES-256-GCM with AAD = ClientHello bytes with
+// session_id zeroed).
+//
+// Over QUIC (REALITY-QUIC v1), legacy_session_id stays empty as in Chrome's
+// QUIC ClientHello and the payload replaces ClientHello.random:
+//   auth_key = HKDF-SHA256(X25519(client X25519 share, server key), salt="",
+//                          info="REALITY-QUIC")
+//   random   = AES-256-GCM-Seal(auth_key, nonce=0^12,
+//                               version | unix_time_be | short_id,
+//                               AAD = ClientHello with random zeroed)
+// The signature_algorithms list stays at the caller's (Chrome's) default;
+// the server presents an ECDSA P-256 leaf. REALITY-QUIC never offers a
+// session for resumption: the payload is written after any PSK binder. The server's reply is verified by comparing
 // HMAC-SHA512(auth_key, ed25519_peer_pub) against the leaf certificate's
 // Signature field — on success the borrowed cert is accepted without
 // chain verification; on failure the client falls through to standard
@@ -6000,6 +6011,12 @@ OPENSSL_EXPORT int SSL_apply_reality_global_config_for_authority(
 // SSLClientSocketImpl to know whether to skip the standard cert-chain
 // verification step in favor of the REALITY HMAC verify.
 OPENSSL_EXPORT int SSL_reality_is_enabled(const SSL *ssl);
+
+// SSL_reality_is_configured returns 1 if REALITY has been configured on
+// |ssl| (per-SSL or by SSL_apply_reality_global_config_for_authority),
+// before the ClientHello is written. QUIC uses it to skip session-cache
+// lookups for REALITY-QUIC connections.
+OPENSSL_EXPORT int SSL_reality_is_configured(const SSL *ssl);
 
 // SSL_reality_verify_peer_cert runs the REALITY cert HMAC verify (see
 // docs/reality-wire-format.md): extracts the leaf cert from the peer
