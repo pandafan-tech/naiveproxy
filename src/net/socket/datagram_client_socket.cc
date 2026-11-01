@@ -17,4 +17,14 @@ int DatagramClientSocket::WriteBatch(
   return ERR_NOT_IMPLEMENTED;
 }
 
+bool DatagramClientSocket::SupportsReadBatch() const {
+  return false;
+}
+
+int DatagramClientSocket::ReadBatch(base::span<uint8_t> buffer,
+                                    size_t stride,
+                                    base::span<size_t> lengths) {
+  return ERR_NOT_IMPLEMENTED;
+}
+
 }  // namespace net

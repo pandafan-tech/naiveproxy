@@ -48,6 +48,10 @@ extern "C" ssize_t sendmsg_x(int s,
                              const struct msghdr_x* msgp,
                              u_int cnt,
                              int flags);
+extern "C" ssize_t recvmsg_x(int s,
+                             const struct msghdr_x* msgp,
+                             u_int cnt,
+                             int flags);
 #endif
 #endif
 #include "base/numerics/byte_conversions.h"
@@ -198,6 +202,29 @@ class ConnectedDatagramClientSocket : public DatagramClientSocket {
       size_t max_message_size,
       base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
           callback) override {
+    // Drain datagrams the kernel already queued in one system call. When
+    // none is queued, the emulator waits with Read() as before.
+    if (SupportsReadBatch()) {
+      std::array<size_t, 16> lengths = {};
+      const int n = ReadBatch(buf->span().first(buf_len), max_message_size,
+                              lengths);
+      if (n > 0) {
+        DatagramsMetadata datagrams;
+        datagrams.reserve(static_cast<size_t>(n));
+        for (size_t i = 0; i < static_cast<size_t>(n); ++i) {
+          // A slot-sized length means truncated; length 0 makes the reader
+          // skip it, as the single-datagram path drops oversized packets.
+          datagrams.push_back(
+              {.offset = i * max_message_size,
+               .length = lengths[i] < max_message_size ? lengths[i] : 0,
+               .tos = 0});
+        }
+        return datagrams;
+      }
+      if (n != ERR_IO_PENDING) {
+        return base::unexpected(static_cast<Error>(n));
+      }
+    }
     return read_multiple_emulator_.ReadMultiple(buf, buf_len, max_message_size,
                                                 std::move(callback));
   }
@@ -335,6 +362,75 @@ class ConnectedDatagramClientSocket : public DatagramClientSocket {
       }
     }
     return static_cast<int>(sent);
+#else
+    return ERR_NOT_IMPLEMENTED;
+#endif
+  }
+
+  bool SupportsReadBatch() const override { return SupportsWriteBatch(); }
+
+  // Reads with recvmsg_x (Apple) or recvmmsg (Linux/Android) on the
+  // non-blocking socket.
+  int ReadBatch(base::span<uint8_t> buffer,
+                size_t stride,
+                base::span<size_t> lengths) override {
+#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) || \
+    BUILDFLAG(IS_CHROMEOS)
+    if (!SupportsReadBatch()) {
+      return ERR_NOT_IMPLEMENTED;
+    }
+    constexpr size_t kMaxPerCall = 16;
+    const size_t count =
+        std::min({kMaxPerCall, lengths.size(), buffer.size() / stride});
+    if (count == 0) {
+      return ERR_INVALID_ARGUMENT;
+    }
+    std::array<struct iovec, kMaxPerCall> iov = {};
+#if BUILDFLAG(IS_APPLE)
+    std::array<struct msghdr_x, kMaxPerCall> hdrs = {};
+#else
+    std::array<struct mmsghdr, kMaxPerCall> hdrs = {};
+#endif
+    for (size_t i = 0; i < count; ++i) {
+      iov[i].iov_base = buffer.subspan(i * stride, stride).data();
+      iov[i].iov_len = stride;
+#if BUILDFLAG(IS_APPLE)
+      hdrs[i].msg_iov = &iov[i];
+      hdrs[i].msg_iovlen = 1;
+#else
+      hdrs[i].msg_hdr.msg_iov = &iov[i];
+      hdrs[i].msg_hdr.msg_iovlen = 1;
+#endif
+    }
+#if BUILDFLAG(IS_APPLE)
+    const ssize_t n = HANDLE_EINTR(recvmsg_x(socket_->socket_fd(), hdrs.data(),
+                                             static_cast<u_int>(count), 0));
+#else
+    const ssize_t n = HANDLE_EINTR(
+        recvmmsg(socket_->socket_fd(), hdrs.data(),
+                 static_cast<unsigned int>(count), MSG_DONTWAIT, nullptr));
+#endif
+    if (n < 0) {
+      const int os_error = errno;
+      if (os_error == EAGAIN || os_error == EWOULDBLOCK) {
+        return ERR_IO_PENDING;
+      }
+      return MapSystemError(os_error);
+    }
+    if (n == 0) {
+      return ERR_IO_PENDING;
+    }
+    for (size_t i = 0; i < static_cast<size_t>(n); ++i) {
+#if BUILDFLAG(IS_APPLE)
+      const bool truncated = (hdrs[i].msg_flags & MSG_TRUNC) != 0;
+      const size_t length = hdrs[i].msg_datalen;
+#else
+      const bool truncated = (hdrs[i].msg_hdr.msg_flags & MSG_TRUNC) != 0;
+      const size_t length = hdrs[i].msg_len;
+#endif
+      lengths[i] = truncated ? stride : std::min(length, stride);
+    }
+    return static_cast<int>(n);
 #else
     return ERR_NOT_IMPLEMENTED;
 #endif

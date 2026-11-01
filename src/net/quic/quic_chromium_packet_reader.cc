@@ -43,8 +43,11 @@ QuicChromiumPacketReader::QuicChromiumPacketReader(
     const NetLogWithSource& net_log)
     : socket_(std::move(socket)),
       visitor_(visitor),
+      // Sockets that drain several queued datagrams per system call use
+      // ReadMultiple regardless of the feature (cronet-reality).
       use_read_multiple_(
-          base::FeatureList::IsEnabled(features::kQuicUseReadMultiple)),
+          base::FeatureList::IsEnabled(features::kQuicUseReadMultiple) ||
+          socket_->SupportsReadBatch()),
       clock_(clock),
       yield_after_packets_(yield_after_packets),
       yield_after_duration_(yield_after_duration),
@@ -194,6 +197,7 @@ void QuicChromiumPacketReader::OnReadComplete(int result) {
 
 void QuicChromiumPacketReader::OnReadMultipleComplete(
     base::expected<DatagramsMetadata, Error> result) {
+  QuicChromiumPacketWriter::ScopedFlushDeferral flush_deferral;
   if (ProcessReadMultipleResult(std::move(result))) {
     StartReading();
   }
@@ -273,6 +277,7 @@ bool QuicChromiumPacketReader::ProcessPendingPackets() {
 }
 
 void QuicChromiumPacketReader::ResumeProcessingPendingPackets() {
+  QuicChromiumPacketWriter::ScopedFlushDeferral flush_deferral;
   if (ProcessPendingPackets()) {
     StartReading();
   }

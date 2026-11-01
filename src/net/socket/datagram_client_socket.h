@@ -160,6 +160,17 @@ class NET_EXPORT_PRIVATE DatagramClientSocket : public DatagramSocket,
   // Write(), which keeps the single-datagram blocking and error semantics.
   virtual bool SupportsWriteBatch() const;
   virtual int WriteBatch(base::span<const base::span<const uint8_t>> packets);
+
+  // Batched datagram reads (cronet-reality). ReadBatch() never blocks: it
+  // reads up to |lengths|.size() datagrams into consecutive |stride|-byte
+  // slots of |buffer|, stores each datagram's length in |lengths| (a length
+  // of |stride| means the datagram did not fit and was truncated), and
+  // returns how many it read, ERR_IO_PENDING when none is available, or a net
+  // error. Read() remains the way to wait for data.
+  virtual bool SupportsReadBatch() const;
+  virtual int ReadBatch(base::span<uint8_t> buffer,
+                        size_t stride,
+                        base::span<size_t> lengths);
 };
 
 }  // namespace net
