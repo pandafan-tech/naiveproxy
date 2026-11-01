@@ -5,6 +5,8 @@
 #ifndef NET_SOCKET_SOCKET_BIO_ADAPTER_H_
 #define NET_SOCKET_SOCKET_BIO_ADAPTER_H_
 
+#include <vector>
+
 #include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
@@ -90,6 +92,25 @@ class NET_EXPORT_PRIVATE SocketBIOAdapter {
   // Returns the allocation size estimate in bytes.
   size_t GetAllocationSize() const;
 
+  // While a ScopedWriteCoalescing exists on this thread, BIOWrite() keeps
+  // data in the write buffer instead of writing each TLS record to the
+  // socket; the outermost scope writes every buffer when it ends, and a full
+  // buffer is written at once. SpdySession holds one across its write loop,
+  // so the records of several HTTP/2 frames leave in one socket write
+  // (cronet-reality).
+  class NET_EXPORT_PRIVATE ScopedWriteCoalescing {
+   public:
+    ScopedWriteCoalescing();
+    ScopedWriteCoalescing(const ScopedWriteCoalescing&) = delete;
+    ScopedWriteCoalescing& operator=(const ScopedWriteCoalescing&) = delete;
+    ~ScopedWriteCoalescing();
+
+   private:
+    friend class SocketBIOAdapter;
+    bool outermost_;
+    std::vector<base::WeakPtr<SocketBIOAdapter>> deferred_;
+  };
+
  private:
   int BIORead(base::span<uint8_t> out);
   void HandleSocketReadResult(int result);
@@ -98,6 +119,8 @@ class NET_EXPORT_PRIVATE SocketBIOAdapter {
 
   int BIOWrite(base::span<const uint8_t> in);
   void SocketWrite();
+  // Writes data a ScopedWriteCoalescing held back.
+  void FlushCoalescedWrite();
   void HandleSocketWriteResult(int result);
   void OnSocketWriteComplete(int result);
   void CallOnReadReady();
@@ -144,6 +167,8 @@ class NET_EXPORT_PRIVATE SocketBIOAdapter {
   // Write() in progress. If OK, there is no socket Write() in progress and none
   // have failed.
   int write_error_ = OK;
+  // True while buffered data waits for the end of a ScopedWriteCoalescing.
+  bool write_flush_deferred_ = false;
 
   raw_ptr<Delegate> delegate_;
 

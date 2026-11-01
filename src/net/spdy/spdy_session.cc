@@ -58,6 +58,7 @@
 #include "net/nqe/network_quality_estimator.h"
 #include "net/quic/quic_http_utils.h"
 #include "net/socket/socket.h"
+#include "net/socket/socket_bio_adapter.h"
 #include "net/socket/ssl_client_socket.h"
 #include "net/spdy/alps_decoder.h"
 #include "net/spdy/header_coalescer.h"
@@ -2127,6 +2128,9 @@ int SpdySession::DoWriteLoop(WriteState expected_write_state, int result) {
   CHECK(!in_io_loop_);
   DCHECK_NE(write_state_, WRITE_STATE_IDLE);
   DCHECK_EQ(write_state_, expected_write_state);
+
+  // The frames this loop writes leave in as few socket writes as possible.
+  SocketBIOAdapter::ScopedWriteCoalescing write_coalescing;
 
   in_io_loop_ = true;
 

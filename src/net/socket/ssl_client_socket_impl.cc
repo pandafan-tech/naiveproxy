@@ -87,6 +87,15 @@ const int kCertVerifyPending = 1;
 // Default size of the internal BoringSSL buffers.
 const int kDefaultOpenSSLBufferSize = 17 * 1024;
 
+// Write buffer for coalescing several TLS records into one socket write
+// (SocketBIOAdapter::ScopedWriteCoalescing). iOS network extensions keep the
+// default for their memory limit (cronet-reality).
+#if BUILDFLAG(IS_IOS)
+const int kWriteBufferSize = kDefaultOpenSSLBufferSize;
+#else
+const int kWriteBufferSize = 256 * 1024;
+#endif
+
 base::DictValue NetLogPrivateKeyOperationParams(uint16_t algorithm,
                                                 SSLPrivateKey* key) {
   return base::DictValue()
@@ -741,8 +750,7 @@ int SSLClientSocketImpl::Init() {
   }
 
   transport_adapter_ = std::make_unique<SocketBIOAdapter>(
-      stream_socket_.get(), kDefaultOpenSSLBufferSize,
-      kDefaultOpenSSLBufferSize, this);
+      stream_socket_.get(), kDefaultOpenSSLBufferSize, kWriteBufferSize, this);
   BIO* transport_bio = transport_adapter_->bio();
 
   BIO_up_ref(transport_bio);  // SSL_set0_rbio takes ownership.

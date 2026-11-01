@@ -212,6 +212,49 @@ void SocketBIOAdapter::OnSocketReadIfReadyComplete(int result) {
   delegate_->OnReadReady();
 }
 
+namespace {
+// The outermost ScopedWriteCoalescing on this thread, if any.
+thread_local SocketBIOAdapter::ScopedWriteCoalescing* g_write_coalescing =
+    nullptr;
+}  // namespace
+
+SocketBIOAdapter::ScopedWriteCoalescing::ScopedWriteCoalescing()
+    : outermost_(g_write_coalescing == nullptr) {
+  if (outermost_) {
+    g_write_coalescing = this;
+  }
+}
+
+SocketBIOAdapter::ScopedWriteCoalescing::~ScopedWriteCoalescing() {
+  if (!outermost_) {
+    return;
+  }
+  g_write_coalescing = nullptr;
+  std::vector<base::WeakPtr<SocketBIOAdapter>> deferred;
+  deferred.swap(deferred_);
+  for (const auto& adapter : deferred) {
+    if (adapter) {
+      adapter->FlushCoalescedWrite();
+    }
+  }
+}
+
+void SocketBIOAdapter::FlushCoalescedWrite() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!write_flush_deferred_) {
+    return;
+  }
+  write_flush_deferred_ = false;
+  SocketWrite();
+  // As in BIOWrite(): report a synchronous write error to a blocked read.
+  if (write_error_ != OK && write_error_ != ERR_IO_PENDING &&
+      read_result_ == ERR_IO_PENDING) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(&SocketBIOAdapter::CallOnReadReady,
+                                  weak_factory_.GetWeakPtr()));
+  }
+}
+
 int SocketBIOAdapter::BIOWrite(base::span<const uint8_t> in) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (in.empty()) {
@@ -219,8 +262,9 @@ int SocketBIOAdapter::BIOWrite(base::span<const uint8_t> in) {
   }
 
   // If the write buffer is not empty, there must be a pending Write() to flush
-  // it.
-  CHECK(write_buffer_used_ == 0 || write_error_ == ERR_IO_PENDING);
+  // it, or a ScopedWriteCoalescing that will.
+  CHECK(write_buffer_used_ == 0 || write_error_ == ERR_IO_PENDING ||
+        write_flush_deferred_);
 
   // If a previous Write() failed, report the error.
   if (write_error_ != OK && write_error_ != ERR_IO_PENDING) {
@@ -275,7 +319,17 @@ int SocketBIOAdapter::BIOWrite(base::span<const uint8_t> in) {
         write_buffer_used_ == static_cast<size_t>(write_buffer_->capacity()));
 
   // Schedule a socket Write() if necessary. (The ring buffer may previously
-  // have been empty.)
+  // have been empty.) Inside a ScopedWriteCoalescing, wait for more records
+  // unless the buffer is full.
+  if (g_write_coalescing != nullptr && write_error_ == OK &&
+      write_buffer_used_ < static_cast<size_t>(write_buffer_->capacity())) {
+    if (!write_flush_deferred_) {
+      write_flush_deferred_ = true;
+      g_write_coalescing->deferred_.push_back(weak_factory_.GetWeakPtr());
+    }
+    return bytes_copied;
+  }
+  write_flush_deferred_ = false;
   SocketWrite();
 
   // If a read-interrupting write error was synchronously discovered,
