@@ -970,6 +970,7 @@ component("net") {
     "socket/connect_job_params_factory.cc",
     "socket/connect_job_params_factory.h",
     "socket/connection_attempts.h",
+    "socket/datagram_client_socket.cc",
     "socket/datagram_client_socket.h",
     "socket/datagram_server_socket.h",
     "socket/datagram_socket.h",

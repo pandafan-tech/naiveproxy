@@ -5,6 +5,8 @@
 #ifndef NET_SOCKET_DATAGRAM_CLIENT_SOCKET_H_
 #define NET_SOCKET_DATAGRAM_CLIENT_SOCKET_H_
 
+#include <stdint.h>
+
 #include <vector>
 
 #include "base/containers/span.h"
@@ -148,6 +150,16 @@ class NET_EXPORT_PRIVATE DatagramClientSocket : public DatagramSocket,
   // Unregister the underlying socket and its associated UDP payload that were
   // previously registered by RegisterQuicConnectionClosePayload
   virtual void UnregisterQuicConnectionClosePayload() {}
+
+  // Batched datagram writes (cronet-reality). SupportsWriteBatch() reports
+  // whether WriteBatch() sends several datagrams per system call on this
+  // connected socket. WriteBatch() never blocks and never completes
+  // asynchronously: it returns how many leading datagrams of |packets| the
+  // kernel accepted (0 when it would block or stopped early), or a net error
+  // when the first datagram failed. Callers send the remaining datagrams with
+  // Write(), which keeps the single-datagram blocking and error semantics.
+  virtual bool SupportsWriteBatch() const;
+  virtual int WriteBatch(base::span<const base::span<const uint8_t>> packets);
 };
 
 }  // namespace net

@@ -24,6 +24,7 @@ namespace net {
 
 namespace {
 
+
 enum NotReusableReason {
   NOT_REUSABLE_NULLPTR = 0,
   NOT_REUSABLE_TOO_SMALL = 1,
@@ -86,6 +87,46 @@ EcnCodePoint QuicheEcnToChromiumEcn(const quic::QuicEcnCodepoint codepoint) {
 }
 
 }  // namespace
+
+namespace {
+// The outermost ScopedFlushDeferral on this thread, if any. QUIC sessions,
+// readers and writers all live on the network thread.
+thread_local QuicChromiumPacketWriter::ScopedFlushDeferral*
+    g_current_flush_deferral = nullptr;
+}  // namespace
+
+QuicChromiumPacketWriter::ScopedFlushDeferral::ScopedFlushDeferral()
+    : outermost_(g_current_flush_deferral == nullptr) {
+  if (outermost_) {
+    g_current_flush_deferral = this;
+  }
+}
+
+QuicChromiumPacketWriter::ScopedFlushDeferral::~ScopedFlushDeferral() {
+  if (!outermost_) {
+    return;
+  }
+  g_current_flush_deferral = nullptr;
+  // FlushDeferred() may run delegate callbacks; take the list first.
+  std::vector<base::WeakPtr<QuicChromiumPacketWriter>> deferred;
+  deferred.swap(deferred_);
+  for (const auto& writer : deferred) {
+    if (writer) {
+      writer->FlushDeferred();
+    }
+  }
+}
+
+void QuicChromiumPacketWriter::FlushDeferred() {
+  flush_deferred_ = false;
+  if (!socket_ || !HasUnsentBatch() || IsWriteBlocked()) {
+    return;
+  }
+  quic::WriteResult result = SendBatch();
+  if (result.status == quic::WRITE_STATUS_ERROR && delegate_ != nullptr) {
+    delegate_->OnWriteError(result.error_code);
+  }
+}
 
 QuicChromiumPacketWriter::ReusableIOBuffer::ReusableIOBuffer(size_t capacity)
     : IOBufferWithSize(capacity), capacity_(capacity) {}
@@ -151,14 +192,121 @@ quic::WriteResult QuicChromiumPacketWriter::WritePacket(
     quic::PerPacketOptions* /*options*/,
     const quic::QuicPacketWriterParams& params) {
   CHECK(!IsWriteBlocked());
-  SetPacket(buffer, buf_len);
   EcnCodePoint new_ecn = QuicheEcnToChromiumEcn(params.ecn_codepoint);
   outgoing_ecn_history_ |= (1 << static_cast<uint8_t>(new_ecn));
+  if (IsBatchMode()) {
+    // A batch shares one TOS setting: send what is buffered before changing
+    // it, and send oversized packets on their own.
+    if (HasUnsentBatch() &&
+        (new_ecn != outgoing_ecn_ || buf_len > quic::kMaxOutgoingPacketSize)) {
+      quic::WriteResult flushed = SendBatch();
+      if (flushed.status != quic::WRITE_STATUS_OK) {
+        // This packet was not buffered; the connection keeps it.
+        if (quic::IsWriteBlockedStatus(flushed.status)) {
+          return quic::WriteResult(quic::WRITE_STATUS_BLOCKED, ERR_IO_PENDING);
+        }
+        return flushed;
+      }
+    }
+    if (new_ecn != outgoing_ecn_) {
+      socket_->SetTos(DSCP_NO_CHANGE, new_ecn);
+      outgoing_ecn_ = new_ecn;
+    }
+    if (buf_len <= quic::kMaxOutgoingPacketSize) {
+      if (batch_storage_.empty()) {
+        batch_storage_.reserve(kMaxBatchedPackets *
+                               quic::kMaxOutgoingPacketSize);
+      }
+      UNSAFE_TODO(batch_storage_.insert(batch_storage_.end(), buffer,
+                                        buffer + buf_len));
+      batch_lengths_.push_back(buf_len);
+      if (batch_lengths_.size() >= kMaxBatchedPackets) {
+        quic::WriteResult flushed = SendBatch();
+        if (quic::IsWriteBlockedStatus(flushed.status)) {
+          return quic::WriteResult(quic::WRITE_STATUS_BLOCKED_DATA_BUFFERED,
+                                   ERR_IO_PENDING);
+        }
+        return flushed;
+      }
+      // QuicConnection flushes at the end of each send burst; the posted
+      // task only guarantees that nothing stays buffered.
+      if (!flush_task_posted_) {
+        flush_task_posted_ = true;
+        base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+            FROM_HERE, base::BindOnce(&QuicChromiumPacketWriter::FlushFromTask,
+                                      weak_factory_.GetWeakPtr()));
+      }
+      return quic::WriteResult(quic::WRITE_STATUS_OK, 0);
+    }
+  }
+  SetPacket(buffer, buf_len);
   if (new_ecn != outgoing_ecn_) {
     socket_->SetTos(DSCP_NO_CHANGE, new_ecn);
     outgoing_ecn_ = new_ecn;
   }
   return WritePacketToSocketImpl();
+}
+
+void QuicChromiumPacketWriter::ClearBatch() {
+  batch_storage_.clear();
+  batch_lengths_.clear();
+  batch_next_ = 0;
+}
+
+quic::WriteResult QuicChromiumPacketWriter::SendBatch() {
+  CHECK(socket_);
+  std::vector<base::span<const uint8_t>> packets;
+  packets.reserve(batch_lengths_.size() - batch_next_);
+  size_t offset = 0;
+  for (size_t i = 0; i < batch_lengths_.size(); ++i) {
+    if (i >= batch_next_) {
+      packets.push_back(base::as_bytes(base::span(batch_storage_))
+                            .subspan(offset, batch_lengths_[i]));
+    }
+    offset += batch_lengths_[i];
+  }
+  const int rv = socket_->WriteBatch(packets);
+  if (rv > 0) {
+    batch_next_ += static_cast<size_t>(rv);
+  }
+  return WriteBatchRemainderSingly();
+}
+
+quic::WriteResult QuicChromiumPacketWriter::WriteBatchRemainderSingly() {
+  while (HasUnsentBatch()) {
+    size_t offset = 0;
+    for (size_t i = 0; i < batch_next_; ++i) {
+      offset += batch_lengths_[i];
+    }
+    const size_t length = batch_lengths_[batch_next_];
+    ++batch_next_;
+    SetPacket(UNSAFE_TODO(batch_storage_.data() + offset), length);
+    quic::WriteResult result = WritePacketToSocketImpl();
+    if (result.status == quic::WRITE_STATUS_OK) {
+      continue;
+    }
+    if (quic::IsWriteBlockedStatus(result.status)) {
+      // OnWriteComplete() resumes with the rest of the batch.
+      return quic::WriteResult(quic::WRITE_STATUS_BLOCKED, ERR_IO_PENDING);
+    }
+    // A write error: the rest of the batch is lost like any packet after a
+    // failed write; QUIC loss recovery retransmits its frames.
+    ClearBatch();
+    return result;
+  }
+  ClearBatch();
+  return quic::WriteResult(quic::WRITE_STATUS_OK, 0);
+}
+
+void QuicChromiumPacketWriter::FlushFromTask() {
+  flush_task_posted_ = false;
+  if (!socket_ || !HasUnsentBatch() || IsWriteBlocked()) {
+    return;
+  }
+  quic::WriteResult result = SendBatch();
+  if (result.status == quic::WRITE_STATUS_ERROR && delegate_ != nullptr) {
+    delegate_->OnWriteError(result.error_code);
+  }
 }
 
 void QuicChromiumPacketWriter::WritePacketToSocket(
@@ -262,9 +410,22 @@ void QuicChromiumPacketWriter::OnWriteComplete(int rv) {
     retry_count_ = 0;
   }
 
-  if (rv < 0)
+  if (rv < 0) {
+    ClearBatch();
     delegate_->OnWriteError(rv);
-  else if (!force_write_blocked_)
+    return;
+  }
+  if (HasUnsentBatch()) {
+    quic::WriteResult result = WriteBatchRemainderSingly();
+    if (quic::IsWriteBlockedStatus(result.status)) {
+      return;
+    }
+    if (result.status == quic::WRITE_STATUS_ERROR) {
+      delegate_->OnWriteError(result.error_code);
+      return;
+    }
+  }
+  if (!force_write_blocked_)
     delegate_->OnWriteUnblocked();
 }
 
@@ -296,7 +457,7 @@ bool QuicChromiumPacketWriter::SupportsReleaseTime() const {
 }
 
 bool QuicChromiumPacketWriter::IsBatchMode() const {
-  return false;
+  return socket_ && socket_->SupportsWriteBatch();
 }
 
 bool QuicChromiumPacketWriter::SupportsEcn() const {
@@ -310,12 +471,26 @@ quic::QuicPacketBuffer QuicChromiumPacketWriter::GetNextWriteLocation(
 }
 
 quic::WriteResult QuicChromiumPacketWriter::Flush() {
-  return quic::WriteResult(quic::WRITE_STATUS_OK, 0);
+  if (!socket_ || !HasUnsentBatch()) {
+    return quic::WriteResult(quic::WRITE_STATUS_OK, 0);
+  }
+  if (IsWriteBlocked()) {
+    return quic::WriteResult(quic::WRITE_STATUS_BLOCKED, ERR_IO_PENDING);
+  }
+  if (g_current_flush_deferral != nullptr) {
+    if (!flush_deferred_) {
+      flush_deferred_ = true;
+      g_current_flush_deferral->deferred_.push_back(weak_factory_.GetWeakPtr());
+    }
+    return quic::WriteResult(quic::WRITE_STATUS_OK, 0);
+  }
+  return SendBatch();
 }
 
 bool QuicChromiumPacketWriter::OnSocketClosed(DatagramClientSocket* socket) {
   if (socket_ == socket) {
     socket_ = nullptr;
+    ClearBatch();
     return true;
   }
   return false;

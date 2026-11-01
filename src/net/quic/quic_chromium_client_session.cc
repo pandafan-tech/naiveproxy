@@ -2294,6 +2294,11 @@ void QuicChromiumClientSession::OnConnectionClosed(
 
   UnregisterQuicConnectionClosePayload();
 
+  // Send packets a read burst deferred (the CONNECTION_CLOSE among them)
+  // before the sockets close.
+  static_cast<QuicChromiumPacketWriter*>(connection()->writer())
+      ->FlushDeferred();
+
   bool socket_found_in_writer = false;
   for (auto& packet_reader : packet_readers_) {
     packet_reader->CloseSocket();

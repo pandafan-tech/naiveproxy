@@ -7,6 +7,8 @@
 
 #include <stddef.h>
 
+#include <vector>
+
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
@@ -109,6 +111,28 @@ class NET_EXPORT_PRIVATE QuicChromiumPacketWriter
 
   void OnWriteComplete(int rv);
 
+  // While a ScopedFlushDeferral exists on this thread, Flush() in batch mode
+  // only records that a flush is due; the outermost scope flushes every
+  // recorded writer when it ends. QuicChromiumPacketReader holds one across a
+  // burst of reads, so packets released by several incoming ACKs leave in one
+  // batched system call instead of one call per ACK (cronet-reality).
+  class NET_EXPORT_PRIVATE ScopedFlushDeferral {
+   public:
+    ScopedFlushDeferral();
+    ScopedFlushDeferral(const ScopedFlushDeferral&) = delete;
+    ScopedFlushDeferral& operator=(const ScopedFlushDeferral&) = delete;
+    ~ScopedFlushDeferral();
+
+   private:
+    friend class QuicChromiumPacketWriter;
+    bool outermost_;
+    std::vector<base::WeakPtr<QuicChromiumPacketWriter>> deferred_;
+  };
+
+  // Sends a deferred batch now. The session calls it before it closes the
+  // socket so a CONNECTION_CLOSE written during a read burst still leaves.
+  void FlushDeferred();
+
   // If the writer has enqueued a task to retry, OnSocketClosed() must be called
   // when the socket is closed to avoid using an invalid socket.
   bool OnSocketClosed(DatagramClientSocket* socket);
@@ -128,6 +152,24 @@ class NET_EXPORT_PRIVATE QuicChromiumPacketWriter
   bool MaybeRetryAfterWriteError(int rv);
   void RetryPacketAfterNoBuffers();
   quic::WriteResult WritePacketToSocketImpl();
+
+  // Batch mode (cronet-reality): when the socket supports WriteBatch(),
+  // WritePacket() copies packets into |batch_storage_| and Flush() sends them
+  // with one system call per kMaxBatchedPackets. Datagrams the batch call did
+  // not send go through WritePacketToSocketImpl() one by one, so blocking,
+  // ENOBUFS retry, EMSGSIZE and write-error handling stay as before.
+  static constexpr size_t kMaxBatchedPackets = 16;
+  bool HasUnsentBatch() const { return batch_next_ < batch_lengths_.size(); }
+  void ClearBatch();
+  quic::WriteResult SendBatch();
+  quic::WriteResult WriteBatchRemainderSingly();
+  void FlushFromTask();
+  std::vector<char> batch_storage_;
+  std::vector<size_t> batch_lengths_;
+  size_t batch_next_ = 0;
+  bool flush_task_posted_ = false;
+  bool flush_deferred_ = false;
+
   raw_ptr<DatagramClientSocket> socket_;  // Unowned.
   raw_ptr<Delegate> delegate_ = nullptr;  // Unowned.
   // Reused for every packet write for the lifetime of the writer.  Is

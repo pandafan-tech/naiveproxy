@@ -19,9 +19,36 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
+#include <errno.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#include <algorithm>
+#include <array>
+
+#include "base/posix/eintr_wrapper.h"
+#include "net/base/net_errors.h"
+
+#if BUILDFLAG(IS_APPLE)
+// XNU's batched send (bsd/sys/socket_private.h), exported by libSystem since
+// macOS 10.11 / iOS 9. msghdr_x is struct msghdr followed by msg_datalen.
+struct msghdr_x {
+  void* msg_name;
+  socklen_t msg_namelen;
+  struct iovec* msg_iov;
+  int msg_iovlen;
+  void* msg_control;
+  socklen_t msg_controllen;
+  int msg_flags;
+  size_t msg_datalen;
+};
+extern "C" ssize_t sendmsg_x(int s,
+                             const struct msghdr_x* msgp,
+                             u_int cnt,
+                             int flags);
+#endif
 #endif
 #include "base/numerics/byte_conversions.h"
 #include "net/base/io_buffer.h"
@@ -244,6 +271,74 @@ class ConnectedDatagramClientSocket : public DatagramClientSocket {
   void RegisterQuicConnectionClosePayload(
       base::span<uint8_t> payload) override {}
   void UnregisterQuicConnectionClosePayload() override {}
+
+  bool SupportsWriteBatch() const override {
+#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) || \
+    BUILDFLAG(IS_CHROMEOS)
+    return connected_ && socket_ && !is_unix_socket_ && !is_framed_stream_;
+#else
+    return false;
+#endif
+  }
+
+  // Sends datagrams with sendmsg_x (Apple) or sendmmsg (Linux/Android). The
+  // kernel stops at the first datagram it cannot send and reports how many
+  // it sent; the caller sends the rest with Write(), which surfaces the
+  // reason (would-block, ENOBUFS, EMSGSIZE, ...) with its usual handling.
+  int WriteBatch(
+      base::span<const base::span<const uint8_t>> packets) override {
+#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) || \
+    BUILDFLAG(IS_CHROMEOS)
+    if (!SupportsWriteBatch()) {
+      return ERR_NOT_IMPLEMENTED;
+    }
+    constexpr size_t kMaxPerCall = 16;
+    const int fd = socket_->socket_fd();
+    size_t sent = 0;
+    while (sent < packets.size()) {
+      const size_t count = std::min(kMaxPerCall, packets.size() - sent);
+      std::array<struct iovec, kMaxPerCall> iov = {};
+#if BUILDFLAG(IS_APPLE)
+      std::array<struct msghdr_x, kMaxPerCall> hdrs = {};
+#else
+      std::array<struct mmsghdr, kMaxPerCall> hdrs = {};
+#endif
+      for (size_t i = 0; i < count; ++i) {
+        const base::span<const uint8_t> packet = packets[sent + i];
+        iov[i].iov_base = const_cast<uint8_t*>(packet.data());
+        iov[i].iov_len = packet.size();
+#if BUILDFLAG(IS_APPLE)
+        hdrs[i].msg_iov = &iov[i];
+        hdrs[i].msg_iovlen = 1;
+#else
+        hdrs[i].msg_hdr.msg_iov = &iov[i];
+        hdrs[i].msg_hdr.msg_iovlen = 1;
+#endif
+      }
+#if BUILDFLAG(IS_APPLE)
+      const ssize_t n = HANDLE_EINTR(
+          sendmsg_x(fd, hdrs.data(), static_cast<u_int>(count), 0));
+#else
+      const ssize_t n = HANDLE_EINTR(
+          sendmmsg(fd, hdrs.data(), static_cast<unsigned int>(count), 0));
+#endif
+      if (n < 0) {
+        const int os_error = errno;
+        if (sent == 0 && os_error != EAGAIN && os_error != EWOULDBLOCK) {
+          return MapSystemError(os_error);
+        }
+        break;
+      }
+      sent += static_cast<size_t>(n);
+      if (static_cast<size_t>(n) < count) {
+        break;
+      }
+    }
+    return static_cast<int>(sent);
+#else
+    return ERR_NOT_IMPLEMENTED;
+#endif
+  }
 
  private:
   enum ReadState {

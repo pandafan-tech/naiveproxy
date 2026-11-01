@@ -4,6 +4,8 @@
 
 #include "net/quic/quic_chromium_packet_reader.h"
 
+#include "net/quic/quic_chromium_packet_writer.h"
+
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/metrics/histogram_macros.h"
@@ -67,6 +69,8 @@ void QuicChromiumPacketReader::StartReading() {
     return;
   }
 
+  // Batch the packets that this burst of reads releases (cronet-reality).
+  QuicChromiumPacketWriter::ScopedFlushDeferral flush_deferral;
   for (;;) {
 
     if (num_packets_read_ == 0)
@@ -182,6 +186,7 @@ bool QuicChromiumPacketReader::ShouldYield() {
 }
 
 void QuicChromiumPacketReader::OnReadComplete(int result) {
+  QuicChromiumPacketWriter::ScopedFlushDeferral flush_deferral;
   if (ProcessReadResult(result)) {
     StartReading();
   }
