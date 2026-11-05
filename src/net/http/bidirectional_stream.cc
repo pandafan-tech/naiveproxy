@@ -201,6 +201,19 @@ void BidirectionalStream::PopulateNetErrorDetails(NetErrorDetails* details) {
     stream_impl_->PopulateNetErrorDetails(details);
 }
 
+// cronet-reality: HTTP/3 datagram passthrough to the impl layer.
+int BidirectionalStream::SendHttp3Datagram(base::span<const uint8_t> payload) {
+  if (!stream_impl_) {
+    return ERR_FAILED;
+  }
+  return stream_impl_->SendHttp3Datagram(payload);
+}
+
+void BidirectionalStream::OnHttp3DatagramReceived(
+    base::span<const uint8_t> payload) {
+  delegate_->OnHttp3DatagramReceived(payload);
+}
+
 void BidirectionalStream::StartRequest() {
   DCHECK(!stream_request_);
   HttpRequestInfo http_request_info;

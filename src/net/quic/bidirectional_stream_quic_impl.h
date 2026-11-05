@@ -18,6 +18,7 @@
 #include "net/quic/quic_chromium_client_session.h"
 #include "net/quic/quic_chromium_client_stream.h"
 #include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
+#include "net/third_party/quiche/src/quiche/quic/core/http/quic_spdy_stream.h"
 
 namespace base {
 class OneShotTimer;
@@ -29,7 +30,8 @@ struct BidirectionalStreamRequestInfo;
 class IOBuffer;
 
 class NET_EXPORT_PRIVATE BidirectionalStreamQuicImpl
-    : public BidirectionalStreamImpl {
+    : public BidirectionalStreamImpl,
+      public quic::QuicSpdyStream::Http3DatagramVisitor {
  public:
   explicit BidirectionalStreamQuicImpl(
       std::unique_ptr<QuicChromiumClientSession::Handle> session);
@@ -57,6 +59,17 @@ class NET_EXPORT_PRIVATE BidirectionalStreamQuicImpl
   int64_t GetTotalSentBytes() const override;
   bool GetLoadTimingInfo(LoadTimingInfo* load_timing_info) const override;
   void PopulateNetErrorDetails(NetErrorDetails* details) override;
+
+  // cronet-reality: CONNECT-UDP payload send. Datagrams are received
+  // through the visitor below, registered when a connect-udp stream gets a
+  // 2xx response.
+  int SendHttp3Datagram(base::span<const uint8_t> payload) override;
+
+  // quic::QuicSpdyStream::Http3DatagramVisitor:
+  void OnHttp3Datagram(quic::QuicStreamId stream_id,
+                       absl::string_view payload) override;
+  void OnUnknownCapsule(quic::QuicStreamId stream_id,
+                        const quiche::UnknownCapsule& capsule) override {}
 
  private:
   int WriteHeaders();
@@ -116,6 +129,10 @@ class NET_EXPORT_PRIVATE BidirectionalStreamQuicImpl
   // After |stream_| has been closed, this keeps track of the total number of
   // bytes sent over the network for |stream_| while it was open.
   int64_t closed_stream_sent_bytes_ = 0;
+  // cronet-reality: whether this impl is the datagram visitor of |stream_|,
+  // so teardown can unregister it.
+  bool datagram_visitor_registered_ = false;
+
   // True if the stream is the first stream negotiated on the session. Set when
   // the stream was closed. If |stream_| is failed to be created, this takes on
   // the default value of false.

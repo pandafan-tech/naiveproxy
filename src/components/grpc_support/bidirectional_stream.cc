@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -162,6 +163,63 @@ void BidirectionalStream::Cancel() {
       base::BindOnce(&BidirectionalStream::CancelOnNetworkThread, weak_this_));
 }
 
+// cronet-reality: extended-CONNECT + datagram methods.
+int BidirectionalStream::StartExtendedConnect(
+    const char* url,
+    int priority,
+    const char* ext_protocol,
+    const net::HttpRequestHeaders& headers) {
+  std::unique_ptr<net::BidirectionalStreamRequestInfo> request_info(
+      new net::BidirectionalStreamRequestInfo());
+  request_info->url = GURL(url);
+  request_info->priority = static_cast<net::RequestPriority>(priority);
+  request_info->method = "CONNECT";
+  request_info->extra_headers = headers;
+  request_info->end_stream_on_headers = false;
+  request_info->extended_connect_protocol = ext_protocol ? ext_protocol : "";
+  write_end_of_stream_ = false;
+  PostToNetworkThread(FROM_HERE,
+                      base::BindOnce(&BidirectionalStream::StartOnNetworkThread,
+                                     weak_this_, std::move(request_info)));
+  return 0;
+}
+
+int BidirectionalStream::SendDatagram(const char* data, int size) {
+  if (size < 0) {
+    return net::ERR_INVALID_ARGUMENT;
+  }
+  if (size > 0 && data == nullptr) {
+    return net::ERR_INVALID_ARGUMENT;
+  }
+  // Copy and post: the caller's buffer is free on return and the caller's
+  // thread never waits for the network thread. A later Cancel() is posted
+  // to the same sequence, so it runs after this send.
+  std::vector<uint8_t> payload;
+  if (size > 0) {
+    std::string_view payload_view(data, static_cast<size_t>(size));
+    payload.assign(payload_view.begin(), payload_view.end());
+  }
+  PostToNetworkThread(
+      FROM_HERE,
+      base::BindOnce(&BidirectionalStream::SendDatagramOnNetworkThread,
+                     weak_this_, std::move(payload)));
+  return 0;
+}
+
+void BidirectionalStream::SendDatagramOnNetworkThread(
+    std::vector<uint8_t> payload) {
+  DCHECK(IsOnNetworkThread());
+  if (!bidi_stream_) {
+    return;
+  }
+  // A dropped datagram is UDP loss; the stream's failure, if any, reaches
+  // the delegate through OnFailed.
+  int result = bidi_stream_->SendHttp3Datagram(base::span(payload));
+  if (result != net::OK) {
+    DVLOG(1) << "CONNECT-UDP datagram not sent: " << net::ErrorToString(result);
+  }
+}
+
 void BidirectionalStream::OnStreamReady(bool request_headers_sent) {
   DCHECK(IsOnNetworkThread());
   DCHECK_EQ(STARTED, write_state_);
@@ -262,6 +320,17 @@ void BidirectionalStream::OnTrailersReceived(
   if (!bidi_stream_)
     return;
   delegate_->OnTrailersReceived(response_trailers);
+}
+
+void BidirectionalStream::OnHttp3DatagramReceived(
+    base::span<const uint8_t> payload) {
+  DCHECK(IsOnNetworkThread());
+  if (!delegate_) {
+    return;
+  }
+  delegate_->OnDatagramReceived(
+      reinterpret_cast<const char*>(payload.data()),
+      static_cast<int>(payload.size()));
 }
 
 void BidirectionalStream::OnFailed(int error) {

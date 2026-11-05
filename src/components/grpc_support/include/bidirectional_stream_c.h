@@ -120,6 +120,15 @@ typedef struct bidirectional_stream_callback {
    * methods will be invoked.
    */
   void (*on_canceled)(bidirectional_stream* stream);
+
+  /* cronet-reality: invoked when an HTTP/3 datagram is received on this
+   * stream (RFC 9297 / RFC 9298). |data| is the raw payload AFTER the
+   * RFC 9298 context-id has been stripped (the QUIC layer only surfaces
+   * context-id=0 datagrams; others are dropped). Optional: leave NULL if
+   * datagrams aren't needed. Valid only on h3/connect-udp streams. */
+  void (*on_datagram_received)(bidirectional_stream* stream,
+                               const char* data,
+                               int size);
 } bidirectional_stream_callback;
 
 /* Creates a new stream object that uses |engine| and |callback|. All stream
@@ -188,6 +197,34 @@ int bidirectional_stream_start(bidirectional_stream* stream,
                                const char* method,
                                const bidirectional_stream_header_array* headers,
                                bool end_of_stream);
+
+/* cronet-reality: starts the stream as an HTTP extended CONNECT request
+ * (RFC 8441 for HTTP/2, RFC 9298 for HTTP/3). |ext_protocol| is the
+ * :protocol pseudo-header value. Common: "websocket" (h2 or h3),
+ * "connect-udp" (h3 only). method is forced to "CONNECT" internally;
+ * end_of_stream is forced false. Returns 0 on success.
+ */
+GRPC_SUPPORT_EXPORT
+int bidirectional_stream_start_connect(
+    bidirectional_stream* stream,
+    const char* url,
+    int priority,
+    const char* ext_protocol,
+    const bidirectional_stream_header_array* headers);
+
+/* cronet-reality: queue one HTTP/3 datagram (RFC 9297) and return without
+ * waiting for the network thread. For CONNECT-UDP |data| is the UDP payload;
+ * the QUIC layer adds the RFC 9298 context-id 0. Returns 0 when queued or a
+ * negative net error for an invalid argument. A datagram the network thread
+ * cannot send is dropped, as UDP is. Valid only after
+ * on_response_headers_received fires with a 2xx status on an h3
+ * "connect-udp" stream. Such a stream delivers received datagrams to
+ * on_datagram_received.
+ */
+GRPC_SUPPORT_EXPORT
+int bidirectional_stream_send_datagram(bidirectional_stream* stream,
+                                       const char* data,
+                                       int size);
 
 /* Reads response data into |buffer| of |capacity| length. Must only be called
  * at most once in response to each invocation of the
